@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+takes/
+*.glb
+*.ply
+.DS_Store

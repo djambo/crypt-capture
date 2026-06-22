@@ -1,0 +1,6 @@
+# The spine (protocol, sim node, recorder, demo) uses only the Python stdlib.
+# Optional / future module dependencies:
+#   numpy            # faster synthetic depth / array ops
+#   pyk4a            # real Azure Kinect node
+#   torch torchvision  # per-view matting (RVM / BGMv2)
+#   open3d           # calibration (ICP) + TSDF fusion + meshing
