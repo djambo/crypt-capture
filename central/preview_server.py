@@ -61,17 +61,25 @@ def load_intrinsics(calib_path, w, h):
     return default_intrinsics(w, h)
 
 
-def unproject(depth_u16, w, h, fx, fy, cx, cy, stride, color_grid=None):
+def unproject(depth_u16, w, h, fx, fy, cx, cy, stride, node_stride=1,
+              color_grid=None):
     """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels.
 
-    xyz is (N,3) float32. rgb is (N,3) uint8 if a color_grid is supplied (the
-    per-pixel color image aligned to the depth grid), else None.
+    The grid may already be downsampled on the node (`node_stride`): grid pixel
+    (u,v) corresponds to original pixel (u*node_stride, v*node_stride), so we
+    scale coordinates back to the full-resolution frame before applying the
+    (full-res) intrinsics. `stride` is an additional relay-side downsample.
+
+    xyz is (N,3) float32. rgb is (N,3) uint8 if a color_grid is supplied.
     """
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     us = np.arange(0, w, stride)
     vs = np.arange(0, h, stride)
     sub = d[vs][:, us]
-    uu, vv = np.meshgrid(us.astype(np.float32), vs.astype(np.float32))
+    # original (full-res) pixel coordinates for the intrinsics
+    ou = (us * node_stride).astype(np.float32)
+    ov = (vs * node_stride).astype(np.float32)
+    uu, vv = np.meshgrid(ou, ov)
     m = sub != 0
     if not m.any():
         return np.empty((0, 3), dtype=np.float32), (
@@ -221,13 +229,17 @@ class PreviewServer:
                 if not frame.depth_rvl:
                     continue
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
-                fx, fy, cx, cy = self._intrinsics(frame.width, frame.height)
+                # intrinsics are for the full-res frame; the node may have
+                # downsampled by frame.stride, so derive the original dimensions.
+                ns = frame.stride or 1
+                fx, fy, cx, cy = self._intrinsics(frame.width * ns,
+                                                  frame.height * ns)
                 cgrid = None
                 if frame.color_aligned and frame.color:
                     cgrid = aligned_color_grid(frame.color, depth,
                                                frame.width, frame.height)
                 xyz, rgb = unproject(depth, frame.width, frame.height,
-                                     fx, fy, cx, cy, self.stride, cgrid)
+                                     fx, fy, cx, cy, self.stride, ns, cgrid)
                 if xyz.shape[0] > self.max_points:
                     idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
                     xyz = xyz[idx]
@@ -268,8 +280,9 @@ def main():
     ap.add_argument("--ws-host", default="0.0.0.0")
     ap.add_argument("--ws-port", type=int, default=8080)
     ap.add_argument("--calib", help="calib.json (fx,fy,cx,cy); else FOV estimate")
-    ap.add_argument("--stride", type=int, default=2,
-                    help="pixel stride for downsampling the cloud (1 = full res)")
+    ap.add_argument("--stride", type=int, default=1,
+                    help="ADDITIONAL relay-side downsample on top of the node's "
+                         "--preview-stride (1 = none; total = node*relay)")
     ap.add_argument("--max-points", type=int, default=200000)
     args = ap.parse_args()
     server = PreviewServer(calib=args.calib, stride=args.stride,

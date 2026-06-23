@@ -9,14 +9,16 @@ sync), which is how the recorder groups the N sensors back together.
 Header (little-endian, 36 bytes):
     magic        4s   b"CVF1"
     sensor_id    B    0..N-1
-    flags        B    bit0 = depth is RVL-compressed
-    reserved     H
+    flags        B    bit0 = depth is RVL-compressed; bit1 = color is aligned RGB
+    stride       H    preview downsample factor applied on the node (1 = full res);
+                      depth/color are width*height at this stride, and pixel (u,v)
+                      maps to original (u*stride, v*stride) for unprojection
     frame_id     Q    hardware-synced frame index
     timestamp_ns Q    node capture timestamp (ns)
-    width        H
-    height       H
+    width        H    (possibly strided) depth width
+    height       H    (possibly strided) depth height
     depth_len    I    bytes of depth payload (RVL or raw u16)
-    color_len    I    bytes of color payload (e.g. JPEG/H.26x keyframe)
+    color_len    I    bytes of color payload
 Payload: depth_bytes ++ color_bytes
 """
 
@@ -37,26 +39,27 @@ class Frame(object):
     imports on the Nano's Python 3.6."""
 
     __slots__ = ("sensor_id", "frame_id", "timestamp_ns", "width", "height",
-                 "depth", "color", "depth_rvl", "color_aligned")
+                 "depth", "color", "depth_rvl", "color_aligned", "stride")
 
     def __init__(self, sensor_id, frame_id, timestamp_ns, width, height,
-                 depth, color, depth_rvl=True, color_aligned=False):
+                 depth, color, depth_rvl=True, color_aligned=False, stride=1):
         self.sensor_id = sensor_id        # 0..N-1
         self.frame_id = frame_id          # hardware-synced frame index
         self.timestamp_ns = timestamp_ns  # node capture timestamp (ns)
-        self.width = width
-        self.height = height
+        self.width = width                # (strided) depth width
+        self.height = height              # (strided) depth height
         self.depth = depth                # RVL-compressed (or raw u16)
         self.color = color                # opaque encoded color payload
         self.depth_rvl = depth_rvl
         self.color_aligned = color_aligned  # color is depth-aligned RGB (see flag)
+        self.stride = stride              # node-side preview downsample (1 = full)
 
     def encode(self):
         flags = FLAG_DEPTH_RVL if self.depth_rvl else 0
         if self.color_aligned:
             flags |= FLAG_COLOR_ALIGNED
         header = _HEADER.pack(
-            MAGIC, self.sensor_id, flags, 0,
+            MAGIC, self.sensor_id, flags, self.stride,
             self.frame_id, self.timestamp_ns,
             self.width, self.height, len(self.depth), len(self.color),
         )
@@ -81,7 +84,7 @@ def read_frame(sock: socket.socket):
     header = _recv_exactly(sock, HEADER_SIZE)
     if not header:
         return None
-    magic, sensor_id, flags, _res, frame_id, ts, w, h, dlen, clen = _HEADER.unpack(header)
+    magic, sensor_id, flags, stride, frame_id, ts, w, h, dlen, clen = _HEADER.unpack(header)
     if magic != MAGIC:
         raise ValueError("bad magic %r — stream desynced" % (magic,))
     depth = _recv_exactly(sock, dlen) if dlen else b""
@@ -93,4 +96,5 @@ def read_frame(sock: socket.socket):
         width=w, height=h, depth=depth, color=color,
         depth_rvl=bool(flags & FLAG_DEPTH_RVL),
         color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
+        stride=stride or 1,          # 0 (old/unset) means full resolution
     )

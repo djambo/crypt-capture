@@ -55,11 +55,12 @@ def _build_config(sync, sub_delay_us):
 
 
 def run(host, port, sensor_id, frames, min_depth, max_depth,
-        sync="standalone", sub_delay_us=0):
+        sync="standalone", sub_delay_us=0, preview_stride=1, profile=False):
     k4a = PyK4A(_build_config(sync, sub_delay_us))
     k4a.start()
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    s = max(1, preview_stride)
 
     # Live-tunable depth mask, adjustable via the control channel. Plain dict +
     # GIL = safe for these scalar reads/writes between the capture loop and the
@@ -79,27 +80,33 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
 
     sent = 0
     t0 = time.time()
+    acc = {"cap": 0.0, "depth": 0.0, "color": 0.0, "send": 0.0}  # profiling
     try:
         while frames <= 0 or sent < frames:
+            tc = time.time()
             cap = k4a.get_capture()
             if cap.depth is None:
                 continue
             depth = cap.depth                       # uint16 (H, W), millimetres
-            h, w = depth.shape
+            td = time.time()
 
             # Cheap working-range mask: keep [min,max] mm, zero everything else.
             # This isolates the subject from far walls/floor and gives RVL its
             # long zero-runs. Replace with per-view AI matting for clean edges.
             masked = np.where((depth >= rng["min"]) & (depth <= rng["max"]),
                               depth, 0).astype(np.uint16)
-            # Pass the array straight to RVL — its NumPy fast path consumes it
-            # directly (no per-pixel .tolist() conversion on the hot path).
+            # Preview downsample: stride on the node so RVL+color+wire all shrink
+            # ~stride^2. The relay reverses it for metrically-correct unprojection
+            # (frame.stride). Recording (later) keeps full res from `depth`.
+            if s > 1:
+                masked = masked[::s, ::s]
+            h, w = masked.shape
             comp = rvl.compress(masked.ravel())
+            tz = time.time()
 
             # Depth-aligned color: warp the color image into the depth camera's
-            # geometry (640x576), then keep RGB for the foreground pixels only,
-            # in the SAME row-major order as the non-zero depth pixels. The relay
-            # pairs them back up 1:1. (transformed_color needs BGRA, not MJPG.)
+            # geometry, then keep RGB for the foreground pixels only, in the SAME
+            # row-major order as the non-zero depth pixels (relay re-pairs 1:1).
             color = b""
             color_aligned = False
             try:
@@ -107,22 +114,33 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             except Exception:
                 tcolor = None
             if tcolor is not None:
-                valid = masked != 0
+                if s > 1:
+                    tcolor = tcolor[::s, ::s]
                 rgb = tcolor[..., 2::-1]                  # BGRA -> RGB
-                color = np.ascontiguousarray(rgb[valid]).tobytes()
+                color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
                 color_aligned = True
+            tcol = time.time()
 
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
                 timestamp_ns=int(time.time() * 1e9), width=w, height=h,
                 depth=comp, color=color, depth_rvl=True,
-                color_aligned=color_aligned,
+                color_aligned=color_aligned, stride=s,
             )
             sock.sendall(frame.encode())
+            ts = time.time()
+
+            acc["cap"] += td - tc; acc["depth"] += tz - td
+            acc["color"] += tcol - tz; acc["send"] += ts - tcol
             sent += 1
             if sent % 30 == 0:
                 fps = sent / (time.time() - t0)
-                print("sensor %d: %d frames (%.1f fps)" % (sensor_id, sent, fps))
+                msg = "sensor %d: %d frames (%.1f fps)" % (sensor_id, sent, fps)
+                if profile:
+                    msg += "  [cap %.0f depth %.0f color %.0f send %.0f ms/f]" % (
+                        acc["cap"] / sent * 1000, acc["depth"] / sent * 1000,
+                        acc["color"] / sent * 1000, acc["send"] / sent * 1000)
+                print(msg)
     finally:
         try:
             sock.shutdown(socket.SHUT_RDWR)   # wake the control reader + send FIN
@@ -146,9 +164,15 @@ def main():
                     default="standalone")
     ap.add_argument("--sub-delay-us", type=int, default=0,
                     help="subordinate delay off master (stagger IR; e.g. 160*index)")
+    ap.add_argument("--preview-stride", type=int, default=1,
+                    help="downsample the streamed cloud by this factor on the node "
+                         "(2 = quarter the points; recommended for live preview)")
+    ap.add_argument("--profile", action="store_true",
+                    help="print per-stage timing (cap/depth/color/send)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
-        args.min_depth, args.max_depth, args.sync, args.sub_delay_us)
+        args.min_depth, args.max_depth, args.sync, args.sub_delay_us,
+        args.preview_stride, args.profile)
 
 
 if __name__ == "__main__":

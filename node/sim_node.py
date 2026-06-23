@@ -29,13 +29,19 @@ from protocol.frame import Frame
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 
 
-def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535):
+def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1):
     """A moving elliptical blob of smooth valid depth on a zero background, plus
     a depth-aligned RGB payload (one triple per valid pixel, row-major) so the
     color path is exercisable without hardware. Pixels outside [dmin,dmax] mm are
-    masked out — mirroring the real node so the live depth-threshold control is
-    testable without hardware."""
-    depth = array("H", bytes(2 * width * height))
+    masked out (mirrors the real node's live depth control). When stride>1 the
+    grid is generated directly at the downsampled resolution; blob geometry still
+    uses original pixel coords so the relay reconstructs the same cloud.
+
+    Returns (depth_array, color_bytes, grid_w, grid_h)."""
+    xs = list(range(0, width, stride))
+    ys = list(range(0, height, stride))
+    gw, gh = len(xs), len(ys)
+    depth = array("H", bytes(2 * gw * gh))
     color = bytearray()
     phase = frame_id * 0.1
     cx = width / 2 + math.sin(phase) * width * 0.12
@@ -43,26 +49,28 @@ def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535):
     base = 1100 + sensor_id * 40  # each sensor sees the subject at a slight offset
     jit = random.Random(frame_id * 131 + sensor_id)
     rx, ry = width * 0.25, height * 0.34
-    for y in range(height):
-        for x in range(width):
+    for gy, y in enumerate(ys):
+        for gx, x in enumerate(xs):
             nx, ny = (x - cx) / rx, (y - cy) / ry
             r2 = nx * nx + ny * ny
             if r2 < 1.0:
                 z = base + int(260 * math.sqrt(r2)) + jit.randint(0, 3)
                 if z < dmin or z > dmax:           # depth-range mask
                     continue
-                depth[y * width + x] = z
+                depth[gy * gw + gx] = z
                 # simple gradient so the cloud isn't a flat color
                 color += bytes((int(255 * x / width),
                                 int(255 * y / height),
                                 int(255 * (1.0 - min(1.0, r2)))))
-    return depth, bytes(color)
+    return depth, bytes(color), gw, gh
 
 
-def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
+def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
+        preview_stride=1):
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     period = 1.0 / fps
+    s = max(1, preview_stride)
 
     rng = {"min": 0, "max": 65535}             # live-tunable via control channel
 
@@ -80,13 +88,14 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
     sent = 0
     try:
         while frames <= 0 or sent < frames:   # frames <= 0 => until Ctrl-C
-            depth, color = synth_frame(width, height, sent, sensor_id,
-                                       rng["min"], rng["max"])
+            depth, color, gw, gh = synth_frame(width, height, sent, sensor_id,
+                                               rng["min"], rng["max"], s)
             comp = rvl.compress(depth)
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
-                timestamp_ns=int(time.time() * 1e9), width=width, height=height,
+                timestamp_ns=int(time.time() * 1e9), width=gw, height=gh,
                 depth=comp, color=color, depth_rvl=True, color_aligned=True,
+                stride=s,
             )
             sock.sendall(frame.encode())
             sent += 1
@@ -109,8 +118,11 @@ def main():
     ap.add_argument("--sensor", type=int, default=0, help="sensor_id 0..N-1")
     ap.add_argument("--frames", type=int, default=30)
     ap.add_argument("--fps", type=float, default=30.0)
+    ap.add_argument("--preview-stride", type=int, default=1,
+                    help="downsample the streamed cloud by this factor on the node")
     args = ap.parse_args()
-    n = run(args.host, args.port, args.sensor, args.frames, args.fps)
+    n = run(args.host, args.port, args.sensor, args.frames, args.fps,
+            preview_stride=args.preview_stride)
     print("sensor %d: streamed %d frames" % (args.sensor, n))
 
 

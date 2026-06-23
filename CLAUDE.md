@@ -114,6 +114,14 @@ Two repos:
   Verified end-to-end (sim cloud dropped 24.6k→3.6k pts on `set_depth max=1200`).
   `arm/record/stop` will reuse this channel (M3). Node `run()` now `shutdown()`s
   the socket before close so the reader thread wakes cleanly.
+- ✅ **Perf/quality pass (Nano-era):** the streamed cloud was always downsampled
+  at the relay (`--stride`); that now moves to the **node** (`--preview-stride`,
+  carried in a new frame-header `stride` field) so RVL + color + wire all shrink
+  ~stride² while the **output cloud is bit-identical** (verified). Relay
+  unprojects stride-aware with **full-res intrinsics** (use `--calib`; relay
+  default `--stride` is now 1). `kinect_node --profile` prints per-stage ms
+  (cap/depth/color/send) to find the real bottleneck. Recording stays full-res
+  (node default stride 1). Next levers: thread-pipeline the node; C/Cython RVL.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -198,10 +206,13 @@ python3 scripts/run_demo.py --sensors 4 --frames 15
 python3 -m tests.test_rvl
 
 # Live preview, no hardware/browser (3 terminals): relay, sim node, headless client:
-python3 -m central.preview_server --stride 2
-python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 300
+python3 -m central.preview_server                     # downsample now on the node
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --preview-stride 2
 python3 -m scripts.preview_client --frames 30
 # (real browser viewer = the `crypt` repo; speaks docs/preview_protocol.md)
+# Real cam, faster + metric: add --preview-stride 2 to kinect_node, --calib to the relay:
+#   python3 -m node.kinect_node --host LAPTOP --port 9000 --sensor 0 --frames 0 --preview-stride 2 --profile
+#   python3 -m central.preview_server --calib takes/real1/calib.json
 
 # Live control (tune the depth mask on all nodes without a browser):
 python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
