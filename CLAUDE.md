@@ -3,6 +3,17 @@
 > This file is auto-loaded by Claude Code. It distills a long design+build
 > session so any new session can continue without re-deriving everything.
 
+> **⚠️ KEEP THIS FILE CURRENT (instruction to Claude).** This is a living
+> document — it is only useful if it stays accurate. Whenever a session changes
+> something that future-you would need to know, **update this file as part of
+> that same work, before ending the turn.** That includes: a decision made or
+> reversed; a phase/status changing (e.g. a roadmap item completed); the repo
+> layout, run commands, or architecture changing; a new environment gotcha
+> discovered; or an open item resolved. Prefer editing the relevant section over
+> appending. If a decision here is contradicted by newer reality, fix it (don't
+> leave both). Keep it concise — distill, don't dump. A stale CLAUDE.md is worse
+> than none, so treat updating it as part of "done," not an afterthought.
+
 ## What this project is
 
 A pipeline + web app for a **library of short volumetric video clips** of a
