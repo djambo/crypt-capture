@@ -44,7 +44,8 @@ def _build_config(sync, sub_delay_us):
     }[sync]
     return Config(
         color_resolution=ColorResolution.RES_720P,
-        color_format=ImageFormat.COLOR_MJPG,        # sensor gives JPEG directly
+        color_format=ImageFormat.COLOR_BGRA32,      # raw pixels: needed to warp
+                                                    # color into the depth grid
         depth_mode=DepthMode.NFOV_UNBINNED,         # 640x576 depth grid
         camera_fps=FPS.FPS_30,
         synchronized_images_only=True,
@@ -79,12 +80,27 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             # directly (no per-pixel .tolist() conversion on the hot path).
             comp = rvl.compress(masked.ravel())
 
-            color = cap.color.tobytes() if cap.color is not None else b""
+            # Depth-aligned color: warp the color image into the depth camera's
+            # geometry (640x576), then keep RGB for the foreground pixels only,
+            # in the SAME row-major order as the non-zero depth pixels. The relay
+            # pairs them back up 1:1. (transformed_color needs BGRA, not MJPG.)
+            color = b""
+            color_aligned = False
+            try:
+                tcolor = cap.transformed_color           # (H, W, 4) BGRA or None
+            except Exception:
+                tcolor = None
+            if tcolor is not None:
+                valid = masked != 0
+                rgb = tcolor[..., 2::-1]                  # BGRA -> RGB
+                color = np.ascontiguousarray(rgb[valid]).tobytes()
+                color_aligned = True
 
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
                 timestamp_ns=int(time.time() * 1e9), width=w, height=h,
                 depth=comp, color=color, depth_rvl=True,
+                color_aligned=color_aligned,
             )
             sock.sendall(frame.encode())
             sent += 1

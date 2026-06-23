@@ -31,16 +31,24 @@ from protocol import websocket
 _HEADER = struct.Struct("<4sIIII")
 
 
+FLAG_RGB = 0x2
+
+
 def parse_preview(payload):
     magic, flags, sensor, frame_id, count = _HEADER.unpack_from(payload, 0)
     if magic != b"CPV1":
         raise ValueError("bad preview magic %r" % (magic,))
     off = _HEADER.size
     pos_bytes = count * 3 * 4
-    positions = memoryview(payload)[off:off + pos_bytes]
+    mv = memoryview(payload)
+    positions = mv[off:off + pos_bytes]
+    rgb = None
+    if flags & FLAG_RGB:
+        rgb_off = off + pos_bytes
+        rgb = mv[rgb_off:rgb_off + count * 3]
     return {
         "flags": flags, "sensor": sensor, "frame_id": frame_id,
-        "count": count, "positions": positions,
+        "count": count, "positions": positions, "rgb": rgb,
     }
 
 
@@ -68,11 +76,15 @@ def run(host, port, frames):
                 t0 = time.time()
             got += 1
             total_pts += info["count"]
-            # sanity: positions block length matches count
+            # sanity: positions (and rgb, if present) block lengths match count
             assert len(info["positions"]) == info["count"] * 12
+            has_rgb = info["rgb"] is not None
+            if has_rgb:
+                assert len(info["rgb"]) == info["count"] * 3
             if got <= 3 or got % 10 == 0:
-                print("frame %d: sensor %d, %d points (%d bytes)"
-                      % (info["frame_id"], info["sensor"], info["count"], len(payload)))
+                print("frame %d: sensor %d, %d points, color=%s (%d bytes)"
+                      % (info["frame_id"], info["sensor"], info["count"],
+                         "yes" if has_rgb else "no", len(payload)))
         if got and t0:
             dt = max(1e-6, time.time() - t0)
             print("\nreceived %d frames, avg %d pts/frame, %.1f fps"

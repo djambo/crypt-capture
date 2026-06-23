@@ -91,12 +91,20 @@ Two repos:
   node TCP `Frame` stream → RVL-decode → unproject to a metric point cloud →
   pixel-stride downsample → broadcast a binary `CPV1` message per frame to
   browser clients over a **WebSocket** (`protocol/websocket.py`, stdlib-only, no
-  deps). Geometry only in v0 (no color yet). The browser **viewer lives in the
-  separate `crypt` repo** and consumes the documented contract
-  (`docs/preview_protocol.md`). Verified end-to-end with **no hardware/browser**
-  via `scripts/preview_client.py` (headless WS client): sim node → relay →
-  client at ~24.6k pts/frame. `frame.py` was also made Python-3.6-safe (plain
-  class, was a `@dataclass` despite the docs — would have broken the Nano).
+  deps). The browser **viewer lives in the separate `crypt` repo** and consumes
+  the documented contract (`docs/preview_protocol.md`). Verified end-to-end with
+  **no hardware/browser** via `scripts/preview_client.py` (headless WS client):
+  sim node → relay → client at ~24.6k pts/frame. **Live-validated on a real
+  Jetson + Kinect** streaming to a laptop browser (~12 fps single cam).
+  `frame.py` was also made Python-3.6-safe (plain class, was a `@dataclass`).
+- ✅ **Live color**: depth-aligned RGB now flows through the preview path. Node
+  captures `transformed_color` (BGRA in depth geometry), ships raw RGB for the
+  foreground pixels only (row-major, one triple per non-zero depth pixel, new
+  `FLAG_COLOR_ALIGNED` wire flag, no codec); the relay pairs each point with its
+  color and adds an `rgb` block to `CPV1` (`FLAG_RGB`). `sim_node` emits a
+  synthetic gradient so the color path is testable headless. Pairing verified by
+  a deterministic round-trip (BGRA→RGB + row-major scatter). The `crypt` viewer
+  reads the `rgb` block (`vertexColors`).
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -238,9 +246,10 @@ trigger-record-download.
 7. **Phase 3 — creative FX** (particles from capture geometry); SMPL-X template
    tracking (approach C) for fixed-topology streamable compression.
 
-Deferred (still wanted, off the MVP critical path): **aligned color → colored
-mesh** (node captures `pyk4a` `transformed_color` 640×576 so `mesh_take.py` can
-bake per-vertex colors); NVENC color on node; Web Worker / Wasm RVL for
+Deferred (still wanted, off the MVP critical path): **colored mesh** (bake the
+now-aligned color into `mesh_take.py` per-vertex output); **efficient color
+transport** for N cameras (raw foreground RGB is fine for 1 cam on WiFi but
+scales linearly — switch to JPEG/NVENC before 4-cam); Web Worker / Wasm RVL for
 browser-side preview decode.
 
 ## Open items

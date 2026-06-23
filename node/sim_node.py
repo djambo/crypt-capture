@@ -29,9 +29,12 @@ from protocol.frame import Frame
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 
 
-def synth_depth(width, height, frame_id, sensor_id):
-    """A moving elliptical blob of smooth valid depth on a zero background."""
+def synth_frame(width, height, frame_id, sensor_id):
+    """A moving elliptical blob of smooth valid depth on a zero background, plus
+    a depth-aligned RGB payload (one triple per valid pixel, row-major) so the
+    color path is exercisable without hardware."""
     depth = array("H", bytes(2 * width * height))
+    color = bytearray()
     phase = frame_id * 0.1
     cx = width / 2 + math.sin(phase) * width * 0.12
     cy = height / 2 + math.cos(phase) * height * 0.06
@@ -44,7 +47,11 @@ def synth_depth(width, height, frame_id, sensor_id):
             r2 = nx * nx + ny * ny
             if r2 < 1.0:
                 depth[y * width + x] = base + int(260 * math.sqrt(r2)) + rng.randint(0, 3)
-    return depth
+                # simple gradient so the cloud isn't a flat color
+                color += bytes((int(255 * x / width),
+                                int(255 * y / height),
+                                int(255 * (1.0 - min(1.0, r2)))))
+    return depth, bytes(color)
 
 
 def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
@@ -53,15 +60,13 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
     period = 1.0 / fps
     sent = 0
     try:
-        for frame_id in range(frames):
-            depth = synth_depth(width, height, frame_id, sensor_id)
+        while frames <= 0 or sent < frames:   # frames <= 0 => until Ctrl-C
+            depth, color = synth_frame(width, height, sent, sensor_id)
             comp = rvl.compress(depth)
-            # Placeholder color payload (real node: NVENC H.26x). Size-realistic stub.
-            color = bytes((frame_id + sensor_id) % 256 for _ in range(2048))
             frame = Frame(
-                sensor_id=sensor_id, frame_id=frame_id,
+                sensor_id=sensor_id, frame_id=sent,
                 timestamp_ns=int(time.time() * 1e9), width=width, height=height,
-                depth=comp, color=color, depth_rvl=True,
+                depth=comp, color=color, depth_rvl=True, color_aligned=True,
             )
             sock.sendall(frame.encode())
             sent += 1

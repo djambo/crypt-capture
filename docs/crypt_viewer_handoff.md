@@ -50,9 +50,11 @@ Then:
 1. **positions** — `count × 3 × float32`, metres, **view/world space**:
    `x` right, `y` up, `z` toward the viewer (camera looks down −z). Subject sits
    around `z ≈ −1.2 m`. Drop straight into a three.js position attribute.
-2. **rgb** *(only if flag bit1 set)* — `count × 3 × uint8`. **v0 is geometry
-   only (bit1 = 0).** Wire it up defensively so color "just works" when the
-   server starts sending it.
+2. **rgb** *(if flag bit1 set)* — `count × 3 × uint8`, one triple per point
+   (same order as positions), starting at byte `20 + count*12`. **The server now
+   sends this** (depth-aligned color). Read it into a `color` BufferAttribute
+   (`normalized: true`) and set `vertexColors: true` so points show real color;
+   still handle bit1 = 0 (geometry only) as a fallback.
 
 `count` varies per frame (only valid points are sent, after downsampling) — read
 it from the header every message; never assume a fixed size.
@@ -126,7 +128,8 @@ controls.target.set(0, 0, -1.3);          // subject sits ~1.3m down -z
 const MAX = 400000;                         // preallocate, update draw range
 const geom = new THREE.BufferGeometry();
 geom.setAttribute("position", new THREE.BufferAttribute(new Float32Array(MAX*3), 3));
-const mat = new THREE.PointsMaterial({ size: 0.006, sizeAttenuation: true, color: 0x9fd0ff });
+geom.setAttribute("color", new THREE.BufferAttribute(new Uint8Array(MAX*3), 3, true));
+const mat = new THREE.PointsMaterial({ size: 0.006, sizeAttenuation: true, vertexColors: true });
 const points = new THREE.Points(geom, mat);
 scene.add(points);
 
@@ -138,10 +141,14 @@ ws.onclose = () => hud.textContent = "disconnected";
 ws.onmessage = (e) => {
   const dv = new DataView(e.data);
   if (dv.getUint32(0, false) !== 0x43505631) return;   // "CPV1"
+  const flags = dv.getUint32(4, true);
   const count = Math.min(dv.getUint32(16, true), MAX);
-  const src = new Float32Array(e.data, 20, count*3);
-  geom.attributes.position.array.set(src);
+  geom.attributes.position.array.set(new Float32Array(e.data, 20, count*3));
   geom.attributes.position.needsUpdate = true;
+  if (flags & 2) {                                   // rgb present
+    geom.attributes.color.array.set(new Uint8Array(e.data, 20 + count*12, count*3));
+    geom.attributes.color.needsUpdate = true;
+  }
   geom.setDrawRange(0, count);
   geom.computeBoundingSphere();
   n++; const t = performance.now();
@@ -162,8 +169,9 @@ Notes / gotchas:
 - Reallocating a `Float32Array` every frame is wasteful — preallocate `MAX` and
   use `setDrawRange(0, count)` (done above). Tune `MAX` to the server's
   `--max-points`.
-- Color later: when `flags & 2`, read `count×3` `uint8` at offset `20 + count*12`,
-  add a `color` attribute (`normalized: true`) and set `vertexColors: true`.
+- Color: the snippet above already reads the `rgb` block when `flags & 2`. The
+  `color` attribute is `Uint8Array` with `normalized: true` so 0–255 maps to
+  0–1, and the material has `vertexColors: true`.
 
 ## Existing rendering R&D in this repo (reuse it)
 

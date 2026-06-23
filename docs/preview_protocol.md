@@ -35,13 +35,16 @@ Then the payload blocks, in order:
 1. **positions** — `count × 3 × float32`, metres, in view/world space
    (`x` right, `y` up, `z` toward viewer i.e. camera looks down −z). Ready to
    drop into a three.js `Float32Array` position attribute.
-2. **rgb** *(only if flag bit1 set)* — `count × 3 × uint8`, 0–255 per channel.
-   Reserved for when the node ships depth-aligned color; **v0 sends geometry
-   only** (bit1 = 0).
+2. **rgb** *(only if flag bit1 set)* — `count × 3 × uint8`, 0–255 per channel,
+   one triple per point (same order as positions). Sent when the node provides
+   depth-aligned color (`kinect_node` via `transformed_color`; `sim_node`
+   always). The relay sets bit1 whenever it has color for the frame; a viewer
+   must still handle bit1 = 0 (geometry only) gracefully.
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The viewer must read `count` from the header, not
-assume a fixed size.
+assume a fixed size. The `rgb` block, when present, starts at byte
+`20 + count*12`.
 
 ## Viewer side (sketch, lives in `crypt`)
 

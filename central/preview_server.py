@@ -58,8 +58,12 @@ def load_intrinsics(calib_path, w, h):
     return default_intrinsics(w, h)
 
 
-def unproject(depth_u16, w, h, fx, fy, cx, cy, stride):
-    """Depth grid -> (N,3) float32 point cloud of the valid (non-zero) pixels."""
+def unproject(depth_u16, w, h, fx, fy, cx, cy, stride, color_grid=None):
+    """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels.
+
+    xyz is (N,3) float32. rgb is (N,3) uint8 if a color_grid is supplied (the
+    per-pixel color image aligned to the depth grid), else None.
+    """
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     us = np.arange(0, w, stride)
     vs = np.arange(0, h, stride)
@@ -67,19 +71,45 @@ def unproject(depth_u16, w, h, fx, fy, cx, cy, stride):
     uu, vv = np.meshgrid(us.astype(np.float32), vs.astype(np.float32))
     m = sub != 0
     if not m.any():
-        return np.empty((0, 3), dtype=np.float32)
+        return np.empty((0, 3), dtype=np.float32), (
+            np.empty((0, 3), dtype=np.uint8) if color_grid is not None else None)
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
     x = (uu[m] - cx) * z / fx
     y = -((vv[m] - cy) * z / fy)                     # +Y up
-    return np.column_stack((x, y, -z)).astype(np.float32)   # camera looks down -Z
+    xyz = np.column_stack((x, y, -z)).astype(np.float32)   # camera looks down -Z
+    rgb = None
+    if color_grid is not None:
+        rgb = color_grid[vs][:, us][m]
+    return xyz, rgb
 
 
-def build_message(sensor_id, frame_id, xyz):
+def aligned_color_grid(color_bytes, depth_u16, w, h):
+    """Scatter the foreground RGB payload back onto a full (h,w,3) color grid.
+
+    The node sent one RGB triple per non-zero depth pixel in row-major order, so
+    the same valid mask (from the decoded depth) places each color correctly.
+    Returns None if the payload count doesn't match the valid-pixel count.
+    """
+    d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
+    valid = d != 0
+    colors = np.frombuffer(color_bytes, dtype=np.uint8)
+    if colors.size != int(valid.sum()) * 3:
+        return None
+    grid = np.zeros((h, w, 3), dtype=np.uint8)
+    grid[valid] = colors.reshape(-1, 3)
+    return grid
+
+
+def build_message(sensor_id, frame_id, xyz, rgb=None):
     count = int(xyz.shape[0])
+    flags = FLAG_POSITIONS | (FLAG_RGB if rgb is not None else 0)
     header = _PREVIEW_HEADER.pack(
-        PREVIEW_MAGIC, FLAG_POSITIONS, sensor_id & 0xFFFFFFFF,
+        PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
-    return header + np.ascontiguousarray(xyz, dtype="<f4").tobytes()
+    payload = header + np.ascontiguousarray(xyz, dtype="<f4").tobytes()
+    if rgb is not None:
+        payload += np.ascontiguousarray(rgb, dtype=np.uint8).tobytes()
+    return payload
 
 
 class PreviewServer:
@@ -159,12 +189,19 @@ class PreviewServer:
                     continue
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
                 fx, fy, cx, cy = self._intrinsics(frame.width, frame.height)
-                xyz = unproject(depth, frame.width, frame.height,
-                                fx, fy, cx, cy, self.stride)
+                cgrid = None
+                if frame.color_aligned and frame.color:
+                    cgrid = aligned_color_grid(frame.color, depth,
+                                               frame.width, frame.height)
+                xyz, rgb = unproject(depth, frame.width, frame.height,
+                                     fx, fy, cx, cy, self.stride, cgrid)
                 if xyz.shape[0] > self.max_points:
                     idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
                     xyz = xyz[idx]
-                self._broadcast(build_message(frame.sensor_id, frame.frame_id, xyz))
+                    if rgb is not None:
+                        rgb = rgb[idx]
+                self._broadcast(build_message(frame.sensor_id, frame.frame_id,
+                                              xyz, rgb))
                 self.frames_relayed += 1
         finally:
             conn.close()

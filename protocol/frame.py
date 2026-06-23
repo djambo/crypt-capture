@@ -28,6 +28,8 @@ _HEADER = struct.Struct("<4sBBHQQHHII")
 HEADER_SIZE = _HEADER.size
 
 FLAG_DEPTH_RVL = 0x01
+FLAG_COLOR_ALIGNED = 0x02   # color payload = raw uint8 RGB of valid pixels,
+                            # row-major, one triple per non-zero depth pixel
 
 
 class Frame(object):
@@ -35,10 +37,10 @@ class Frame(object):
     imports on the Nano's Python 3.6."""
 
     __slots__ = ("sensor_id", "frame_id", "timestamp_ns", "width", "height",
-                 "depth", "color", "depth_rvl")
+                 "depth", "color", "depth_rvl", "color_aligned")
 
     def __init__(self, sensor_id, frame_id, timestamp_ns, width, height,
-                 depth, color, depth_rvl=True):
+                 depth, color, depth_rvl=True, color_aligned=False):
         self.sensor_id = sensor_id        # 0..N-1
         self.frame_id = frame_id          # hardware-synced frame index
         self.timestamp_ns = timestamp_ns  # node capture timestamp (ns)
@@ -47,9 +49,12 @@ class Frame(object):
         self.depth = depth                # RVL-compressed (or raw u16)
         self.color = color                # opaque encoded color payload
         self.depth_rvl = depth_rvl
+        self.color_aligned = color_aligned  # color is depth-aligned RGB (see flag)
 
     def encode(self):
         flags = FLAG_DEPTH_RVL if self.depth_rvl else 0
+        if self.color_aligned:
+            flags |= FLAG_COLOR_ALIGNED
         header = _HEADER.pack(
             MAGIC, self.sensor_id, flags, 0,
             self.frame_id, self.timestamp_ns,
@@ -87,4 +92,5 @@ def read_frame(sock: socket.socket):
         sensor_id=sensor_id, frame_id=frame_id, timestamp_ns=ts,
         width=w, height=h, depth=depth, color=color,
         depth_rvl=bool(flags & FLAG_DEPTH_RVL),
+        color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
     )
