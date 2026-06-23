@@ -60,7 +60,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
             color = bytes((frame_id + sensor_id) % 256 for _ in range(2048))
             frame = Frame(
                 sensor_id=sensor_id, frame_id=frame_id,
-                timestamp_ns=time.time_ns(), width=width, height=height,
+                timestamp_ns=int(time.time() * 1e9), width=width, height=height,
                 depth=comp, color=color, depth_rvl=True,
             )
             sock.sendall(frame.encode())

@@ -83,7 +83,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
 
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
-                timestamp_ns=time.time_ns(), width=w, height=h,
+                timestamp_ns=int(time.time() * 1e9), width=w, height=h,
                 depth=comp, color=color, depth_rvl=True,
             )
             sock.sendall(frame.encode())

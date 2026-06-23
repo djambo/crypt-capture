@@ -87,6 +87,16 @@ Two repos:
   On an x86 dev box: full-res masked frame compress ~68 fps (was ~20), decompress
   ~310 fps (~21×). `kinect_node` now passes the array straight to RVL (no
   per-pixel `.tolist()`). Run: `python3 -m tests.test_rvl`.
+- ✅ **M2 (server side) — Live preview relay** (`central/preview_server.py`):
+  node TCP `Frame` stream → RVL-decode → unproject to a metric point cloud →
+  pixel-stride downsample → broadcast a binary `CPV1` message per frame to
+  browser clients over a **WebSocket** (`protocol/websocket.py`, stdlib-only, no
+  deps). Geometry only in v0 (no color yet). The browser **viewer lives in the
+  separate `crypt` repo** and consumes the documented contract
+  (`docs/preview_protocol.md`). Verified end-to-end with **no hardware/browser**
+  via `scripts/preview_client.py` (headless WS client): sim node → relay →
+  client at ~24.6k pts/frame. `frame.py` was also made Python-3.6-safe (plain
+  class, was a `@dataclass` despite the docs — would have broken the Nano).
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -137,21 +147,33 @@ Two repos:
 ## Repo layout
 
 ```
-protocol/   rvl.py (depth codec), frame.py (wire protocol)
+protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay)
 node/       sim_node.py, kinect_node.py (real), dump_calibration.py
-central/    recorder.py (records synced takes)
+central/    recorder.py (records synced takes), preview_server.py (live ws relay)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
-scripts/    run_demo.py (hardware-free spine demo)
-docs/       hardware.md, protocol.md, jetson_setup.md
-web/        (TODO — reuse crypt three.js renderer)
+scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test)
+tests/      test_rvl.py
+docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md, jetson_setup.md
 takes/      recordings (gitignored)
 ```
+The browser **viewer is NOT here** — it lives in the `crypt` repo and consumes
+`docs/preview_protocol.md`. The Jetson pulls this repo and runs only `node/` +
+`protocol/`; it never runs the central server or the viewer.
 
 ## How to run
 
 ```bash
 # Hardware-free spine test:
 python3 scripts/run_demo.py --sensors 4 --frames 15
+
+# Codec tests (numpy fast path == pure-Python reference, bit-identical):
+python3 -m tests.test_rvl
+
+# Live preview, no hardware/browser (3 terminals): relay, sim node, headless client:
+python3 -m central.preview_server --stride 2
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 300
+python3 -m scripts.preview_client --frames 30
+# (real browser viewer = the `crypt` repo; speaks docs/preview_protocol.md)
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -171,10 +193,11 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   `/usr/lib/aarch64-linux-gnu/` (+`ldconfig`). Set `K4A_INCLUDE_DIR=/usr/include`
   `K4A_LIB_DIR=/usr/lib/aarch64-linux-gnu`. Install pyk4a with `--no-deps`
   (system numpy via apt) then `pip install --user typing_extensions`.
-- **Python 3.6** (Nano default): `frame.py` is written 3.6-safe (no
-  dataclasses); the codebase must avoid `time.time_ns()` (3.7+) — use
-  `int(time.time()*1e9)`. (If you see a `dataclasses` error, an old `frame.py`
-  is present.)
+- **Python 3.6** (Nano default): `frame.py` is a plain class (no dataclasses) so
+  it imports on 3.6; the codebase avoids `time.time_ns()` (3.7+) — uses
+  `int(time.time()*1e9)` (node files included). Keep new node/protocol code
+  3.6-safe. (`central/preview_server.py` + `protocol/websocket.py` are
+  central-only, x86/3.8+ — they don't run on the Nano.)
 - **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
   to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
 - See `docs/jetson_setup.md`.
@@ -199,10 +222,12 @@ trigger-record-download.
 
 1. ✅ **M0 — Fast RVL.** Vectorized NumPy `compress`/`decompress`, bit-identical
    to the pure-Python reference with a fallback. Done (see Current status).
-2. **M1 — Control plane.** Central ↔ node command channel (`arm/record/stop/
-   status`); node grows a control listener. **Next concrete task.**
-3. **M2 — Live preview.** Single node → central decode/downsample → browser
-   three.js points over WebSocket (reuse `crypt` renderer).
+2. 🟡 **M2 — Live preview.** ✅ *server side*: `central/preview_server.py` relays
+   node frames → `CPV1` point clouds over WebSocket; verified headless with
+   `scripts/preview_client.py`. ⏳ *remaining*: the browser three.js/WebXR viewer
+   in the **`crypt` repo** (consumes `docs/preview_protocol.md`); optional color.
+3. **M1 — Control plane.** Central ↔ node command channel (`arm/record/stop/
+   status`); node grows a control listener. **Next concrete task** (M3 needs it).
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.

@@ -22,7 +22,6 @@ Payload: depth_bytes ++ color_bytes
 
 import socket
 import struct
-from dataclasses import dataclass
 
 MAGIC = b"CVF1"
 _HEADER = struct.Struct("<4sBBHQQHHII")
@@ -31,18 +30,25 @@ HEADER_SIZE = _HEADER.size
 FLAG_DEPTH_RVL = 0x01
 
 
-@dataclass
-class Frame:
-    sensor_id: int
-    frame_id: int
-    timestamp_ns: int
-    width: int
-    height: int
-    depth: bytes          # RVL-compressed (or raw u16 if flag unset)
-    color: bytes          # opaque encoded color payload
-    depth_rvl: bool = True
+class Frame(object):
+    """One synchronized depth+color frame. Plain class (no dataclass) so it
+    imports on the Nano's Python 3.6."""
 
-    def encode(self) -> bytes:
+    __slots__ = ("sensor_id", "frame_id", "timestamp_ns", "width", "height",
+                 "depth", "color", "depth_rvl")
+
+    def __init__(self, sensor_id, frame_id, timestamp_ns, width, height,
+                 depth, color, depth_rvl=True):
+        self.sensor_id = sensor_id        # 0..N-1
+        self.frame_id = frame_id          # hardware-synced frame index
+        self.timestamp_ns = timestamp_ns  # node capture timestamp (ns)
+        self.width = width
+        self.height = height
+        self.depth = depth                # RVL-compressed (or raw u16)
+        self.color = color                # opaque encoded color payload
+        self.depth_rvl = depth_rvl
+
+    def encode(self):
         flags = FLAG_DEPTH_RVL if self.depth_rvl else 0
         header = _HEADER.pack(
             MAGIC, self.sensor_id, flags, 0,
