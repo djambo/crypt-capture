@@ -38,7 +38,7 @@ from protocol import control, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
-_FORWARDED_COMMANDS = ("set_depth",)
+_FORWARDED_COMMANDS = ("set_depth", "capture_bg", "clear_bg", "set_bg_margin")
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count

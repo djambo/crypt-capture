@@ -138,6 +138,20 @@ Two repos:
   node's own intrinsics win. (`calib.json` is gitignored.) This also fixed the
   "stretched cloud" bug: an out-of-date relay applied full-res `cx/cy` to a
   node-strided grid — always pull both sides together.
+- ✅ **Background-plate subtraction** (`node/background.py`, `BackgroundSubtractor`):
+  control commands `capture_bg` (average N frames of the empty scene → plate),
+  `clear_bg`, `set_bg_margin`. Per frame, keep only pixels **closer than the
+  plate − margin** → floor/walls drop at any distance, leaving the subject; far
+  fewer points (big network+viewer fps win) and cleaner than the range clip. Unit
+  tested (`tests/test_background.py`); forward path verified (relay→node).
+  Integrated in `kinect_node`; `sim_node` just acks the commands (no real scene).
+  **Note:** shrinks point count (helps wire+viewer), *not* the node's full-grid
+  cost (color warp / grid scan), so stride-1 fps on the Nano still needs
+  measuring — the Orin removes that.
+- ✅ **Observability:** node prints a *windowed* fps (was a misleading
+  cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
+  viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
+  the bottleneck (wire vs GPU) is obvious.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -190,12 +204,13 @@ Two repos:
 ```
 protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay),
             control.py (central->node commands, CTL1)
-node/       sim_node.py, kinect_node.py (real), dump_calibration.py
+node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
+            dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py
+tests/      test_rvl.py, test_background.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md

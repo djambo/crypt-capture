@@ -35,6 +35,7 @@ from pyk4a import (
 
 from protocol import control, rvl
 from protocol.frame import Frame, encode_calib
+from node.background import BackgroundSubtractor
 
 
 def _build_config(sync, sub_delay_us):
@@ -67,15 +68,27 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     # GIL = safe for these scalar reads/writes between the capture loop and the
     # control reader thread.
     rng = {"min": min_depth, "max": max_depth}
+    bg = BackgroundSubtractor()
 
     def on_command(cmd):
-        if cmd.get("cmd") == "set_depth":
+        c = cmd.get("cmd")
+        if c == "set_depth":
             if "min" in cmd:
                 rng["min"] = int(cmd["min"])
             if "max" in cmd:
                 rng["max"] = int(cmd["max"])
             print("sensor %d: depth mask -> [%d, %d] mm"
                   % (sensor_id, rng["min"], rng["max"]))
+        elif c == "capture_bg":
+            n = int(cmd.get("frames", 60))
+            bg.start_capture(n)
+            print("sensor %d: capturing background (%d frames)..." % (sensor_id, n))
+        elif c == "clear_bg":
+            bg.clear()
+            print("sensor %d: background subtraction cleared" % sensor_id)
+        elif c == "set_bg_margin":
+            bg.margin = int(cmd.get("mm", bg.margin))
+            print("sensor %d: bg margin -> %d mm" % (sensor_id, bg.margin))
 
     control.start_reader(sock, on_command)
 
@@ -100,13 +113,19 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                 sock.sendall(encode_calib(sensor_id, depth.shape[1],
                                           depth.shape[0], ifx, ify, icx, icy))
                 calib_sent = True
+            if bg.capturing:                        # averaging the empty scene
+                if bg.feed(depth):
+                    print("sensor %d: background captured" % sensor_id)
             td = time.time()
 
-            # Cheap working-range mask: keep [min,max] mm, zero everything else.
-            # This isolates the subject from far walls/floor and gives RVL its
-            # long zero-runs. Replace with per-view AI matting for clean edges.
-            masked = np.where((depth >= rng["min"]) & (depth <= rng["max"]),
-                              depth, 0).astype(np.uint16)
+            # Working-range mask, then (if a plate exists) keep only pixels
+            # closer than the background — floor/walls at any distance drop out,
+            # leaving just the subject.
+            keep = (depth >= rng["min"]) & (depth <= rng["max"])
+            fg = bg.foreground(depth)
+            if fg is not None:
+                keep &= fg
+            masked = np.where(keep, depth, 0).astype(np.uint16)
             # Preview downsample: stride on the node so RVL+color+wire all shrink
             # ~stride^2. The relay reverses it for metrically-correct unprojection
             # (frame.stride). Recording (later) keeps full res from `depth`.

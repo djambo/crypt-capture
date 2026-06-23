@@ -46,6 +46,15 @@ def main():
     sd.add_argument("--min", type=int)
     sd.add_argument("--max", type=int)
 
+    cb = sub.add_parser("capture-bg", help="snapshot the empty scene, then keep "
+                        "only points closer than it (step out first!)")
+    cb.add_argument("--frames", type=int, default=60, help="frames to average")
+
+    sub.add_parser("clear-bg", help="disable background subtraction")
+
+    bm = sub.add_parser("set-bg-margin", help="background tolerance (mm)")
+    bm.add_argument("--mm", type=int, required=True)
+
     args = ap.parse_args()
     if args.cmd == "set-depth":
         command = {"cmd": "set_depth"}
@@ -54,6 +63,12 @@ def main():
         if args.max is not None:
             command["max"] = args.max
         send(args.host, args.port, command)
+    elif args.cmd == "capture-bg":
+        send(args.host, args.port, {"cmd": "capture_bg", "frames": args.frames})
+    elif args.cmd == "clear-bg":
+        send(args.host, args.port, {"cmd": "clear_bg"})
+    elif args.cmd == "set-bg-margin":
+        send(args.host, args.port, {"cmd": "set_bg_margin", "mm": args.mm})
 
 
 if __name__ == "__main__":

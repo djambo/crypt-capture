@@ -21,6 +21,46 @@
 
 ---
 
+## 2026-06-23 — "Capture Background" button (subject-only points)
+**Status: NEW — not yet applied**
+
+**Summary.** New upstream commands let the user snapshot the empty scene once and
+then stream **only the subject** (points closer than the background) — floor/walls
+removed at any distance, far fewer points, cleaner look. Add a small UI for it.
+(No protocol change to `CPV1`; these are upstream JSON commands like `set_depth`.)
+
+**Commands (WebSocket text → server → node):**
+- `{"cmd":"capture_bg","frames":60}` — average ~60 frames into a background plate,
+  then auto-enable subtraction. **The scene must be empty during capture** (user
+  steps out). At 30 fps, 60 frames ≈ 2 s.
+- `{"cmd":"clear_bg"}` — turn subtraction off (stream everything in range again).
+- `{"cmd":"set_bg_margin","mm":50}` — tolerance that absorbs depth wobble; raise
+  if background flickers back in, lower if subject edges get eaten. Default 50.
+
+**Viewer action — a "Capture Background" button:**
+1. On click: show a label like **"Capturing background — step out of frame…"**,
+   then send `{"cmd":"capture_bg","frames":60}`.
+2. There's no completion message back from the node yet, so drive the label
+   optimistically off the known duration: `frames / ~30fps` seconds (+~0.5 s
+   buffer) → then show **"Background set — subject only"**. (A real ack channel
+   can come later if needed.)
+3. Add a **"Clear"** control → `{"cmd":"clear_bg"}`, and optionally a margin
+   slider (200…0 mm, default 50) → `set_bg_margin`.
+
+```js
+function captureBackground(frames = 60) {
+  showLabel("Capturing background — step out of frame…");
+  ws.send(JSON.stringify({ cmd: "capture_bg", frames }));
+  setTimeout(() => showLabel("Background set — subject only"), frames/30*1000 + 500);
+}
+function clearBackground() { ws.send(JSON.stringify({ cmd: "clear_bg" })); }
+```
+
+Pairs naturally with the dual-FPS work below: once only the subject streams, the
+point count drops a lot and render fps should jump.
+
+---
+
 ## 2026-06-23 — Rendering perf + dual FPS HUD (IMPORTANT)
 **Status: NEW — not yet applied**
 

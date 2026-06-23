@@ -75,13 +75,19 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
     rng = {"min": 0, "max": 65535}             # live-tunable via control channel
 
     def on_command(cmd):
-        if cmd.get("cmd") == "set_depth":
+        c = cmd.get("cmd")
+        if c == "set_depth":
             if "min" in cmd:
                 rng["min"] = int(cmd["min"])
             if "max" in cmd:
                 rng["max"] = int(cmd["max"])
             print("sensor %d: depth mask -> [%d, %d] mm"
                   % (sensor_id, rng["min"], rng["max"]))
+        else:
+            # background commands etc. — sim has no real scene to subtract, so it
+            # just acknowledges (the real node acts on them). Proves the
+            # browser->relay->node command path.
+            print("sensor %d: received command %r" % (sensor_id, cmd))
 
     control.start_reader(sock, on_command)
 
