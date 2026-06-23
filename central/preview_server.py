@@ -33,8 +33,11 @@ import threading
 
 import numpy as np
 
-from protocol import rvl, websocket
+from protocol import control, rvl, websocket
 from protocol.frame import read_frame
+
+# Browser→node commands the relay will forward (everything else is ignored).
+_FORWARDED_COMMANDS = ("set_depth",)
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
@@ -117,7 +120,8 @@ class PreviewServer:
         self.calib = calib
         self.stride = stride
         self.max_points = max_points
-        self._clients = []                  # list[socket]
+        self._clients = []                  # browser WebSocket sockets
+        self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> intrinsics cache
         self.frames_relayed = 0
@@ -143,14 +147,41 @@ class PreviewServer:
                              daemon=True).start()
 
     def _ws_reader(self, conn):
-        """Drain client frames so we notice disconnects/close promptly."""
+        """Read browser messages: text = a JSON command to forward to nodes;
+        also lets us notice disconnects/close promptly."""
         try:
             while True:
                 msg = websocket.read_frame(conn)
                 if msg is None or msg[0] == websocket.OP_CLOSE:
                     break
+                opcode, payload = msg
+                if opcode == websocket.OP_TEXT and payload:
+                    try:
+                        cmd = json.loads(payload.decode("utf-8"))
+                    except ValueError:
+                        continue
+                    self._on_browser_command(cmd)
         finally:
             self._drop(conn)
+
+    def _on_browser_command(self, cmd):
+        if isinstance(cmd, dict) and cmd.get("cmd") in _FORWARDED_COMMANDS:
+            n = self.send_to_nodes(cmd)
+            print("[preview] forwarded %s to %d node(s)" % (cmd, n))
+
+    def send_to_nodes(self, cmd):
+        """Send a control command to every connected node. Returns count sent."""
+        data = control.encode(cmd)
+        with self._lock:
+            nodes = list(self._nodes)
+        sent = 0
+        for conn in nodes:
+            try:
+                conn.sendall(data)
+                sent += 1
+            except OSError:
+                pass
+        return sent
 
     def _drop(self, conn):
         with self._lock:
@@ -180,6 +211,8 @@ class PreviewServer:
 
     def _serve_node(self, conn, addr):
         print("[preview] node connected %s" % (addr[0],))
+        with self._lock:
+            self._nodes.append(conn)
         try:
             while True:
                 frame = read_frame(conn)
@@ -204,6 +237,9 @@ class PreviewServer:
                                               xyz, rgb))
                 self.frames_relayed += 1
         finally:
+            with self._lock:
+                if conn in self._nodes:
+                    self._nodes.remove(conn)
             conn.close()
             print("[preview] node disconnected %s" % (addr[0],))
 

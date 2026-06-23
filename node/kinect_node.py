@@ -32,7 +32,7 @@ from pyk4a import (
     PyK4A, Config, DepthMode, ColorResolution, FPS, ImageFormat, WiredSyncMode,
 )
 
-from protocol import rvl
+from protocol import control, rvl
 from protocol.frame import Frame
 
 
@@ -61,6 +61,22 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
+    # Live-tunable depth mask, adjustable via the control channel. Plain dict +
+    # GIL = safe for these scalar reads/writes between the capture loop and the
+    # control reader thread.
+    rng = {"min": min_depth, "max": max_depth}
+
+    def on_command(cmd):
+        if cmd.get("cmd") == "set_depth":
+            if "min" in cmd:
+                rng["min"] = int(cmd["min"])
+            if "max" in cmd:
+                rng["max"] = int(cmd["max"])
+            print("sensor %d: depth mask -> [%d, %d] mm"
+                  % (sensor_id, rng["min"], rng["max"]))
+
+    control.start_reader(sock, on_command)
+
     sent = 0
     t0 = time.time()
     try:
@@ -74,7 +90,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             # Cheap working-range mask: keep [min,max] mm, zero everything else.
             # This isolates the subject from far walls/floor and gives RVL its
             # long zero-runs. Replace with per-view AI matting for clean edges.
-            masked = np.where((depth >= min_depth) & (depth <= max_depth),
+            masked = np.where((depth >= rng["min"]) & (depth <= rng["max"]),
                               depth, 0).astype(np.uint16)
             # Pass the array straight to RVL — its NumPy fast path consumes it
             # directly (no per-pixel .tolist() conversion on the hot path).
@@ -108,6 +124,10 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                 fps = sent / (time.time() - t0)
                 print("sensor %d: %d frames (%.1f fps)" % (sensor_id, sent, fps))
     finally:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)   # wake the control reader + send FIN
+        except OSError:
+            pass
         sock.close()
         k4a.stop()
     print("sensor %d: streamed %d frames in %.1fs" % (sensor_id, sent, time.time() - t0))

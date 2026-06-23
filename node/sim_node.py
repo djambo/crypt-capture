@@ -23,30 +23,35 @@ import socket
 import time
 from array import array
 
-from protocol import rvl
+from protocol import control, rvl
 from protocol.frame import Frame
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 
 
-def synth_frame(width, height, frame_id, sensor_id):
+def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535):
     """A moving elliptical blob of smooth valid depth on a zero background, plus
     a depth-aligned RGB payload (one triple per valid pixel, row-major) so the
-    color path is exercisable without hardware."""
+    color path is exercisable without hardware. Pixels outside [dmin,dmax] mm are
+    masked out — mirroring the real node so the live depth-threshold control is
+    testable without hardware."""
     depth = array("H", bytes(2 * width * height))
     color = bytearray()
     phase = frame_id * 0.1
     cx = width / 2 + math.sin(phase) * width * 0.12
     cy = height / 2 + math.cos(phase) * height * 0.06
     base = 1100 + sensor_id * 40  # each sensor sees the subject at a slight offset
-    rng = random.Random(frame_id * 131 + sensor_id)
+    jit = random.Random(frame_id * 131 + sensor_id)
     rx, ry = width * 0.25, height * 0.34
     for y in range(height):
         for x in range(width):
             nx, ny = (x - cx) / rx, (y - cy) / ry
             r2 = nx * nx + ny * ny
             if r2 < 1.0:
-                depth[y * width + x] = base + int(260 * math.sqrt(r2)) + rng.randint(0, 3)
+                z = base + int(260 * math.sqrt(r2)) + jit.randint(0, 3)
+                if z < dmin or z > dmax:           # depth-range mask
+                    continue
+                depth[y * width + x] = z
                 # simple gradient so the cloud isn't a flat color
                 color += bytes((int(255 * x / width),
                                 int(255 * y / height),
@@ -58,10 +63,25 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     period = 1.0 / fps
+
+    rng = {"min": 0, "max": 65535}             # live-tunable via control channel
+
+    def on_command(cmd):
+        if cmd.get("cmd") == "set_depth":
+            if "min" in cmd:
+                rng["min"] = int(cmd["min"])
+            if "max" in cmd:
+                rng["max"] = int(cmd["max"])
+            print("sensor %d: depth mask -> [%d, %d] mm"
+                  % (sensor_id, rng["min"], rng["max"]))
+
+    control.start_reader(sock, on_command)
+
     sent = 0
     try:
         while frames <= 0 or sent < frames:   # frames <= 0 => until Ctrl-C
-            depth, color = synth_frame(width, height, sent, sensor_id)
+            depth, color = synth_frame(width, height, sent, sensor_id,
+                                       rng["min"], rng["max"])
             comp = rvl.compress(depth)
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
@@ -72,6 +92,12 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H):
             sent += 1
             time.sleep(period)
     finally:
+        # shutdown (not just close) so the control-reader thread's recv wakes
+        # and the peer gets a clean FIN even with another thread on the socket.
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         sock.close()
     return sent
 

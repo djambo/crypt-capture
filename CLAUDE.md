@@ -105,6 +105,15 @@ Two repos:
   synthetic gradient so the color path is testable headless. Pairing verified by
   a deterministic round-trip (BGRA→RGB + row-major scatter). The `crypt` viewer
   reads the `rgb` block (`vertexColors`).
+- ✅ **M1 (started) — Control plane** (`protocol/control.py`): central → node
+  commands over a new `CTL1` framing, sent back down the node's existing TCP
+  socket (full-duplex; a tiny idle reader thread on the node applies them — no
+  frame-path impact). First command is **`set_depth`** (live depth-mask tuning,
+  the background-cutoff control). Path: browser WS **text** JSON → relay forwards
+  whitelisted commands → node. Drive it headless with `scripts/send_command.py`.
+  Verified end-to-end (sim cloud dropped 24.6k→3.6k pts on `set_depth max=1200`).
+  `arm/record/stop` will reuse this channel (M3). Node `run()` now `shutdown()`s
+  the socket before close so the reader thread wakes cleanly.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -155,11 +164,13 @@ Two repos:
 ## Repo layout
 
 ```
-protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay)
+protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay),
+            control.py (central->node commands, CTL1)
 node/       sim_node.py, kinect_node.py (real), dump_calibration.py
-central/    recorder.py (records synced takes), preview_server.py (live ws relay)
+central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
-scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test)
+scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
+            send_command.py (send control commands to the relay)
 tests/      test_rvl.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
@@ -191,6 +202,9 @@ python3 -m central.preview_server --stride 2
 python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 300
 python3 -m scripts.preview_client --frames 30
 # (real browser viewer = the `crypt` repo; speaks docs/preview_protocol.md)
+
+# Live control (tune the depth mask on all nodes without a browser):
+python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -243,8 +257,11 @@ trigger-record-download.
    node frames → `CPV1` point clouds over WebSocket; verified headless with
    `scripts/preview_client.py`. ⏳ *remaining*: the browser three.js/WebXR viewer
    in the **`crypt` repo** (consumes `docs/preview_protocol.md`); optional color.
-3. **M1 — Control plane.** Central ↔ node command channel (`arm/record/stop/
-   status`); node grows a control listener. **Next concrete task** (M3 needs it).
+3. 🟡 **M1 — Control plane.** ✅ central → node command channel (`protocol/
+   control.py`, `CTL1`) with browser→relay→node fan-out; first command
+   `set_depth` (live depth-mask tuning) done & verified. ⏳ remaining:
+   `arm/record/stop/status` commands (M3 needs them); optional status/echo back
+   to the UI.
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.

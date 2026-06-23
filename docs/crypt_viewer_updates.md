@@ -21,6 +21,39 @@
 
 ---
 
+## 2026-06-23 — Control plane: viewer can set the depth mask live
+**Status: NEW — not yet applied**
+
+**Summary.** The viewer can now send commands **upstream** over the same
+WebSocket (viewer → server → node), and the first one lets the user tune the
+**depth mask** live — i.e. how much background is kept. The capture node masks
+out everything outside `[min,max]` millimetres before sending; the user noticed
+the cloud cuts off at a fixed distance, and this makes that adjustable from the
+UI. Low-rate and independent of the frame stream (no perf impact).
+
+**Protocol (upstream).** Send a WebSocket **text** message with a JSON command:
+```js
+ws.send(JSON.stringify({ cmd: "set_depth", min: 400, max: 4000 })); // millimetres
+```
+- `min`/`max` are depth-mask bounds in mm; either is optional.
+- The server forwards it to all connected nodes, which apply it within a frame
+  or two (you'll see the point count change).
+- Defaults on the node are min 500 / max 2500 mm. Sensible UI range: ~200–6000 mm.
+
+**Viewer action.** Add a small control (two sliders or number inputs for
+near/far, in mm) and send the command on change (debounce ~100 ms so you don't
+spam while dragging). Example:
+```js
+function setDepth(minMm, maxMm) {
+  if (ws.readyState === WebSocket.OPEN)
+    ws.send(JSON.stringify({ cmd: "set_depth", min: minMm, max: maxMm }));
+}
+```
+No response message is sent back yet; the feedback is simply the cloud updating.
+(A status/echo channel can come later if the UI needs to show confirmed values.)
+
+---
+
 ## 2026-06-23 — Live color in `CPV1` (rgb block)
 **Status: NEW — not yet applied**
 

@@ -59,6 +59,31 @@ ws.onmessage = (e) => {
 };
 ```
 
+## Upstream: browser → server commands (control plane)
+
+The same WebSocket also carries **control commands the other way** (viewer →
+server → node). Send a WebSocket **text** message containing a JSON command; the
+server forwards whitelisted commands down to the capture node(s), which apply
+them live. This is low-rate and independent of the frame stream, so it doesn't
+affect streaming performance.
+
+Commands are `{"cmd": ...}` objects. Current commands:
+
+| command | meaning |
+|---|---|
+| `{"cmd":"set_depth","min":<mm>,"max":<mm>}` | set the working depth mask; pixels outside `[min,max]` mm are dropped (background removal). Either field optional. |
+
+(`arm` / `record` / `stop` will use this same channel later.)
+
+```js
+// viewer: set the depth mask to 0.4–4.0 m
+ws.send(JSON.stringify({ cmd: "set_depth", min: 400, max: 4000 }));
+```
+
+Internally the server re-frames this as a `CTL1` message (magic + u32 len + JSON)
+on the node's TCP socket; see `protocol/control.py`. Viewers only speak the JSON
+over WebSocket.
+
 ## Versioning
 
 Bump the magic (`CPV2`, …) on any breaking layout change. Additive optional
