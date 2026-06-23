@@ -35,6 +35,7 @@ frames, so central needs no per-device calib files and scales to N cameras:
 | sensor_id | u32 | which sensor these intrinsics are for |
 | width,height | u16,u16 | full-res depth dims the intrinsics apply to |
 | fx,fy,cx,cy | f32×4 | pinhole intrinsics (full resolution) |
+| k1,k2,p1,p2,k3,k4,k5,k6 | f32×8 | Brown-Conrady distortion (OpenCV order); central undistorts via a ray table |
 
 Both message types share the node→central stream; readers dispatch on the
 leading 4-byte magic (`read_message` returns `("frame", …)` or `("calib", …)`).

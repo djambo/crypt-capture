@@ -38,7 +38,8 @@ from protocol import control, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
-_FORWARDED_COMMANDS = ("set_depth", "capture_bg", "clear_bg", "set_bg_margin")
+_FORWARDED_COMMANDS = ("set_depth", "capture_bg", "clear_bg", "set_bg_margin",
+                       "set_denoise")
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
@@ -58,36 +59,54 @@ def default_intrinsics(w, h, hfov_deg=75.0):
 def load_intrinsics(calib_path, w, h):
     if calib_path:
         c = json.load(open(calib_path))
-        return c["fx"], c["fy"], c["cx"], c["cy"]
-    return default_intrinsics(w, h)
+        return (c["fx"], c["fy"], c["cx"], c["cy"],
+                tuple(c.get("dist", (0.0,) * 8)))
+    fx, fy, cx, cy = default_intrinsics(w, h)
+    return fx, fy, cx, cy, (0.0,) * 8
 
 
-def unproject(depth_u16, w, h, fx, fy, cx, cy, stride, node_stride=1,
+def compute_ray_table(w, h, fx, fy, cx, cy, dist, iters=8):
+    """Per-pixel viewing rays (X/Z, Y/Z) for a full-res grid, applying the
+    Brown-Conrady distortion model via iterative undistortion. Without this, the
+    Kinect's wide-FOV lens distortion bows flat surfaces into cones. With dist
+    all-zero it reduces exactly to the pinhole (u-cx)/fx."""
+    k1, k2, p1, p2, k3, k4, k5, k6 = (list(dist) + [0.0] * 8)[:8]
+    uu, vv = np.meshgrid(np.arange(w, dtype=np.float64),
+                         np.arange(h, dtype=np.float64))
+    xd = (uu - cx) / fx          # distorted (observed) normalized coords
+    yd = (vv - cy) / fy
+    x, y = xd.copy(), yd.copy()
+    for _ in range(iters):       # invert the distortion to recover true rays
+        r2 = x * x + y * y
+        radial = (1 + r2 * (k1 + r2 * (k2 + r2 * k3))) / \
+                 (1 + r2 * (k4 + r2 * (k5 + r2 * k6)))
+        dx = 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+        dy = p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+        x = (xd - dx) / radial
+        y = (yd - dy) / radial
+    return x.astype(np.float32), y.astype(np.float32)
+
+
+def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
               color_grid=None):
-    """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels.
-
-    The grid may already be downsampled on the node (`node_stride`): grid pixel
-    (u,v) corresponds to original pixel (u*node_stride, v*node_stride), so we
-    scale coordinates back to the full-resolution frame before applying the
-    (full-res) intrinsics. `stride` is an additional relay-side downsample.
-
-    xyz is (N,3) float32. rgb is (N,3) uint8 if a color_grid is supplied.
+    """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels, using the
+    distortion-aware full-res ray table. The grid may be node-downsampled
+    (`node_stride`): grid pixel (u,v) maps to ray_table[v*node_stride, u*node_stride].
+    `stride` is an additional relay-side downsample.
     """
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     us = np.arange(0, w, stride)
     vs = np.arange(0, h, stride)
     sub = d[vs][:, us]
-    # original (full-res) pixel coordinates for the intrinsics
-    ou = (us * node_stride).astype(np.float32)
-    ov = (vs * node_stride).astype(np.float32)
-    uu, vv = np.meshgrid(ou, ov)
     m = sub != 0
     if not m.any():
         return np.empty((0, 3), dtype=np.float32), (
             np.empty((0, 3), dtype=np.uint8) if color_grid is not None else None)
+    rx = ray_x[np.ix_(vs * node_stride, us * node_stride)]
+    ry = ray_y[np.ix_(vs * node_stride, us * node_stride)]
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
-    x = (uu[m] - cx) * z / fx
-    y = -((vv[m] - cy) * z / fy)                     # +Y up
+    x = rx[m] * z
+    y = -(ry[m] * z)                                 # +Y up
     xyz = np.column_stack((x, y, -z)).astype(np.float32)   # camera looks down -Z
     rgb = None
     if color_grid is not None:
@@ -132,8 +151,9 @@ class PreviewServer:
         self._clients = []                  # browser WebSocket sockets
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
-        self._intr = {}                     # (w,h) -> fallback intrinsics cache
-        self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy) from node
+        self._intr = {}                     # (w,h) -> fallback intrinsics+dist
+        self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy,dist)
+        self._ray = {}                      # sensor_id -> (w,h,ray_x,ray_y)
         self.frames_relayed = 0
 
     # --- browser (WebSocket) side ---------------------------------------
@@ -214,14 +234,24 @@ class PreviewServer:
 
     # --- node (TCP Frame) side ------------------------------------------
     def _intrinsics(self, sensor_id, w, h):
-        """Per-sensor intrinsics: the node's own (sent on connect) win; else
-        the --calib override file; else a FOV estimate from the dimensions."""
+        """Per-sensor (fx,fy,cx,cy,dist): the node's own (sent on connect) win;
+        else the --calib override file; else a FOV estimate."""
         if sensor_id in self._sensor_intr:
             return self._sensor_intr[sensor_id]
         key = (w, h)
         if key not in self._intr:
             self._intr[key] = load_intrinsics(self.calib, w, h)
         return self._intr[key]
+
+    def _ray_table(self, sensor_id, full_w, full_h):
+        """Distortion-aware ray table for this sensor's full-res grid (cached)."""
+        cached = self._ray.get(sensor_id)
+        if cached and cached[0] == full_w and cached[1] == full_h:
+            return cached[2], cached[3]
+        fx, fy, cx, cy, dist = self._intrinsics(sensor_id, full_w, full_h)
+        rx, ry = compute_ray_table(full_w, full_h, fx, fy, cx, cy, dist)
+        self._ray[sensor_id] = (full_w, full_h, rx, ry)
+        return rx, ry
 
     def _serve_node(self, conn, addr):
         print("[preview] node connected %s" % (addr[0],))
@@ -235,29 +265,33 @@ class PreviewServer:
                     break
                 kind, payload = msg
                 if kind == "calib":
-                    self._sensor_intr[payload["sensor_id"]] = (
-                        payload["fx"], payload["fy"], payload["cx"], payload["cy"])
+                    sid = payload["sensor_id"]
+                    self._sensor_intr[sid] = (
+                        payload["fx"], payload["fy"], payload["cx"],
+                        payload["cy"], payload.get("dist", (0.0,) * 8))
+                    self._ray.pop(sid, None)        # rebuild ray table on next frame
+                    d = payload.get("dist", (0.0,) * 8)
                     print("[preview] sensor %d intrinsics from node: "
-                          "fx=%.1f fy=%.1f cx=%.1f cy=%.1f" % (
-                              payload["sensor_id"], payload["fx"], payload["fy"],
-                              payload["cx"], payload["cy"]))
+                          "fx=%.1f fy=%.1f cx=%.1f cy=%.1f dist=[%s]" % (
+                              sid, payload["fx"], payload["fy"],
+                              payload["cx"], payload["cy"],
+                              " ".join("%.3f" % c for c in d)))
                     continue
                 frame = payload
                 if not frame.depth_rvl:
                     continue
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
-                # intrinsics are for the full-res frame; the node may have
-                # downsampled by frame.stride, so derive the original dimensions.
+                # the node may have downsampled by frame.stride; the ray table is
+                # full-res, so derive the original dimensions.
                 ns = frame.stride or 1
-                fx, fy, cx, cy = self._intrinsics(frame.sensor_id,
-                                                  frame.width * ns,
-                                                  frame.height * ns)
+                ray_x, ray_y = self._ray_table(frame.sensor_id,
+                                               frame.width * ns, frame.height * ns)
                 cgrid = None
                 if frame.color_aligned and frame.color:
                     cgrid = aligned_color_grid(frame.color, depth,
                                                frame.width, frame.height)
                 xyz, rgb = unproject(depth, frame.width, frame.height,
-                                     fx, fy, cx, cy, self.stride, ns, cgrid)
+                                     ray_x, ray_y, self.stride, ns, cgrid)
                 if xyz.shape[0] > self.max_points:
                     idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
                     xyz = xyz[idx]

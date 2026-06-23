@@ -151,6 +151,17 @@ Two repos:
   subtraction achieves by dropping the background. `--preview-stride` is just a
   crude point-reducer (subsampling) and is unnecessary when clipping keeps the
   count in budget; point count only spikes as the subject gets closer/larger.
+- ✅ **Lens-distortion correction** (`central/preview_server.compute_ray_table`):
+  the node now also sends the Kinect's Brown-Conrady coeffs (`k1..k6,p1,p2`) in
+  the `CCAL` handshake; the relay builds a per-sensor **ray table** via iterative
+  undistortion and unprojects through it (rays × depth) instead of the pinhole
+  `(u-cx)/fx`. Fixes flat surfaces bowing into "cones" on the wide-FOV depth cam.
+  Zero coeffs reduce exactly to pinhole (unit-tested; round-trip recovers rays to
+  ~1e-8). No `CPV1`/viewer change — the relay just emits correct XYZ.
+- ✅ **Speckle filter** (`node/background.denoise_mask`): drops kept pixels with
+  `< min_neighbors` valid 8-neighbours → removes the isolated ToF-noise points
+  that flicker after background subtraction; the dense subject is untouched.
+  Default `min_neighbors=2`, live-tunable via `set_denoise` (0 = off).
 - ✅ **Observability:** node prints a *windowed* fps (was a misleading
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so

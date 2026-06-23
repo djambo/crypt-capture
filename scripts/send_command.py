@@ -55,6 +55,10 @@ def main():
     bm = sub.add_parser("set-bg-margin", help="background tolerance (mm)")
     bm.add_argument("--mm", type=int, required=True)
 
+    dn = sub.add_parser("set-denoise", help="speckle filter strength (min valid "
+                        "8-neighbours to keep a point; 0 = off)")
+    dn.add_argument("--min-neighbors", type=int, required=True)
+
     args = ap.parse_args()
     if args.cmd == "set-depth":
         command = {"cmd": "set_depth"}
@@ -69,6 +73,9 @@ def main():
         send(args.host, args.port, {"cmd": "clear_bg"})
     elif args.cmd == "set-bg-margin":
         send(args.host, args.port, {"cmd": "set_bg_margin", "mm": args.mm})
+    elif args.cmd == "set-denoise":
+        send(args.host, args.port,
+             {"cmd": "set_denoise", "min_neighbors": args.min_neighbors})
 
 
 if __name__ == "__main__":

@@ -68,3 +68,19 @@ class BackgroundSubtractor:
         if self.plate is None:
             return None
         return (self.plate == 0) | (depth.astype(np.float32) < self.plate - self.margin)
+
+
+def denoise_mask(mask, min_neighbors=2):
+    """Remove isolated speckles from a boolean foreground mask: drop any kept
+    pixel with fewer than `min_neighbors` kept 8-neighbours. The subject is a
+    dense blob (interior pixels have 8) so it's untouched; lone ToF-noise pixels
+    (0–1 neighbours) disappear. `min_neighbors <= 0` is a no-op."""
+    if min_neighbors <= 0:
+        return mask
+    m = mask.astype(np.uint8)
+    c = np.zeros(mask.shape, np.uint16)
+    c[1:, :] += m[:-1, :]; c[:-1, :] += m[1:, :]
+    c[:, 1:] += m[:, :-1]; c[:, :-1] += m[:, 1:]
+    c[1:, 1:] += m[:-1, :-1]; c[:-1, :-1] += m[1:, 1:]
+    c[1:, :-1] += m[:-1, 1:]; c[:-1, 1:] += m[1:, :-1]
+    return mask & (c >= min_neighbors)

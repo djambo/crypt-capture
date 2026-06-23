@@ -107,12 +107,16 @@ def read_frame(sock: socket.socket):
 # preview --stride is reversed separately on central).
 
 CALIB_MAGIC = b"CCAL"
-_CALIB = struct.Struct("<4sIHHffff")   # magic, sensor_id, w, h, fx, fy, cx, cy
+# magic, sensor_id, w, h, fx, fy, cx, cy, then 8 Brown-Conrady distortion
+# coefficients in OpenCV order: k1, k2, p1, p2, k3, k4, k5, k6.
+_CALIB = struct.Struct("<4sIHHffff" + "ffffffff")
 _REST = struct.Struct("<BBHQQHHII")    # frame header after the 4s magic
 
 
-def encode_calib(sensor_id, width, height, fx, fy, cx, cy):
-    return _CALIB.pack(CALIB_MAGIC, sensor_id, width, height, fx, fy, cx, cy)
+def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
+    d = tuple(dist) + (0.0,) * (8 - len(dist))
+    return _CALIB.pack(CALIB_MAGIC, sensor_id, width, height,
+                       fx, fy, cx, cy, *d[:8])
 
 
 def read_message(sock):
@@ -127,9 +131,11 @@ def read_message(sock):
         rest = _recv_exactly(sock, _CALIB.size - 4)
         if not rest:
             return None
-        sid, w, h, fx, fy, cx, cy = struct.unpack("<IHHffff", rest)
+        vals = struct.unpack("<IHHffff" + "ffffffff", rest)
+        sid, w, h, fx, fy, cx, cy = vals[:7]
         return ("calib", {"sensor_id": sid, "width": w, "height": h,
-                          "fx": fx, "fy": fy, "cx": cx, "cy": cy})
+                          "fx": fx, "fy": fy, "cx": cx, "cy": cy,
+                          "dist": vals[7:15]})
     if magic != MAGIC:
         raise ValueError("bad magic %r — stream desynced" % (magic,))
     head = _recv_exactly(sock, _REST.size)

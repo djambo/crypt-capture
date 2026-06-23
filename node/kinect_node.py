@@ -35,7 +35,7 @@ from pyk4a import (
 
 from protocol import control, rvl
 from protocol.frame import Frame, encode_calib
-from node.background import BackgroundSubtractor
+from node.background import BackgroundSubtractor, denoise_mask
 
 
 def _build_config(sync, sub_delay_us):
@@ -67,12 +67,16 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     # Live-tunable depth mask, adjustable via the control channel. Plain dict +
     # GIL = safe for these scalar reads/writes between the capture loop and the
     # control reader thread.
-    rng = {"min": min_depth, "max": max_depth}
+    rng = {"min": min_depth, "max": max_depth, "denoise": 2}
     bg = BackgroundSubtractor()
 
     def on_command(cmd):
         c = cmd.get("cmd")
-        if c == "set_depth":
+        if c == "set_denoise":
+            rng["denoise"] = int(cmd.get("min_neighbors", 0))
+            print("sensor %d: speckle filter -> min_neighbors=%d"
+                  % (sensor_id, rng["denoise"]))
+        elif c == "set_depth":
             if "min" in cmd:
                 rng["min"] = int(cmd["min"])
             if "max" in cmd:
@@ -96,6 +100,12 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     # (no manual calib files, scales to N cameras). Sent once, before frames.
     mat = k4a.calibration.get_camera_matrix(pyk4a.CalibrationType.DEPTH)
     ifx, ify, icx, icy = mat[0][0], mat[1][1], mat[0][2], mat[1][2]
+    try:                                            # k1,k2,p1,p2,k3,k4,k5,k6
+        idist = tuple(float(c) for c in
+                      k4a.calibration.get_distortion_coefficients(
+                          pyk4a.CalibrationType.DEPTH))
+    except Exception:
+        idist = (0.0,) * 8                          # fall back to pinhole
     calib_sent = False
 
     sent = 0
@@ -111,7 +121,8 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             depth = cap.depth                       # uint16 (H, W), millimetres
             if not calib_sent:                      # full-res dims for intrinsics
                 sock.sendall(encode_calib(sensor_id, depth.shape[1],
-                                          depth.shape[0], ifx, ify, icx, icy))
+                                          depth.shape[0], ifx, ify, icx, icy,
+                                          idist))
                 calib_sent = True
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):
@@ -125,6 +136,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             fg = bg.foreground(depth)
             if fg is not None:
                 keep &= fg
+            keep = denoise_mask(keep, rng["denoise"])   # drop isolated ToF specks
             masked = np.where(keep, depth, 0).astype(np.uint16)
             # Preview downsample: stride on the node so RVL+color+wire all shrink
             # ~stride^2. The relay reverses it for metrically-correct unprojection

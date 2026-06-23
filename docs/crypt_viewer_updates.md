@@ -11,6 +11,15 @@
 > Star, base `CPV1` spec, v0 viewer sketch) was delivered separately as your
 > initial `CLAUDE.md`; these entries amend it.
 
+## How to use this file (note)
+Two recent server-side fixes need **no viewer change** — they just make the
+points correct: (a) **lens-distortion correction** (the relay now undistorts via
+the Kinect's coefficients, so flat surfaces stop bowing into cones), and (b) a
+**speckle filter** on the node (removes isolated ToF-noise points after
+background capture, default on). Optional: add a small **"Denoise" slider**
+(0–4, default 2) that sends `{"cmd":"set_denoise","min_neighbors":N}` if you want
+users to tune it; 0 turns it off.
+
 ## How to use this file
 - Each entry has a date, a summary, the **protocol impact**, and a concrete
   **viewer action** (often a code snippet).
