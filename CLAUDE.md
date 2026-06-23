@@ -162,12 +162,20 @@ processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test)
 tests/      test_rvl.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
-            crypt_viewer_handoff.md (drop into the `crypt` repo as its CLAUDE.md), jetson_setup.md
+            crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
+            crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
 takes/      recordings (gitignored)
 ```
 The browser **viewer is NOT here** — it lives in the `crypt` repo and consumes
 `docs/preview_protocol.md`. The Jetson pulls this repo and runs only `node/` +
 `protocol/`; it never runs the central server or the viewer.
+
+**Cross-repo handoff workflow.** The user works the `crypt` repo in parallel and
+its `CLAUDE.md` evolves there, so **never ship a replacement `CLAUDE.md`** for
+it. Instead, append a dated entry to `docs/crypt_viewer_updates.md` describing
+any protocol/viewer-facing change (with a concrete snippet), then merge to `main`
+and hand the user that file to upload manually into `crypt`. The viewer agent
+reads the entries and folds them in.
 
 ## How to run
 
