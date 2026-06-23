@@ -121,7 +121,16 @@ Two repos:
   unprojects stride-aware with **full-res intrinsics** (use `--calib`; relay
   default `--stride` is now 1). `kinect_node --profile` prints per-stage ms
   (cap/depth/color/send) to find the real bottleneck. Recording stays full-res
-  (node default stride 1). Next levers: thread-pipeline the node; C/Cython RVL.
+  (node default stride 1).
+  **Measured on the Nano:** `--preview-stride 2` → **27.5 fps** (was ~12), with
+  `cap 0 / RVL 22 / color 14 / send 0 ms/f` — purely CPU-bound on RVL+color, and
+  ~92% of the Azure Kinect's hard **30 fps** sensor cap. So pipelining (cap &
+  send are 0 → nothing to overlap except running RVL‖color on 2 cores) and
+  C-RVL would each only reclaim the last ~2.5 fps and can't beat 30 fps.
+  **Deferred** until they actually pay off: full-res recording and 4-cam CPU
+  contention (and the Orin hits 30 at higher res regardless). Next *quality*
+  levers (fps is maxed): use `--calib`, then background-plate subtraction, then
+  AI matting (RVM) on the Orin.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
