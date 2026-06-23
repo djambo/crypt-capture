@@ -34,7 +34,7 @@ import threading
 import numpy as np
 
 from protocol import control, rvl, websocket
-from protocol.frame import read_frame
+from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("set_depth",)
@@ -131,7 +131,8 @@ class PreviewServer:
         self._clients = []                  # browser WebSocket sockets
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
-        self._intr = {}                     # (w,h) -> intrinsics cache
+        self._intr = {}                     # (w,h) -> fallback intrinsics cache
+        self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy) from node
         self.frames_relayed = 0
 
     # --- browser (WebSocket) side ---------------------------------------
@@ -211,7 +212,11 @@ class PreviewServer:
                 self._drop(conn)
 
     # --- node (TCP Frame) side ------------------------------------------
-    def _intrinsics(self, w, h):
+    def _intrinsics(self, sensor_id, w, h):
+        """Per-sensor intrinsics: the node's own (sent on connect) win; else
+        the --calib override file; else a FOV estimate from the dimensions."""
+        if sensor_id in self._sensor_intr:
+            return self._sensor_intr[sensor_id]
         key = (w, h)
         if key not in self._intr:
             self._intr[key] = load_intrinsics(self.calib, w, h)
@@ -223,16 +228,27 @@ class PreviewServer:
             self._nodes.append(conn)
         try:
             while True:
-                frame = read_frame(conn)
-                if frame is None:
+                msg = read_message(conn)
+                if msg is None:
                     break
+                kind, payload = msg
+                if kind == "calib":
+                    self._sensor_intr[payload["sensor_id"]] = (
+                        payload["fx"], payload["fy"], payload["cx"], payload["cy"])
+                    print("[preview] sensor %d intrinsics from node: "
+                          "fx=%.1f fy=%.1f cx=%.1f cy=%.1f" % (
+                              payload["sensor_id"], payload["fx"], payload["fy"],
+                              payload["cx"], payload["cy"]))
+                    continue
+                frame = payload
                 if not frame.depth_rvl:
                     continue
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
                 # intrinsics are for the full-res frame; the node may have
                 # downsampled by frame.stride, so derive the original dimensions.
                 ns = frame.stride or 1
-                fx, fy, cx, cy = self._intrinsics(frame.width * ns,
+                fx, fy, cx, cy = self._intrinsics(frame.sensor_id,
+                                                  frame.width * ns,
                                                   frame.height * ns)
                 cgrid = None
                 if frame.color_aligned and frame.color:

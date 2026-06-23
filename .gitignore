@@ -3,4 +3,5 @@ __pycache__/
 takes/
 *.glb
 *.ply
+calib.json          # per-device camera intrinsics (nodes now send them on connect)
 .DS_Store

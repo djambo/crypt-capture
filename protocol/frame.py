@@ -98,3 +98,52 @@ def read_frame(sock: socket.socket):
         color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
         stride=stride or 1,          # 0 (old/unset) means full resolution
     )
+
+
+# --- node intrinsics handshake -------------------------------------------
+# Each node sends its OWN depth-camera intrinsics to central once on connect,
+# so central needs no per-device calib files and scales to N cameras. The
+# dimensions are the full-resolution depth grid (intrinsics are full-res; any
+# preview --stride is reversed separately on central).
+
+CALIB_MAGIC = b"CCAL"
+_CALIB = struct.Struct("<4sIHHffff")   # magic, sensor_id, w, h, fx, fy, cx, cy
+_REST = struct.Struct("<BBHQQHHII")    # frame header after the 4s magic
+
+
+def encode_calib(sensor_id, width, height, fx, fy, cx, cy):
+    return _CALIB.pack(CALIB_MAGIC, sensor_id, width, height, fx, fy, cx, cy)
+
+
+def read_message(sock):
+    """Read one node->central message, dispatching on the leading magic.
+
+    Returns ("frame", Frame), ("calib", dict), or None on clean close.
+    """
+    magic = _recv_exactly(sock, 4)
+    if not magic:
+        return None
+    if magic == CALIB_MAGIC:
+        rest = _recv_exactly(sock, _CALIB.size - 4)
+        if not rest:
+            return None
+        sid, w, h, fx, fy, cx, cy = struct.unpack("<IHHffff", rest)
+        return ("calib", {"sensor_id": sid, "width": w, "height": h,
+                          "fx": fx, "fy": fy, "cx": cx, "cy": cy})
+    if magic != MAGIC:
+        raise ValueError("bad magic %r — stream desynced" % (magic,))
+    head = _recv_exactly(sock, _REST.size)
+    if not head:
+        return None
+    sensor_id, flags, stride, frame_id, ts, w, h, dlen, clen = _REST.unpack(head)
+    depth = _recv_exactly(sock, dlen) if dlen else b""
+    color = _recv_exactly(sock, clen) if clen else b""
+    if (dlen and not depth) or (clen and not color):
+        return None
+    return ("frame", Frame(
+        sensor_id=sensor_id, frame_id=frame_id, timestamp_ns=ts,
+        width=w, height=h, depth=depth, color=color,
+        depth_rvl=bool(flags & FLAG_DEPTH_RVL),
+        color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
+        stride=stride or 1,
+    ))

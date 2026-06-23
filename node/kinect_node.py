@@ -28,12 +28,13 @@ import socket
 import time
 
 import numpy as np
+import pyk4a
 from pyk4a import (
     PyK4A, Config, DepthMode, ColorResolution, FPS, ImageFormat, WiredSyncMode,
 )
 
 from protocol import control, rvl
-from protocol.frame import Frame
+from protocol.frame import Frame, encode_calib
 
 
 def _build_config(sync, sub_delay_us):
@@ -78,6 +79,12 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
 
     control.start_reader(sock, on_command)
 
+    # Read this camera's own depth intrinsics; central will key them by sensor_id
+    # (no manual calib files, scales to N cameras). Sent once, before frames.
+    mat = k4a.calibration.get_camera_matrix(pyk4a.CalibrationType.DEPTH)
+    ifx, ify, icx, icy = mat[0][0], mat[1][1], mat[0][2], mat[1][2]
+    calib_sent = False
+
     sent = 0
     t0 = time.time()
     acc = {"cap": 0.0, "depth": 0.0, "color": 0.0, "send": 0.0}  # profiling
@@ -88,6 +95,10 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             if cap.depth is None:
                 continue
             depth = cap.depth                       # uint16 (H, W), millimetres
+            if not calib_sent:                      # full-res dims for intrinsics
+                sock.sendall(encode_calib(sensor_id, depth.shape[1],
+                                          depth.shape[0], ifx, ify, icx, icy))
+                calib_sent = True
             td = time.time()
 
             # Cheap working-range mask: keep [min,max] mm, zero everything else.

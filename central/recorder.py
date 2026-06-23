@@ -28,7 +28,7 @@ import threading
 import time
 from collections import defaultdict
 
-from protocol.frame import read_frame
+from protocol.frame import read_message
 
 
 class Recorder:
@@ -60,10 +60,13 @@ class Recorder:
     def _serve_conn(self, conn):
         try:
             while True:
-                frame = read_frame(conn)
-                if frame is None:
+                msg = read_message(conn)
+                if msg is None:
                     break
-                self._handle_frame(frame)
+                kind, payload = msg
+                if kind != "frame":      # ignore the intrinsics handshake, etc.
+                    continue
+                self._handle_frame(payload)
         finally:
             conn.close()
 

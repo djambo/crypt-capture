@@ -24,7 +24,7 @@ import time
 from array import array
 
 from protocol import control, rvl
-from protocol.frame import Frame
+from protocol.frame import Frame, encode_calib
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 
@@ -84,6 +84,12 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                   % (sensor_id, rng["min"], rng["max"]))
 
     control.start_reader(sock, on_command)
+
+    # Send synthetic intrinsics on connect (a plausible ~75° FOV pinhole), so the
+    # node-intrinsics path works headless and needs no --calib on the relay.
+    fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
+    sock.sendall(encode_calib(sensor_id, width, height, fx, fx,
+                              width / 2.0, height / 2.0))
 
     sent = 0
     try:

@@ -24,6 +24,23 @@ is an opaque encoded blob (NVENC H.26x on real nodes; a stub in the simulator).
 One TCP connection per node → central. The recorder groups frames by `frame_id`;
 a frame is "complete" once all N sensors delivered it.
 
+## Intrinsics handshake (TCP, node → central) — `protocol/frame.py`
+
+On connect, each node sends its **own** depth-camera intrinsics once, before any
+frames, so central needs no per-device calib files and scales to N cameras:
+
+| field | type | meaning |
+|---|---|---|
+| magic | 4s | `CCAL` |
+| sensor_id | u32 | which sensor these intrinsics are for |
+| width,height | u16,u16 | full-res depth dims the intrinsics apply to |
+| fx,fy,cx,cy | f32×4 | pinhole intrinsics (full resolution) |
+
+Both message types share the node→central stream; readers dispatch on the
+leading 4-byte magic (`read_message` returns `("frame", …)` or `("calib", …)`).
+Central keys intrinsics by `sensor_id`; the relay's `--calib` file is now just an
+optional override / fallback for nodes that don't send them.
+
 ## Take on disk — see `central/recorder.py`
 
 ```

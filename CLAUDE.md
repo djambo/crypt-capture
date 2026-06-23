@@ -129,8 +129,15 @@ Two repos:
   C-RVL would each only reclaim the last ~2.5 fps and can't beat 30 fps.
   **Deferred** until they actually pay off: full-res recording and 4-cam CPU
   contention (and the Orin hits 30 at higher res regardless). Next *quality*
-  levers (fps is maxed): use `--calib`, then background-plate subtraction, then
-  AI matting (RVM) on the Orin.
+  levers (fps is maxed): background-plate subtraction, then AI matting (RVM) on
+  the Orin.
+- ✅ **Auto intrinsics** (`CCAL` handshake): each node reads its own depth
+  intrinsics from the camera and sends them to central on connect, keyed by
+  `sensor_id` (`frame.encode_calib`/`read_message`). No manual calib files,
+  scales to N cameras. Relay `--calib` is now just an optional override; the
+  node's own intrinsics win. (`calib.json` is gitignored.) This also fixed the
+  "stretched cloud" bug: an out-of-date relay applied full-res `cx/cy` to a
+  node-strided grid — always pull both sides together.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -219,9 +226,9 @@ python3 -m central.preview_server                     # downsample now on the no
 python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --preview-stride 2
 python3 -m scripts.preview_client --frames 30
 # (real browser viewer = the `crypt` repo; speaks docs/preview_protocol.md)
-# Real cam, faster + metric: add --preview-stride 2 to kinect_node, --calib to the relay:
+# Real cam, faster + metric (node sends its own intrinsics; no --calib needed):
 #   python3 -m node.kinect_node --host LAPTOP --port 9000 --sensor 0 --frames 0 --preview-stride 2 --profile
-#   python3 -m central.preview_server --calib takes/real1/calib.json
+#   python3 -m central.preview_server
 
 # Live control (tune the depth mask on all nodes without a browser):
 python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
