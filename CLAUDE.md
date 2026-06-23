@@ -153,7 +153,8 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test)
 tests/      test_rvl.py
-docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md, jetson_setup.md
+docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
+            crypt_viewer_handoff.md (drop into the `crypt` repo as its CLAUDE.md), jetson_setup.md
 takes/      recordings (gitignored)
 ```
 The browser **viewer is NOT here** — it lives in the `crypt` repo and consumes
