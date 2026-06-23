@@ -30,6 +30,7 @@ import math
 import socket
 import struct
 import threading
+import time
 
 import numpy as np
 
@@ -226,6 +227,7 @@ class PreviewServer:
         print("[preview] node connected %s" % (addr[0],))
         with self._lock:
             self._nodes.append(conn)
+        win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0}   # throughput log
         try:
             while True:
                 msg = read_message(conn)
@@ -261,9 +263,21 @@ class PreviewServer:
                     xyz = xyz[idx]
                     if rgb is not None:
                         rgb = rgb[idx]
-                self._broadcast(build_message(frame.sensor_id, frame.frame_id,
-                                              xyz, rgb))
+                out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb)
+                self._broadcast(out)
                 self.frames_relayed += 1
+
+                win["n"] += 1; win["pts"] += xyz.shape[0]; win["bytes"] += len(out)
+                if win["n"] >= 30:
+                    dt = max(1e-6, time.time() - win["t"])
+                    with self._lock:
+                        nclients = len(self._clients)
+                    print("[preview] sensor %d: %.1f fps in | %d pts | "
+                          "%.0f KB/f | %d viewer(s)" % (
+                              frame.sensor_id, win["n"] / dt,
+                              win["pts"] // win["n"],
+                              win["bytes"] / win["n"] / 1024.0, nclients))
+                    win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0}
         finally:
             with self._lock:
                 if conn in self._nodes:

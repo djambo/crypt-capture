@@ -21,6 +21,73 @@
 
 ---
 
+## 2026-06-23 — Rendering perf + dual FPS HUD (IMPORTANT)
+**Status: NEW — not yet applied**
+
+**Why.** Full-resolution streams render at only ~8 fps in the viewer even though
+the Jetson is producing faster, but shrinking the cloud (fewer points) hits
+30 fps. That means the viewer is **render-bound**, and we currently can't tell
+because there's only one fps number. Two asks: (1) show **received fps** vs
+**rendered fps** separately, and (2) fix the rendering so it isn't the
+bottleneck. (No protocol change — `CPV1` is unchanged.)
+
+**1. Dual FPS HUD.** Track and display both:
+- **recv fps** — increment a counter in `ws.onmessage`; report per second.
+- **render fps** — increment in your `requestAnimationFrame` loop; report per second.
+
+If recv is high but render is low → render-bound (apply the fixes below). If recv
+is low → network/relay-bound (reduce points via the node's `--preview-stride` or
+the upcoming subject-clipping; the server also now logs its own `fps in / pts /
+KB/f` so you can compare all three numbers).
+
+**2. Rendering performance fixes (these are almost certainly your 8 fps):**
+- **Stop calling `geometry.computeBoundingSphere()` every message** — it's O(N)
+  per frame over every point and is the classic point-cloud perf killer. Instead
+  set `points.frustumCulled = false` once and never compute it.
+- **Don't do heavy work in `onmessage`.** Just copy the latest bytes into the
+  attribute and set a dirty flag; do the actual `needsUpdate`/draw in the rAF
+  loop. One render per animation frame, not per network message (they decouple
+  cleanly and fix the "two frame rates").
+- **Preallocate once** (`MAX` points), `attr.setUsage(THREE.DynamicDrawUsage)`,
+  `geometry.setDrawRange(0, count)`, and set `attr.updateRange = {offset:0,
+  count: count*itemSize}` so only the live points upload to the GPU each frame.
+- Avoid reallocating `Float32Array`/`BufferAttribute` per frame.
+
+```js
+points.frustumCulled = false;            // no bounding-sphere needed
+posAttr.setUsage(THREE.DynamicDrawUsage);
+colAttr.setUsage(THREE.DynamicDrawUsage);
+let latest = null, recv = 0, rend = 0;
+ws.onmessage = (e) => { latest = e.data; recv++; };   // cheap: just stash + count
+function frame() {
+  requestAnimationFrame(frame);
+  if (latest) {
+    const dv = new DataView(latest), flags = dv.getUint32(4,true);
+    const count = Math.min(dv.getUint32(16,true), MAX);
+    posAttr.array.set(new Float32Array(latest, 20, count*3));
+    posAttr.updateRange = {offset:0, count: count*3}; posAttr.needsUpdate = true;
+    if (flags & 2) { colAttr.array.set(new Uint8Array(latest, 20+count*12, count*3));
+                     colAttr.updateRange = {offset:0, count: count*3}; colAttr.needsUpdate = true; }
+    geometry.setDrawRange(0, count); latest = null;
+  }
+  controls.update(); renderer.render(scene, camera); rend++;
+}
+// once per second: hud.textContent = `recv ${recv} fps · render ${rend} fps · ${count} pts`; recv=rend=0;
+```
+
+**3. Quality.** The cloud looks rough as flat square dots. Cheap wins: round
+points (a small radial-alpha sprite texture or a tiny fragment shader discarding
+outside `length(gl_PointCoord-0.5)>0.5`), and size-by-distance
+(`sizeAttenuation: true`, tune `size`). Eye-Dome Lighting / surfel splatting are
+the bigger upgrades later (the rendering R&D branches have prior art).
+
+**Design note.** We will **never** want to push the full point count — the plan
+is to clip on the capture side and stream only the subject's points
+(background-plate subtraction is coming on the node). So optimize the viewer for
+"tens of thousands of points at 30 fps," not hundreds of thousands.
+
+---
+
 ## 2026-06-23 — Control plane: viewer can set the depth mask live
 **Status: NEW — not yet applied**
 

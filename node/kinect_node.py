@@ -87,6 +87,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
 
     sent = 0
     t0 = time.time()
+    win_t0 = t0                                 # windowed-fps marker
     acc = {"cap": 0.0, "depth": 0.0, "color": 0.0, "send": 0.0}  # profiling
     try:
         while frames <= 0 or sent < frames:
@@ -145,13 +146,20 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             acc["color"] += tcol - tz; acc["send"] += ts - tcol
             sent += 1
             if sent % 30 == 0:
-                fps = sent / (time.time() - t0)
-                msg = "sensor %d: %d frames (%.1f fps)" % (sensor_id, sent, fps)
+                now = time.time()
+                fps = 30.0 / (now - win_t0)          # windowed, not cumulative
+                pts = int((masked != 0).sum())
+                kb = (len(comp) + len(color)) / 1024.0
+                msg = ("sensor %d: %d frames | %.1f fps | %d pts | %.0f KB/f"
+                       % (sensor_id, sent, fps, pts, kb))
                 if profile:
                     msg += "  [cap %.0f depth %.0f color %.0f send %.0f ms/f]" % (
-                        acc["cap"] / sent * 1000, acc["depth"] / sent * 1000,
-                        acc["color"] / sent * 1000, acc["send"] / sent * 1000)
+                        acc["cap"] / 30 * 1000, acc["depth"] / 30 * 1000,
+                        acc["color"] / 30 * 1000, acc["send"] / 30 * 1000)
                 print(msg)
+                win_t0 = now
+                for k in acc:
+                    acc[k] = 0.0
     finally:
         try:
             sock.shutdown(socket.SHUT_RDWR)   # wake the control reader + send FIN
