@@ -16,10 +16,21 @@
 
 ## What this project is
 
-A pipeline + web app for a **library of short volumetric video clips** of a
-single performer, captured with **4 Azure Kinect DK** sensors, cleaned, fused
-into a solid surface, and served from a web app that **plays and creatively
-renders** the clips (particles/FX are a goal).
+A **live, networked capture web app** for volumetric video of a single
+performer, captured with **4 Azure Kinect DK** sensors (1 per Jetson). The
+central web app connects to the remote Jetsons over Ethernet, **live-streams
+their point clouds in real time**, and on a **trigger** has every node
+**record a full-fidelity clip to its own local disk** for **download** and
+post-processing. End-state = 4 sensors fused into one aligned cloud/surface;
+the recorded clips also feed the creative renderer (particles/FX are a goal).
+
+> **Scope note (2026-06):** the product is the *real-time app*; recording is one
+> mode of it, not the whole thing. Recording is **local-on-node, downloaded
+> after** (the wire only carries live preview + the download). Build order is
+> **live preview first**, then record/download, then N nodes, then multi-view
+> alignment/fusion. Full architecture + feasibility (bandwidth math, transport
+> choices, Orin-vs-Nano eval, MVP milestones) live in
+> **`docs/realtime_architecture.md`** — read it before building.
 
 Two repos:
 - **`crypt`** — the three.js (r148) creative renderer + rendering R&D (the
@@ -147,18 +158,29 @@ was a rendering artifact, not the data). Branches: `…-edl`, `…-vat`, `…-me
 
 ## Roadmap / next steps
 
-1. **Aligned color** → colored mesh: node should also capture color warped to
-   the depth grid (`pyk4a` `transformed_color`, 640×576) so `mesh_take.py` can
-   bake per-vertex colors. Next concrete task.
-2. **Phase 2** — 4 sensors: HW sync, extrinsic calibration (marker + ICP),
-   **TSDF fusion** (Open3D) → watertight mesh sequence → glTF/meshopt export.
-   Per-node frame_id alignment via device timestamps.
-3. **Phase 3** — web library app: capture trigger UI, recording browser,
-   playback (reuse the `crypt` renderer).
-4. **Phase 4** — creative FX (particles seeded from capture geometry); SMPL-X
-   template tracking (approach C) for fixed-topology streamable compression.
-5. **Productionize**: NumPy/C RVL (pure-Python is ~1 fps on the Nano), NVENC
-   color, Web Worker for offline meshing, decide final node hardware.
+Reoriented around the real-time app (full plan in
+`docs/realtime_architecture.md`). MVP = **one camera**, live preview +
+trigger-record-download.
+
+1. **M0 — Fast RVL.** Vectorized NumPy `compress`/`decompress` (gating for
+   real-time preview; pure-Python is ~1 fps on the Nano). **Next concrete task.**
+2. **M1 — Control plane.** Central ↔ node command channel (`arm/record/stop/
+   status`); node grows a control listener.
+3. **M2 — Live preview.** Single node → central decode/downsample → browser
+   three.js points over WebSocket (reuse `crypt` renderer).
+4. **M3 — Record + download.** Trigger → node records full-rate to **local
+   disk** → HTTP file server → recordings browser + download in UI.
+5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.
+6. **Phase 2 (M5) — Aligned/fused.** Extrinsic calibration (marker + ICP) →
+   aligned multi-view cloud; **TSDF fusion** (Open3D) → watertight mesh →
+   glTF/meshopt export for the renderer.
+7. **Phase 3 — creative FX** (particles from capture geometry); SMPL-X template
+   tracking (approach C) for fixed-topology streamable compression.
+
+Deferred (still wanted, off the MVP critical path): **aligned color → colored
+mesh** (node captures `pyk4a` `transformed_color` 640×576 so `mesh_take.py` can
+bake per-vertex colors); NVENC color on node; Web Worker / Wasm RVL for
+browser-side preview decode.
 
 ## Open items
 
