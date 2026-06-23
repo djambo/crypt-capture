@@ -1,6 +1,7 @@
-# The spine (protocol, sim node, recorder, demo) uses only the Python stdlib.
+# The spine (protocol, sim node, recorder, demo) uses only the Python stdlib;
+# every module falls back to pure Python when an optional dep is absent.
 # Optional / future module dependencies:
-#   numpy            # faster synthetic depth / array ops
+#   numpy            # RVL vectorized fast path (real-time M0); array ops
 #   pyk4a            # real Azure Kinect node
 #   torch torchvision  # per-view matting (RVM / BGMv2)
 #   open3d           # calibration (ICP) + TSDF fusion + meshing

@@ -80,6 +80,13 @@ Two repos:
   `processing/mesh_take.py` (unproject depth grid → triangulate with a
   depth-discontinuity edge cut → PLY). Produces a real single-view mesh of the
   subject.
+- ✅ **M0 — Fast RVL** (`protocol/rvl.py`): vectorized NumPy `compress`/
+  `decompress` alongside the pure-Python reference, **bit-identical** and
+  cross-checked in `tests/test_rvl.py`. Public `compress`/`decompress` dispatch
+  to NumPy when present, else fall back to pure Python (spine stays dep-free).
+  On an x86 dev box: full-res masked frame compress ~68 fps (was ~20), decompress
+  ~310 fps (~21×). `kinect_node` now passes the array straight to RVL (no
+  per-pixel `.tolist()`). Run: `python3 -m tests.test_rvl`.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -190,10 +197,10 @@ Reoriented around the real-time app (full plan in
 `docs/realtime_architecture.md`). MVP = **one camera**, live preview +
 trigger-record-download.
 
-1. **M0 — Fast RVL.** Vectorized NumPy `compress`/`decompress` (gating for
-   real-time preview; pure-Python is ~1 fps on the Nano). **Next concrete task.**
+1. ✅ **M0 — Fast RVL.** Vectorized NumPy `compress`/`decompress`, bit-identical
+   to the pure-Python reference with a fallback. Done (see Current status).
 2. **M1 — Control plane.** Central ↔ node command channel (`arm/record/stop/
-   status`); node grows a control listener.
+   status`); node grows a control listener. **Next concrete task.**
 3. **M2 — Live preview.** Single node → central decode/downsample → browser
    three.js points over WebSocket (reuse `crypt` renderer).
 4. **M3 — Record + download.** Trigger → node records full-rate to **local

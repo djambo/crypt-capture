@@ -75,7 +75,9 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             # long zero-runs. Replace with per-view AI matting for clean edges.
             masked = np.where((depth >= min_depth) & (depth <= max_depth),
                               depth, 0).astype(np.uint16)
-            comp = rvl.compress(masked.ravel().tolist())
+            # Pass the array straight to RVL — its NumPy fast path consumes it
+            # directly (no per-pixel .tolist() conversion on the hot path).
+            comp = rvl.compress(masked.ravel())
 
             color = cap.color.tobytes() if cap.color is not None else b""
 
