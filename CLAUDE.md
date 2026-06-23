@@ -145,9 +145,12 @@ Two repos:
   fewer points (big network+viewer fps win) and cleaner than the range clip. Unit
   tested (`tests/test_background.py`); forward path verified (relay→node).
   Integrated in `kinect_node`; `sim_node` just acks the commands (no real scene).
-  **Note:** shrinks point count (helps wire+viewer), *not* the node's full-grid
-  cost (color warp / grid scan), so stride-1 fps on the Nano still needs
-  measuring — the Orin removes that.
+  **Perf model (measured):** node fps is **point-count-bound**, not grid-bound —
+  the full-res grid scan / color warp are cheap. So **stride 1 (full resolution)
+  hits 30 fps as long as the subject stays ~20–30k points**, which background
+  subtraction achieves by dropping the background. `--preview-stride` is just a
+  crude point-reducer (subsampling) and is unnecessary when clipping keeps the
+  count in budget; point count only spikes as the subject gets closer/larger.
 - ✅ **Observability:** node prints a *windowed* fps (was a misleading
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
