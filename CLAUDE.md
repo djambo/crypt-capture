@@ -1,0 +1,156 @@
+# CLAUDE.md — project context & handoff
+
+> This file is auto-loaded by Claude Code. It distills a long design+build
+> session so any new session can continue without re-deriving everything.
+
+## What this project is
+
+A pipeline + web app for a **library of short volumetric video clips** of a
+single performer, captured with **4 Azure Kinect DK** sensors, cleaned, fused
+into a solid surface, and served from a web app that **plays and creatively
+renders** the clips (particles/FX are a goal).
+
+Two repos:
+- **`crypt`** — the three.js (r148) creative renderer + rendering R&D (the
+  front-end / "how it looks" layer).
+- **`crypt-capture`** (this repo) — capture → clean → reconstruct → compress →
+  deliver pipeline (the "how the data is made" layer).
+
+## Current status (what's DONE and validated)
+
+- ✅ **Phase 1 spine** (hardware-independent): `protocol/rvl.py` (lossless RVL
+  depth codec, ~14×, tested), `protocol/frame.py` (synced depth+color wire
+  protocol), `node/sim_node.py` (simulated node), `central/recorder.py` (groups
+  sensors by hardware-synced `frame_id`, writes "takes"), `scripts/run_demo.py`.
+- ✅ **Real capture validated** on a 1st-gen **Jetson Nano** with one Azure
+  Kinect: `node/kinect_node.py` (pyk4a → depth range-clip mask → RVL → stream)
+  recorded a real 60-frame take (`takes/real1`, ~131k valid depth px/frame).
+  Slow (~1 fps) because RVL is pure-Python on a weak CPU — fine for validation.
+- ✅ **Depth-grid meshing**: `node/dump_calibration.py` (depth intrinsics) +
+  `processing/mesh_take.py` (unproject depth grid → triangulate with a
+  depth-discontinuity edge cut → PLY). Produces a real single-view mesh of the
+  subject.
+
+## The big technical decisions (and WHY) — from a deep-research pass
+
+- **Geometry-based, NOT Gaussian splatting.** We have real metric depth from 4
+  Kinects. 3D/4D Gaussian splatting *throws depth away* and re-derives geometry
+  via per-scene training (COLMAP + hours of optimization) at video-grade
+  bandwidth; web playback of *dynamic* splats is bleeding-edge (one vendor,
+  Gracia). Lean into the depth. Revisit 4DGS only as a far-future fidelity bet.
+- **Representation = TSDF fusion → watertight mesh per frame ("approach B").**
+  Fusing 4 views into one signed-distance field *dissolves seams* by
+  construction (this is what Depthkit Studio does internally). Trade-off:
+  variable topology per frame → stream as per-frame meshes (not VAT).
+  - **Upgrade "approach C":** because the subject is always a HUMAN, fit/track a
+    parametric body template (**SMPL-X**) + displacement to get *consistent
+    topology* → VAT-able, temporally coherent, tiny. The AI path; more R&D.
+- **Keep the per-sensor depth-grid structure.** A depth map has free
+  connectivity (connect pixel neighbours, cut on depth discontinuity) and, if
+  the grid is constant, fixed topology → VAT (one draw call). The KEY past
+  mistake: the old Brekel *point-cloud* export discarded the grid (flat,
+  variable-count xyz list). Capture **raw per-sensor depth** (Azure Kinect SDK /
+  Open3D), do NOT use fusing exporters (LiveScan3D/Depthkit Studio/Brekel/EF EVE
+  all fuse and lose the grid).
+- **Cleanup = per-view AI matting** (Robust Video Matting, or BackgroundMattingV2
+  with a background plate since the rig is static) beats sparse skeleton
+  clipping for clean hair/finger edges. Run it ON the node to cut bandwidth.
+  (RVM is GPL-3.0 — licensing flag.)
+- **Depth transport = RVL** (Microsoft Research lossless depth codec, designed
+  for many Kinects over LAN). **Color = NVENC** H.26x on the node.
+- **Web delivery = glTF + `meshopt`, NOT Draco.** Draco is static-geometry-only
+  (can't compress morph/animation) and reorders vertices (breaks VAT/morph).
+  meshopt preserves order, compresses animation, fast Wasm decode. Vertex color
+  now; texture-as-video (UVOL/Arcturus style) later for photoreal. Mesh-sequence
+  web playback is production-ready (Arcturus HoloSuite, UVOL); your VAT renderer
+  is the DIY version.
+- **Distributed capture.** One Kinect per edge node (4 Kinects on one PC
+  saturates USB3 controllers). HW frame-sync via the 3.5 mm daisy-chain between
+  cameras; central machine sends the trigger (arm/record/stop) and does
+  alignment + fusion. Each node also does the AI matting (distributes the ML,
+  streams only the masked foreground).
+- **Node hardware.** Azure Kinect SDK is archived + x86-first; **Body Tracking
+  does NOT run on ARM/Jetson**; new Jetson OS (Orin/JetPack 5-6) fights the old
+  depth-engine binary. **Lowest-risk node = x86 mini-PC + small NVIDIA GPU.**
+  The Jetson Nano works (proven JetPack 4 / Ubuntu 18.04 combo) and is great for
+  free validation but too weak for production matting. (If Jetson: Orin NX, not
+  Orin Nano — Nano has no NVENC. Azure Kinect itself is discontinued; Orbbec
+  Femto Bolt is the successor.)
+
+## Repo layout
+
+```
+protocol/   rvl.py (depth codec), frame.py (wire protocol)
+node/       sim_node.py, kinect_node.py (real), dump_calibration.py
+central/    recorder.py (records synced takes)
+processing/ mesh_take.py (take -> depth-grid PLY mesh)
+scripts/    run_demo.py (hardware-free spine demo)
+docs/       hardware.md, protocol.md, jetson_setup.md
+web/        (TODO — reuse crypt three.js renderer)
+takes/      recordings (gitignored)
+```
+
+## How to run
+
+```bash
+# Hardware-free spine test:
+python3 scripts/run_demo.py --sensors 4 --frames 15
+
+# Real single-sensor capture (recorder + node, localhost):
+python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
+python3 -m node.kinect_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 60
+
+# Mesh a recorded take:
+python3 -m node.dump_calibration --out takes/real1/calib.json
+python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.json --frame 0
+# -> takes/real1/mesh/frame_000000.ply  (tune --edge-mm: lower=less webbing, higher=fewer holes)
+```
+
+## Environment gotchas (learned the hard way on the Nano)
+
+- **Source-built Azure Kinect SDK** installs incompletely: copy the *generated*
+  headers `k4aversion.h` + `k4a_export.h` and the `k4arecord/*` headers into
+  `/usr/include/k4a*`, and copy `libk4arecord.so*` into
+  `/usr/lib/aarch64-linux-gnu/` (+`ldconfig`). Set `K4A_INCLUDE_DIR=/usr/include`
+  `K4A_LIB_DIR=/usr/lib/aarch64-linux-gnu`. Install pyk4a with `--no-deps`
+  (system numpy via apt) then `pip install --user typing_extensions`.
+- **Python 3.6** (Nano default): `frame.py` is written 3.6-safe (no
+  dataclasses); the codebase must avoid `time.time_ns()` (3.7+) — use
+  `int(time.time()*1e9)`. (If you see a `dataclasses` error, an old `frame.py`
+  is present.)
+- **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
+  to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
+- See `docs/jetson_setup.md`.
+
+## Rendering R&D already done (in the `crypt` repo)
+
+Prototyped many ways to render the capture: GL_POINTS sphere-impostors + Eye-
+Dome Lighting; Vertex Animation Textures (one-draw-call); per-point PCA-normal
+surfel splatting; EWA weighted-splat blending; per-frame Delaunay trimeshes with
+interpolated vertex colors. Key learnings: a **fixed-topology depth-grid mesh +
+VAT** is the scalable representation; flat per-splat color reads as "tiled
+cells" on a solid surface (fixed by EWA blending or a real interpolated mesh);
+and the capture's **per-point colors are high quality** (not compressed — that
+was a rendering artifact, not the data). Branches: `…-edl`, `…-vat`, `…-mesh`,
+`…-deferred`, `…-surfel`, `…-ewa`, `…-trimesh`.
+
+## Roadmap / next steps
+
+1. **Aligned color** → colored mesh: node should also capture color warped to
+   the depth grid (`pyk4a` `transformed_color`, 640×576) so `mesh_take.py` can
+   bake per-vertex colors. Next concrete task.
+2. **Phase 2** — 4 sensors: HW sync, extrinsic calibration (marker + ICP),
+   **TSDF fusion** (Open3D) → watertight mesh sequence → glTF/meshopt export.
+   Per-node frame_id alignment via device timestamps.
+3. **Phase 3** — web library app: capture trigger UI, recording browser,
+   playback (reuse the `crypt` renderer).
+4. **Phase 4** — creative FX (particles seeded from capture geometry); SMPL-X
+   template tracking (approach C) for fixed-topology streamable compression.
+5. **Productionize**: NumPy/C RVL (pure-Python is ~1 fps on the Nano), NVENC
+   color, Web Worker for offline meshing, decide final node hardware.
+
+## Open items
+
+- Confirm whether any Brekel export retains structured per-sensor depth (its
+  site blocks automated checks) before committing to a fully custom capture.
+- RVM GPL-3.0 licensing vs a permissive matting model (BGMv2/MediaPipe/SAM2).
