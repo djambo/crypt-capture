@@ -32,6 +32,34 @@ the recorded clips also feed the creative renderer (particles/FX are a goal).
 > choices, Orin-vs-Nano eval, MVP milestones) live in
 > **`docs/realtime_architecture.md`** — read it before building.
 
+## Vision / North Star (the final goal — build toward it)
+
+**crypt** is an "edge of reality" framework. The end goal is a **WebXR/VR
+experience** where the user **cannot tell prerecorded from real-time** volumetric
+content sharing the same space:
+
+- **prerecorded** 4-Kinect volumetric clips, AND
+- **real-time** volumetric streams of whoever physically enters the capture
+  volume — including **the user's own body**: pre-record yourself, then **step
+  out of your own body** and watch the clip play back where you stood.
+- Far future: stream between **two locations** → volumetric **teleportation**.
+
+Two consequences this North Star forces *early* (don't defer them to fusion):
+
+1. **One shared world coordinate frame is foundational.** Live and recorded must
+   register to the same metric space (that's what makes "step out of your body"
+   work, even with one rig). The *coordinate-frame* part of calibration is
+   MVP-adjacent; only the 4-sensor seam-dissolving **fusion** is later.
+2. **Live stream == recorded clip representation.** The renderer should be
+   source-agnostic — it plays "point-cloud frames in world space" regardless of
+   whether they arrive over the wire (live) or off disk (recorded). Honor this
+   from the MVP (record in the wire/take format).
+
+WebXR tightens the **live** path's latency budget (motion-to-photon) → pushes
+toward WebRTC/WebTransport over WebSocket eventually; the *prerecorded-in-VR*
+path has no such constraint (local playback). Near-term order: **embedded
+Kinects streaming + trigger-record → WebXR → remote-location streaming.**
+
 Two repos:
 - **`crypt`** — the three.js (r148) creative renderer + rendering R&D (the
   front-end / "how it looks" layer).

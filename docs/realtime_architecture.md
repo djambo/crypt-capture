@@ -26,6 +26,33 @@ Confirmed product decisions:
 - **Build order: live preview first**, then record/download, then N nodes, then
   multi-view alignment/fusion.
 
+## North Star (where this is heading)
+
+The capture app is the foundation for a **WebXR/VR "edge of reality"
+experience**: prerecorded volumetric clips and **real-time** volumetric streams
+of whoever enters the capture volume, blended in the same space so the viewer
+**can't tell which is which** — including pre-recording the user and letting them
+**step out of their own body**. Far future: stream between two sites →
+volumetric **teleportation** (the WAN case, where the LAN bandwidth headroom
+above no longer applies).
+
+Two design constraints this imposes on everything below:
+
+1. **One shared world coordinate frame.** Live and recorded content must register
+   to the same metric space. So extrinsic calibration / world-anchoring is
+   **foundational, not a fusion-era afterthought** — needed as soon as live and
+   recorded coexist (even with one rig). The 4-sensor seam-dissolving *fusion*
+   stays later (M5); the coordinate frame comes early.
+2. **Source-agnostic representation.** The renderer consumes "point-cloud frames
+   in world space" and must not care whether they arrived live over the wire or
+   off local disk. Therefore the **live preview and the recorded take share one
+   representation** — record in the wire/take format, don't invent a second one.
+
+WebXR also tightens the **live** path's motion-to-photon budget (~20 ms),
+strengthening the eventual WebSocket → WebRTC/WebTransport move. The
+prerecorded-in-VR path is local playback and has no such budget — so the live
+path is the latency-critical one.
+
 ## Feasibility: the network is not the bottleneck — compute is
 
 Per Azure Kinect, NFOV unbinned depth (640×576, uint16):
