@@ -72,6 +72,30 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | command | meaning |
 |---|---|
 | `{"cmd":"set_depth","min":<mm>,"max":<mm>}` | set the working depth mask; pixels outside `[min,max]` mm are dropped (background removal). Either field optional. |
+| `{"cmd":"capture_bg","frames":<n>}` / `{"cmd":"clear_bg"}` / `{"cmd":"set_bg_margin","mm":<n>}` | background-plate subtraction (snapshot the empty scene, then stream only the subject). |
+| `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
+| `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
+
+**`set_camera`** lets the UI choose the camera mode live; the stream adapts (the
+node restarts the sensor as needed, re-reads its intrinsics, and re-sends the
+`CCAL` handshake — the relay then rebuilds the cloud with **no `CPV1`/viewer
+change**). Fields:
+
+- `depth_mode` — depth FOV mode: `NFOV_UNBINNED` (640×576), `NFOV_2X2BINNED`
+  (320×288), `WFOV_2X2BINNED` (512×512), `WFOV_UNBINNED` (1024×1024, 15 fps).
+  Restarts the sensor.
+- `align` — alignment direction (free, per-frame, no restart):
+  `color_to_depth` (default) streams **one point per depth pixel** (color warped
+  into the depth grid); `depth_to_color` streams **one point per color pixel**
+  (depth warped into the color grid) → much more color detail / a denser cloud,
+  at more points and some depth holes.
+- `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart;
+  mostly matters in `depth_to_color`, where the point grid IS the color image).
+- `fps` — `5`/`15`/`30`, auto-clamped (WFOV-unbinned & 3072p cap at 15) (restart).
+
+No ack is sent — the feedback is the cloud changing resolution/density. A camera
+change also resets the node's background plate (the grid is a different size), so
+the viewer should re-capture the background afterwards.
 
 (`arm` / `record` / `stop` will use this same channel later.)
 
