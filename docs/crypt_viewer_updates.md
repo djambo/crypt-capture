@@ -30,8 +30,54 @@ users to tune it; 0 turns it off.
 
 ---
 
-## 2026-06-23 — "Capture Background" button (subject-only points)
+## 2026-06-25 — Camera controls: depth/FOV mode, color resolution, geometry
 **Status: NEW — not yet applied**
+
+The node can now be reconfigured **live** from the viewer over the existing
+control channel (WebSocket text JSON → relay → node). One new command,
+`set_camera`, exposes four knobs of the Azure Kinect:
+
+| field | values | effect |
+|---|---|---|
+| `depth_mode` | `NFOV_UNBINNED`, `NFOV_2X2BINNED`, `WFOV_UNBINNED`, `WFOV_2X2BINNED` | the sensor's 4 depth/FOV modes (narrow≈75°/long-range vs wide≈120°/short-range; "2x2binned" = quarter-res, less noise, higher fps) |
+| `color_resolution` | `720P`, `1080P`, `1440P`, `1536P`, `2160P`, `3072P` | RGB sensor resolution → more color detail sampled onto the cloud |
+| `fps` | `5`, `15`, `30` | frame rate (auto-clamped: `WFOV_UNBINNED` & `3072P` cap at 15) |
+| `geometry` | `depth` (default), `color` | how the point cloud is built (see below) |
+
+All fields are optional; send only what you change, e.g.:
+
+```js
+ws.send(JSON.stringify({ cmd: "set_camera", geometry: "color",
+                         color_resolution: "1080P" }));
+ws.send(JSON.stringify({ cmd: "set_camera", depth_mode: "WFOV_2X2BINNED" }));
+```
+
+**`geometry` is the interesting one.**
+- `"depth"` (current behavior): color is warped *into* the depth grid → one
+  point per depth pixel (≤ 1024×1024). Fewer points.
+- `"color"`: depth is warped *into* the **color** grid → **one point per color
+  pixel** — a much denser, full-color-resolution cloud (the "color-aligned point
+  cloud"). At 1080P that's up to ~2M source points (background subtraction +
+  preview stride keep what's actually sent in budget).
+
+**Protocol impact: NONE.** This is the important part — **the `CPV1` wire format
+is unchanged and the viewer needs no rendering changes.** Under the hood the node
+just reports a different depth grid + the matching camera intrinsics (it re-sends
+its `CCAL` handshake on every switch), and the relay rebuilds its ray table
+automatically. You still receive `CPV1` positions (+ optional rgb) exactly as
+before; switching to `color` geometry simply yields more, finer, truer-colored
+points. **`count` will jump** when geometry/resolution changes — you already read
+`count` per frame, so nothing breaks, but size your buffers for the larger case
+(a `color`-geometry 1080P cloud can exceed the relay's default `--max-points`
+cap; the relay decimates above that — "the streaming adapts").
+
+**Viewer action (optional, UI only).** Add camera-control widgets that emit the
+`set_camera` JSON above — e.g. an FOV-mode dropdown, a color-resolution
+dropdown, and a "high-res color cloud" toggle (`geometry: color`/`depth`). No
+changes to the render loop or message parsing. If you let users pick high color
+resolutions, consider that the central relay's `--max-points` (default 200k) and
+`--stride` bound what actually arrives; surface a hint that very high res +
+`color` geometry is central/Orin-class territory.
 
 **Summary.** New upstream commands let the user snapshot the empty scene once and
 then stream **only the subject** (points closer than the background) — floor/walls

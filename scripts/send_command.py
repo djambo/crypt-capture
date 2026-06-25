@@ -59,6 +59,21 @@ def main():
                         "8-neighbours to keep a point; 0 = off)")
     dn.add_argument("--min-neighbors", type=int, required=True)
 
+    sc = sub.add_parser("set-camera", help="reconfigure the Kinect live: depth/FOV "
+                        "mode, color resolution, fps, and point-cloud geometry")
+    sc.add_argument("--depth-mode",
+                    choices=["NFOV_UNBINNED", "NFOV_2X2BINNED",
+                             "WFOV_UNBINNED", "WFOV_2X2BINNED"],
+                    help="depth/FOV mode (narrow vs wide, full vs 2x2 binned)")
+    sc.add_argument("--color-resolution",
+                    choices=["720P", "1080P", "1440P", "1536P", "2160P", "3072P"],
+                    help="RGB sensor resolution")
+    sc.add_argument("--fps", type=int, choices=[5, 15, 30],
+                    help="camera frame rate (auto-clamped for WFOV_UNBINNED/3072P)")
+    sc.add_argument("--geometry", choices=["depth", "color"],
+                    help="'depth' (1 pt/depth px) or 'color' (1 pt/color px = "
+                         "denser, full-res color cloud)")
+
     args = ap.parse_args()
     if args.cmd == "set-depth":
         command = {"cmd": "set_depth"}
@@ -76,6 +91,20 @@ def main():
     elif args.cmd == "set-denoise":
         send(args.host, args.port,
              {"cmd": "set_denoise", "min_neighbors": args.min_neighbors})
+    elif args.cmd == "set-camera":
+        command = {"cmd": "set_camera"}
+        if args.depth_mode is not None:
+            command["depth_mode"] = args.depth_mode
+        if args.color_resolution is not None:
+            command["color_resolution"] = args.color_resolution
+        if args.fps is not None:
+            command["fps"] = args.fps
+        if args.geometry is not None:
+            command["geometry"] = args.geometry
+        if len(command) == 1:
+            raise SystemExit("set-camera: specify at least one of "
+                             "--depth-mode/--color-resolution/--fps/--geometry")
+        send(args.host, args.port, command)
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from array import array
 
 from protocol import control, rvl
 from protocol.frame import Frame, encode_calib
+from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 
@@ -69,10 +70,19 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         preview_stride=1):
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    period = 1.0 / fps
     s = max(1, preview_stride)
 
     rng = {"min": 0, "max": 65535}             # live-tunable via control channel
+
+    # Active simulated camera config + the grid/FOV it implies. set_camera swaps
+    # these live, exactly as the real node reconfigures its sensor, so the whole
+    # browser->relay->node camera-control path is exercisable without hardware.
+    req0 = {"geometry": "depth"}
+    if fps in camera_modes.FPS_OPTIONS:
+        req0["fps"] = fps
+    cfg, (gw, gh, hfov, _vfov), _ = camera_modes.resolve({}, req0)
+    state = {"cfg": cfg, "w": gw, "h": gh, "hfov": hfov,
+             "fps": cfg["fps"], "recalib": True}
 
     def on_command(cmd):
         c = cmd.get("cmd")
@@ -83,6 +93,22 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 rng["max"] = int(cmd["max"])
             print("sensor %d: depth mask -> [%d, %d] mm"
                   % (sensor_id, rng["min"], rng["max"]))
+        elif c == "set_camera":
+            req = {k: cmd[k] for k in
+                   ("depth_mode", "color_resolution", "fps", "geometry")
+                   if k in cmd}
+            try:
+                ncfg, (nw, nh, nhfov, _), notes = camera_modes.resolve(
+                    state["cfg"], req)
+            except ValueError as exc:
+                print("sensor %d: bad set_camera (%s)" % (sensor_id, exc))
+                return
+            for n in notes:
+                print("sensor %d: %s" % (sensor_id, n))
+            state.update({"cfg": ncfg, "w": nw, "h": nh, "hfov": nhfov,
+                          "fps": ncfg["fps"], "recalib": True})
+            print("sensor %d: simulated camera -> %s (%dx%d)"
+                  % (sensor_id, ncfg, nw, nh))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -91,16 +117,18 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
 
     control.start_reader(sock, on_command)
 
-    # Send synthetic intrinsics on connect (a plausible ~75° FOV pinhole), so the
-    # node-intrinsics path works headless and needs no --calib on the relay.
-    fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
-    sock.sendall(encode_calib(sensor_id, width, height, fx, fx,
-                              width / 2.0, height / 2.0))
-
     sent = 0
     try:
         while frames <= 0 or sent < frames:   # frames <= 0 => until Ctrl-C
-            depth, color, gw, gh = synth_frame(width, height, sent, sensor_id,
+            w, h = state["w"], state["h"]
+            # (Re)send synthetic intrinsics whenever the simulated mode changes,
+            # so the relay rebuilds its ray table for the new grid/FOV.
+            if state["recalib"]:
+                fx = (w / 2.0) / math.tan(math.radians(state["hfov"]) / 2.0)
+                sock.sendall(encode_calib(sensor_id, w, h, fx, fx,
+                                          w / 2.0, h / 2.0))
+                state["recalib"] = False
+            depth, color, gw, gh = synth_frame(w, h, sent, sensor_id,
                                                rng["min"], rng["max"], s)
             comp = rvl.compress(depth)
             frame = Frame(
@@ -111,7 +139,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             )
             sock.sendall(frame.encode())
             sent += 1
-            time.sleep(period)
+            time.sleep(1.0 / max(1, state["fps"]))
     finally:
         # shutdown (not just close) so the control-reader thread's recv wakes
         # and the peer gets a clean FIN even with another thread on the socket.

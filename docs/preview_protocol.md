@@ -72,6 +72,33 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | command | meaning |
 |---|---|
 | `{"cmd":"set_depth","min":<mm>,"max":<mm>}` | set the working depth mask; pixels outside `[min,max]` mm are dropped (background removal). Either field optional. |
+| `{"cmd":"capture_bg","frames":<n>}` | snapshot the empty scene (average `n` frames) then keep only points closer than it. |
+| `{"cmd":"clear_bg"}` | disable background subtraction. |
+| `{"cmd":"set_bg_margin","mm":<mm>}` | background tolerance (closer-than-plate margin). |
+| `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (min valid 8-neighbours to keep a point; 0 = off). |
+| `{"cmd":"set_camera", ...}` | **reconfigure the Kinect live** (see below). |
+
+### `set_camera` — depth/FOV mode, color resolution, geometry
+
+Live camera control. Any subset of these fields:
+
+| field | values | effect |
+|---|---|---|
+| `depth_mode` | `NFOV_UNBINNED`, `NFOV_2X2BINNED`, `WFOV_UNBINNED`, `WFOV_2X2BINNED` | the sensor's 4 depth/FOV modes |
+| `color_resolution` | `720P`, `1080P`, `1440P`, `1536P`, `2160P`, `3072P` | RGB sensor resolution |
+| `fps` | `5`, `15`, `30` | frame rate (auto-clamped: `WFOV_UNBINNED` & `3072P` cap at 15) |
+| `geometry` | `depth` (default) or `color` | point-cloud grid: `depth` = 1 point/depth pixel; `color` = 1 point/**color** pixel (denser, full-res color cloud) |
+
+```js
+ws.send(JSON.stringify({ cmd: "set_camera", geometry: "color",
+                         color_resolution: "1080P" }));
+```
+
+**No `CPV1` change.** The node re-sends its `CCAL` intrinsics handshake on every
+switch and the relay rebuilds its ray table; the viewer keeps reading `CPV1`
+positions/rgb unchanged. `count` jumps when the mode changes (you already read it
+per frame). A `color`-geometry, high-resolution cloud can exceed the relay's
+`--max-points` cap, above which the relay decimates — the stream adapts.
 
 (`arm` / `record` / `stop` will use this same channel later.)
 

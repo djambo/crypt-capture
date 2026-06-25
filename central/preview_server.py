@@ -38,8 +38,11 @@ from protocol import control, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
+# The relay is geometry-agnostic: `set_camera` just changes which depth grid +
+# intrinsics the node reports (it re-sends a CCAL handshake), and the existing
+# per-sensor ray-table rebuild handles the new dimensions automatically.
 _FORWARDED_COMMANDS = ("set_depth", "capture_bg", "clear_bg", "set_bg_margin",
-                       "set_denoise")
+                       "set_denoise", "set_camera")
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count

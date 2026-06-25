@@ -162,6 +162,26 @@ Two repos:
   `< min_neighbors` valid 8-neighbours → removes the isolated ToF-noise points
   that flicker after background subtraction; the dense subject is untouched.
   Default `min_neighbors=2`, live-tunable via `set_denoise` (0 = off).
+- ✅ **Live camera controls** (`node/camera_modes.py` + `set_camera` control cmd):
+  the user can reconfigure the Kinect **live** from the UI — its **4 depth/FOV
+  modes** (`NFOV/WFOV` × `unbinned/2x2binned`), **color resolution** (720P–3072P),
+  **fps**, and the **point-cloud geometry**. Geometry is the key new lever:
+  `depth` (color warped into the depth grid, 1 pt/depth px) vs `color` (depth
+  warped into the **color** grid via `cap.transformed_depth` → 1 pt/**color** px
+  = a much denser, full-color-resolution "color-aligned point cloud"). The
+  pyk4a-free catalog/validator (`camera_modes.resolve`, unit-tested in
+  `tests/test_camera_modes.py`, clamps illegal fps combos) is shared by the real
+  node (maps names→pyk4a enums, restarts the sensor on a mode change, re-reads
+  COLOR-vs-DEPTH intrinsics, re-sends `CCAL`) and `sim_node` (synthesizes
+  matching grids/FOV, so the whole browser→relay→node path is testable headless —
+  verified: switching to `color`/1080P live re-handshakes at 1920×1080). **The
+  relay + `CPV1` + viewer are unchanged** (geometry-agnostic: the node just
+  reports a different grid + intrinsics; the relay rebuilds its ray table on the
+  new `CCAL`). "Streaming adapts" = node `--preview-stride` + relay
+  `--max-points`/`--stride` bound what a dense color cloud actually sends. Drive
+  headless: `python3 -m scripts.send_command set-camera --geometry color
+  --color-resolution 1080P`. Perf note: high color res + `color` geometry is
+  central/Orin-class (pure-Python RVL chokes on a Nano at multi-Mpx grids).
 - ✅ **Observability:** node prints a *windowed* fps (was a misleading
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
@@ -219,12 +239,13 @@ Two repos:
 protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay),
             control.py (central->node commands, CTL1)
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
+            camera_modes.py (depth/FOV/color/geometry catalog + resolver),
             dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py, test_background.py
+tests/      test_rvl.py, test_background.py, test_camera_modes.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
@@ -261,6 +282,11 @@ python3 -m scripts.preview_client --frames 30
 
 # Live control (tune the depth mask on all nodes without a browser):
 python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
+# Live camera controls (FOV/depth mode, color res, fps, point-cloud geometry):
+python3 -m scripts.send_command set-camera --depth-mode WFOV_2X2BINNED
+python3 -m scripts.send_command set-camera --geometry color --color-resolution 1080P
+# Camera-mode catalog/validator tests (stdlib only, no numpy/hardware):
+python3 -m tests.test_camera_modes
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -314,10 +340,12 @@ trigger-record-download.
    `scripts/preview_client.py`. ⏳ *remaining*: the browser three.js/WebXR viewer
    in the **`crypt` repo** (consumes `docs/preview_protocol.md`); optional color.
 3. 🟡 **M1 — Control plane.** ✅ central → node command channel (`protocol/
-   control.py`, `CTL1`) with browser→relay→node fan-out; first command
-   `set_depth` (live depth-mask tuning) done & verified. ⏳ remaining:
-   `arm/record/stop/status` commands (M3 needs them); optional status/echo back
-   to the UI.
+   control.py`, `CTL1`) with browser→relay→node fan-out; commands done &
+   verified: `set_depth`, `capture_bg`/`clear_bg`/`set_bg_margin`, `set_denoise`,
+   and **`set_camera`** (live depth/FOV mode, color resolution, fps, point-cloud
+   geometry — see Current status). ⏳ remaining: `arm/record/stop/status`
+   commands (M3 needs them); optional status/echo back to the UI (currently a
+   reconfig only logs on the node — no ack reaches the browser yet).
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.
