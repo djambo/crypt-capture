@@ -30,6 +30,57 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-06-25 — Camera controls (pick which Kinect data to send)
+**Status: NEW — not yet applied**
+
+**Summary.** A new upstream command, `set_camera`, lets the UI pick the Azure
+Kinect capture mode **live** — the depth FOV mode and the alignment direction
+(plus color resolution / fps, available but not surfaced in the UI yet). The
+stream adapts automatically: the node restarts the sensor when needed, re-reads
+its intrinsics, and re-sends the `CCAL` handshake, so the relay rebuilds the
+cloud at the new resolution. **No `CPV1` change and no rendering change** — points
+just arrive at a different density. (Implemented & verified end-to-end headless:
+flipping alignment took the sim cloud from ~98k pts on a 640×576 grid to a denser
+1280×720 color grid, intrinsics rebuilt each time.)
+
+**Why you'd use it.** `depth_to_color` alignment streams **one point per color
+pixel** instead of one per depth pixel → far more color detail / a denser cloud,
+which is what you want for a higher-res colored mesh. Cost: more points and some
+holes where depth is sparse. `color_to_depth` (default) is the original path.
+
+**Command (WebSocket text → server → node), all fields optional:**
+```json
+{"cmd":"set_camera",
+ "depth_mode":"NFOV_UNBINNED",   // or NFOV_2X2BINNED, WFOV_2X2BINNED, WFOV_UNBINNED
+ "align":"color_to_depth",       // or depth_to_color
+ "color_resolution":"720P",      // 720P..3072P (optional; mostly matters in depth_to_color)
+ "fps":30}                        // 5/15/30, auto-clamped (optional)
+```
+- `depth_mode` / `color_resolution` / `fps` restart the sensor (~1 s gap).
+- `align` is a free per-frame switch (instant).
+- No ack — the feedback is the cloud changing. **A camera change resets the
+  node's background plate** (grid is a different size), so re-capture background
+  after changing the camera.
+
+**Viewer action — two dropdowns in the control panel:**
+1. **depth FOV** select: NFOV narrow (640×576) / NFOV narrow binned (320×288) /
+   WFOV wide binned (512×512) / WFOV wide (1024², 15fps).
+2. **align** select: "colour → depth (default)" / "depth → colour (more colour)".
+3. On change, send the current `{cmd:"set_camera", depth_mode, align}` (the node
+   ignores unchanged fields); re-send on reconnect (a fresh node starts at its
+   defaults); and clear the background-status label (the plate is gone).
+
+```js
+function sendCamera() {
+  ws.send(JSON.stringify({ cmd: 'set_camera', depth_mode, align }))
+}
+```
+Note: `depth_to_color` at higher color resolutions can exceed the viewer's
+`MAX_POINTS` / the server's `--max-points` (200k default) — both clamp safely;
+raise them if you want the full density.
+
+---
+
 ## 2026-06-23 — "Capture Background" button (subject-only points)
 **Status: NEW — not yet applied**
 
