@@ -69,12 +69,20 @@ and a small gizmo at the **camera origin** (0,0,0 — the cloud is in camera spa
 = a wireframe cube + R/G/B axis sticks + a "down" stick along `gravity`. The gap
 between the axis-aligned gizmo and the tilted grid shows the camera's tilt.
 
-**Hardware note (FYI, no viewer action).** The Kinect IMU has its own axes
-(rotated from the depth optical frame by a factory extrinsic pyk4a doesn't
-reliably expose), so on real hardware the "down" direction may need an axis/sign
-tweak — the same iterative bring-up the depth/colour paths went through. The
-`sim_node` feeds a known-good, slightly-tilted vector so the whole path + your
-viewer are testable headless (you'll see a ~10° floor tilt).
+Add a **`camera orientation (IMU)` toggle** (off by default) that sends
+`{"cmd":"set_imu","enabled":<bool>}` upstream: on → the node streams a fresh
+gravity vector continuously so the floor/gizmo **reorient live** as the camera is
+physically turned; off → freeze the grid level + hide the down stick. Re-send it
+on reconnect (`resync`), and apply the latest gravity immediately on enable
+rather than waiting for the next change.
+
+**Hardware note (FYI, no viewer action).** The Kinect IMU has its own axes; the
+node now rotates the accelerometer reading into the depth frame via the factory
+**ACCEL→DEPTH extrinsic** (`convert_3d_to_3d`). Without it the floor renders
+**sideways/vertical**. If a pyk4a build doesn't expose the extrinsic it falls
+back to raw axes (logs a warning), and "down" may need a manual tweak. The
+`sim_node` feeds a known-good vector (and wobbles it while streaming) so the
+whole path + your viewer are testable headless.
 
 ---
 

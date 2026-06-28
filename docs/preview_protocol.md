@@ -84,6 +84,7 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | `{"cmd":"capture_bg","frames":<n>}` / `{"cmd":"clear_bg"}` / `{"cmd":"set_bg_margin","mm":<n>}` | background-plate subtraction (snapshot the empty scene, then stream only the subject). |
 | `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
 | `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
+| `{"cmd":"set_imu","enabled":<bool>}` | **stream live IMU orientation.** When enabled, the node re-reads the accelerometer every ~10 frames and re-sends a fresh gravity (down) vector, so the cloud reorients live as the camera is physically turned. Off by default (one gravity vector is still sent at connect). The gravity rides in the `CPV1` gravity block (bit2). |
 
 **`set_camera`** lets the UI choose the camera mode live; the stream adapts (the
 node restarts the sensor as needed, re-reads its intrinsics, and re-sends the

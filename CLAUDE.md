@@ -189,11 +189,16 @@ Two repos:
   unprojector) and attaches it to **every** `CPV1` frame as a trailing optional
   block (new `FLAG_GRAVITY = 0x4`, 3×float32 after positions+rgb). Gives the
   cloud an initial orientation before extrinsic calibration; the viewer draws a
-  floor grid + camera-orientation gizmo from it. `sim_node` emits a known-good
-  slightly-tilted vector so the path is testable headless; unit-tested
-  (`tests/test_imu.py`) and verified end-to-end (sim→relay→browser). **Hardware
-  caveat:** the IMU↔depth factory extrinsic isn't applied (pyk4a doesn't reliably
-  expose it), so "down" may need an axis/sign tweak on a real Kinect.
+  floor grid + camera-orientation gizmo from it. The node rotates the
+  accelerometer into the depth frame via the factory **ACCEL→DEPTH extrinsic**
+  (`_accel_to_depth` → `convert_3d_to_3d`); without it the floor is sideways
+  (the IMU has its own axes). Falls back to raw axes + a warning if a pyk4a build
+  lacks it. **Live reorientation:** a `set_imu {enabled}` control command
+  (off by default) makes the node re-read + re-send gravity every `IMU_EVERY`
+  frames so the cloud reorients as the camera is physically turned (driven by the
+  viewer's "camera orientation" toggle). `sim_node` emits a known-good vector
+  (and wobbles it while streaming) so the path is testable headless; unit-tested
+  (`tests/test_imu.py`) and verified end-to-end (sim→relay→browser).
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
