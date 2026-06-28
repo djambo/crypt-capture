@@ -81,12 +81,13 @@ camera gizmo + particles) so the measured gravity maps onto world-down
 (`setFromUnitVectors(gravity, (0,-1,0))`): the camera + cloud reorient, the floor
 stays put.
 
-**Hardware note (FYI, no viewer action).** The Kinect IMU has its own axes; the
-node rotates the accelerometer into the depth frame via the factory
-**ACCEL→DEPTH extrinsic** (`convert_3d_to_3d`). Without it the floor renders
-sideways/vertical. The node logs `accel raw=… -> gravity(optical)=…` and accepts
-`--imu-axes "-y,-x,-z"` to manually remap when the extrinsic is unavailable. All
-node-side; no viewer change.
+**Hardware note (FYI, no viewer action).** The Azure Kinect IMU is rotated ~90°
+about depth-X, so left raw a level camera's gravity lands on depth +Z (forward)
+and the floor tips up onto the far wall. The node now applies the built-in axis
+map `(x,y,z)->(x,z,-y)` by default (gravity back on +Y/down, verified on real
+hardware); the pyk4a factory extrinsic is opt-in via `--imu-extrinsic`, and
+`--imu-axes "x,z,-y"` overrides outright. The node logs `accel raw=… ->
+gravity(optical)=…`. All node-side; no viewer change.
 
 ---
 
