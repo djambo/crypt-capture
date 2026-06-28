@@ -30,6 +30,16 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-06-28 — Removed the depth-mask `set_depth` command (cleanup)
+**Status: NEW — informational.** The near/far depth-mask is gone end-to-end: the
+node streams the **full depth range** and culls via background subtraction + the
+speckle filter. The `set_depth` command, the node clip, `--min-depth/--max-depth`,
+and the relay forward were all removed; the viewer stops sending `set_depth` on
+connect. **No `CPV1` change, no viewer action** beyond not sending `set_depth`.
+Note: without a background plate the node now streams the whole scene (heavier).
+
+---
+
 ## 2026-06-28 — Cross-alignment registration (no viewer action)
 **Status: NEW — informational, no viewer change.** Switching `align`
 color→depth ↔ depth→colour used to slightly **tilt the cloud about X** (+ a small

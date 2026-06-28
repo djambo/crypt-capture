@@ -267,7 +267,7 @@ def _read_intrinsics(k4a, align):
     return fx, fy, cx, cy, dist
 
 
-def run(host, port, sensor_id, frames, min_depth, max_depth,
+def run(host, port, sensor_id, frames,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
         imu_axes=None, imu_extrinsic=False):
@@ -288,10 +288,10 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     s = max(1, preview_stride)
 
-    # Live-tunable depth mask, adjustable via the control channel. Plain dict +
-    # GIL = safe for these scalar reads/writes between the capture loop and the
-    # control reader thread.
-    rng = {"min": min_depth, "max": max_depth, "denoise": 2}
+    # We stream the full depth range — culling is background subtraction + the
+    # speckle filter, not a near/far clip (the depth-mask UI/command was removed).
+    # Plain dict + GIL = safe between the capture loop and the control reader.
+    rng = {"denoise": 2}
     bg = BackgroundSubtractor()
     # IMU orientation streaming, toggled live from the UI ("camera orientation").
     imu = {"stream": False}
@@ -308,13 +308,6 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             rng["denoise"] = int(cmd.get("min_neighbors", 0))
             print("sensor %d: speckle filter -> min_neighbors=%d"
                   % (sensor_id, rng["denoise"]))
-        elif c == "set_depth":
-            if "min" in cmd:
-                rng["min"] = int(cmd["min"])
-            if "max" in cmd:
-                rng["max"] = int(cmd["max"])
-            print("sensor %d: depth mask -> [%d, %d] mm"
-                  % (sensor_id, rng["min"], rng["max"]))
         elif c == "capture_bg":
             n = int(cmd.get("frames", 60))
             bg.start_capture(n)
@@ -413,10 +406,10 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                     print("sensor %d: background captured" % sensor_id)
             td = time.time()
 
-            # Working-range mask, then (if a plate exists) keep only pixels
+            # Keep all valid pixels, then (if a plate exists) keep only those
             # closer than the background — floor/walls at any distance drop out,
-            # leaving just the subject.
-            keep = (depth >= rng["min"]) & (depth <= rng["max"])
+            # leaving just the subject. No near/far clip: the full range streams.
+            keep = depth > 0
             fg = bg.foreground(depth)
             if fg is not None:
                 keep &= fg
@@ -510,8 +503,6 @@ def main():
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--sensor", type=int, default=0, help="sensor_id 0..N-1")
     ap.add_argument("--frames", type=int, default=60, help="0 = until Ctrl-C")
-    ap.add_argument("--min-depth", type=int, default=500, help="mm")
-    ap.add_argument("--max-depth", type=int, default=2500, help="mm")
     ap.add_argument("--sync", choices=["standalone", "master", "sub"],
                     default="standalone")
     ap.add_argument("--sub-delay-us", type=int, default=0,
@@ -544,7 +535,7 @@ def main():
                          "build doesn't expose the extrinsic)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
-        args.min_depth, args.max_depth, args.sync, args.sub_delay_us,
+        args.sync, args.sub_delay_us,
         args.preview_stride, args.profile,
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
         fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes,

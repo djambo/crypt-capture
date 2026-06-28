@@ -39,13 +39,12 @@ SIM_GRAVITY_OPTICAL = (0.15, 0.98, 0.10)
 IMU_EVERY = 10
 
 
-def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1):
+def synth_frame(width, height, frame_id, sensor_id, stride=1):
     """A moving elliptical blob of smooth valid depth on a zero background, plus
     a depth-aligned RGB payload (one triple per valid pixel, row-major) so the
-    color path is exercisable without hardware. Pixels outside [dmin,dmax] mm are
-    masked out (mirrors the real node's live depth control). When stride>1 the
-    grid is generated directly at the downsampled resolution; blob geometry still
-    uses original pixel coords so the relay reconstructs the same cloud.
+    color path is exercisable without hardware. When stride>1 the grid is
+    generated directly at the downsampled resolution; blob geometry still uses
+    original pixel coords so the relay reconstructs the same cloud.
 
     Returns (depth_array, color_bytes, grid_w, grid_h)."""
     xs = list(range(0, width, stride))
@@ -65,8 +64,6 @@ def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1
             r2 = nx * nx + ny * ny
             if r2 < 1.0:
                 z = base + int(260 * math.sqrt(r2)) + jit.randint(0, 3)
-                if z < dmin or z > dmax:           # depth-range mask
-                    continue
                 depth[gy * gw + gx] = z
                 # simple gradient so the cloud isn't a flat color
                 color += bytes((int(255 * x / width),
@@ -82,8 +79,6 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
     period = 1.0 / fps
     s = max(1, preview_stride)
 
-    rng = {"min": 0, "max": 65535}             # live-tunable via control channel
-
     # Mutable camera config + current synthetic grid, so set_camera is testable
     # headless: changing the depth FOV mode / alignment switches the grid size
     # the sim emits, and re-sends the CCAL handshake (proving the relay rebuilds
@@ -96,14 +91,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
 
     def on_command(cmd):
         c = cmd.get("cmd")
-        if c == "set_depth":
-            if "min" in cmd:
-                rng["min"] = int(cmd["min"])
-            if "max" in cmd:
-                rng["max"] = int(cmd["max"])
-            print("sensor %d: depth mask -> [%d, %d] mm"
-                  % (sensor_id, rng["min"], rng["max"]))
-        elif c == "set_camera":
+        if c == "set_camera":
             with cfg_lock:
                 changed = camera_modes.apply_camera_command(cfg, cmd)
                 changed.pop("restart", None)
@@ -150,8 +138,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 state["resend_calib"] = False
             if resend:                         # (re)announce grid + intrinsics
                 send_calib(width, height)
-            depth, color, gw, gh = synth_frame(width, height, sent, sensor_id,
-                                               rng["min"], rng["max"], s)
+            depth, color, gw, gh = synth_frame(width, height, sent, sensor_id, s)
             comp = rvl.compress(depth)
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,

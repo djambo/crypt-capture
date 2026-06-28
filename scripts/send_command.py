@@ -3,8 +3,8 @@ Send a control command to the running preview server (which forwards it to the
 nodes). Connects to the same WebSocket the browser uses — so this is the
 no-browser way to drive the control plane from the central machine.
 
-    # set the depth mask to 0.4m .. 4.0m on all nodes:
-    python3 -m scripts.send_command --host 127.0.0.1 --port 8080 set-depth --min 400 --max 4000
+    # capture a background plate on all nodes (step out of frame first!):
+    python3 -m scripts.send_command --host 127.0.0.1 --port 8080 capture-bg --frames 60
 
 The browser UI sends the exact same JSON; see docs/preview_protocol.md.
 """
@@ -42,10 +42,6 @@ def main():
     ap.add_argument("--port", type=int, default=8080)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    sd = sub.add_parser("set-depth", help="set the working depth mask (mm)")
-    sd.add_argument("--min", type=int)
-    sd.add_argument("--max", type=int)
-
     cb = sub.add_parser("capture-bg", help="snapshot the empty scene, then keep "
                         "only points closer than it (step out first!)")
     cb.add_argument("--frames", type=int, default=60, help="frames to average")
@@ -70,14 +66,7 @@ def main():
     sc.add_argument("--align", choices=["color_to_depth", "depth_to_color"])
 
     args = ap.parse_args()
-    if args.cmd == "set-depth":
-        command = {"cmd": "set_depth"}
-        if args.min is not None:
-            command["min"] = args.min
-        if args.max is not None:
-            command["max"] = args.max
-        send(args.host, args.port, command)
-    elif args.cmd == "capture-bg":
+    if args.cmd == "capture-bg":
         send(args.host, args.port, {"cmd": "capture_bg", "frames": args.frames})
     elif args.cmd == "clear-bg":
         send(args.host, args.port, {"cmd": "clear_bg"})

@@ -80,8 +80,7 @@ Commands are `{"cmd": ...}` objects. Current commands:
 
 | command | meaning |
 |---|---|
-| `{"cmd":"set_depth","min":<mm>,"max":<mm>}` | set the working depth mask; pixels outside `[min,max]` mm are dropped (background removal). Either field optional. |
-| `{"cmd":"capture_bg","frames":<n>}` / `{"cmd":"clear_bg"}` / `{"cmd":"set_bg_margin","mm":<n>}` | background-plate subtraction (snapshot the empty scene, then stream only the subject). |
+| `{"cmd":"capture_bg","frames":<n>}` / `{"cmd":"clear_bg"}` / `{"cmd":"set_bg_margin","mm":<n>}` | background-plate subtraction (snapshot the empty scene, then stream only the subject). `set_bg_margin` is the threshold — how much closer than the plate a point must be to be kept. |
 | `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
 | `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
 | `{"cmd":"set_imu","enabled":<bool>}` | **stream live IMU orientation.** When enabled, the node re-reads the accelerometer every ~10 frames and re-sends a fresh gravity (down) vector, so the cloud reorients live as the camera is physically turned. Off by default (one gravity vector is still sent at connect). The gravity rides in the `CPV1` gravity block (bit2). |
@@ -113,9 +112,13 @@ the viewer should re-capture the background afterwards.
 (`arm` / `record` / `stop` will use this same channel later.)
 
 ```js
-// viewer: set the depth mask to 0.4–4.0 m
-ws.send(JSON.stringify({ cmd: "set_depth", min: 400, max: 4000 }));
+// viewer: capture a background plate, then stream only the subject
+ws.send(JSON.stringify({ cmd: "capture_bg", frames: 60 }));
 ```
+
+> **Note:** there is no depth near/far range-clip command. The node streams the
+> **full depth range** and culls via background subtraction + the speckle filter;
+> the old `set_depth` command was removed.
 
 Internally the server re-frames this as a `CTL1` message (magic + u32 len + JSON)
 on the node's TCP socket; see `protocol/control.py`. Viewers only speak the JSON
