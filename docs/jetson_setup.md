@@ -124,12 +124,26 @@ competing with capture. So:
   multi-user.target`) — the biggest single win. Revert any time with
   `sudo systemctl set-default graphical.target`.
 
-> ⚠️ **Verify headless once before relying on it.** The closed Azure Kinect
-> depth engine has, on some setups, wanted an OpenGL/display context. Test it:
-> `sudo systemctl set-default multi-user.target && sudo reboot`, then SSH in and
-> `journalctl -u kinect-node -f` — if depth frames flow, you're good. If the
-> depth engine fails to start headless, revert to `graphical.target` (the
-> service still auto-starts there) and just avoid keeping a VNC client attached.
+> ⚠️ **The depth engine needs a GPU/OpenGL context — confirmed on this rig.**
+> The closed Azure Kinect depth engine fails to initialize without one. As a
+> systemd service (no `DISPLAY`) it dies with `Depth engine create and
+> initialize failed with error code: 204`, even though launching by hand from
+> the desktop works. Two consequences:
+>
+> 1. **Keep `graphical.target`** (don't `set-default multi-user.target`) — the
+>    depth engine can't run truly headless here. The performance win is then just
+>    *not keeping a VNC client connected while capturing* (VNC's framebuffer
+>    encode is what steals CPU; an idle desktop costs little).
+> 2. **Give the service the X session's context** by adding `DISPLAY` +
+>    `XAUTHORITY` to `/etc/default/kinect-node`. Get the values from a desktop
+>    terminal (`echo $DISPLAY`; `echo ${XAUTHORITY:-$HOME/.Xauthority}`), set
+>    them, `sudo systemctl restart kinect-node`. The service must start *after*
+>    the user's X session exists — with `Restart=always` it just retries until
+>    the desktop autologin is up, so enable desktop autologin for a clean boot.
+>
+> (Truly headless would need a real GPU GL context without a desktop — e.g. an
+> Xvfb/EGL setup the depth engine accepts — which isn't reliable on this
+> hardware. Revisit on an Orin if headless becomes a hard requirement.)
 
 ### Finding central without a fixed IP (`--host auto`)
 

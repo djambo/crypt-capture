@@ -384,10 +384,12 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   need a re-run of the installer. `--headless`
   drops the desktop GUI (`multi-user.target`) for more capture headroom: the node
   draws no windows and the Nano is CPU-bound, so the desktop + any connected VNC
-  session just steal cycles from RVL/color. Caveat: verify the closed depth
-  engine still starts headless before relying on it (it can want a GL/display
-  context); revert with `systemctl set-default graphical.target`. See
-  `docs/jetson_setup.md` §9.
+  session just steal cycles from RVL/color. **Caveat (confirmed on hardware): the
+  closed depth engine needs a GPU/OpenGL context** — as a bare service it dies
+  with `depth engine … error code: 204`. So keep `graphical.target` and pass the
+  X session into the service via `DISPLAY` + `XAUTHORITY` in
+  `/etc/default/kinect-node` (EnvironmentFile); the perf win is then just not
+  keeping a VNC client attached, not full headless. See `docs/jetson_setup.md` §9.
 - See `docs/jetson_setup.md`.
 
 ## Rendering R&D already done (in the `crypt` repo)
