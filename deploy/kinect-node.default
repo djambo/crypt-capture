@@ -23,15 +23,21 @@ SENSOR_ID=0
 AUTO_UPDATE=1
 UPDATE_BRANCH=main
 
+# The Azure Kinect often comes up wedged on a cold boot and only streams after a
+# physical USB replug. RESET_USB_ON_START=1 does that replug in software (USB
+# re-enumerate) on every (re)start so it streams hands-off. Set 0 to disable.
+RESET_USB_ON_START=1
+
 # Azure Kinect depth engine needs a GPU/OpenGL context. A bare systemd service
 # has no DISPLAY, so the depth engine fails with "error code: 204" — even though
 # launching by hand from the desktop works. Point these at the running X session
 # (run `echo $DISPLAY` and `echo ${XAUTHORITY:-$HOME/.Xauthority}` in a desktop
 # terminal to get the right values) so the service can borrow its GL context.
 # Required while the desktop (graphical.target) is up; the depth engine can't run
-# truly headless on this hardware. Uncomment + adjust:
+# truly headless on this hardware. Uncomment + adjust (XAUTHORITY is often
+# /run/user/1000/gdm/Xauthority under GDM, or ~/.Xauthority under lightdm):
 #DISPLAY=:0
-#XAUTHORITY=/home/USER/.Xauthority
+#XAUTHORITY=/run/user/1000/gdm/Xauthority
 
 # Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
 #   --preview-stride 2          downsample the live cloud (recommended for preview)
