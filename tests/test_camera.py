@@ -47,14 +47,15 @@ def test_apply_command_restart_flags():
     assert changed["restart"] is True
     assert changed["depth_mode"] == "WFOV_UNBINNED"
 
-    # Alignment change is a free per-frame switch (no restart).
-    changed = cm.apply_camera_command(cfg, {"align": "depth_to_color"})
-    assert cfg["align"] == "depth_to_color"
+    # Alignment change is a free per-frame switch (no restart). The default is
+    # depth_to_color, so switch the other way to exercise a real change.
+    changed = cm.apply_camera_command(cfg, {"align": "color_to_depth"})
+    assert cfg["align"] == "color_to_depth"
     assert changed["restart"] is False
-    assert changed["align"] == "depth_to_color"
+    assert changed["align"] == "color_to_depth"
 
     # A no-op command reports nothing changed (only the restart key).
-    changed = cm.apply_camera_command(cfg, {"align": "depth_to_color"})
+    changed = cm.apply_camera_command(cfg, {"align": "color_to_depth"})
     assert list(changed.keys()) == ["restart"]
     assert changed["restart"] is False
 

@@ -530,7 +530,7 @@ def main():
     ap.add_argument("--camera-fps", type=int, default=30,
                     choices=list(camera_modes.FPS_CHOICES),
                     help="initial fps (auto-clamped per mode)")
-    ap.add_argument("--align", default="color_to_depth",
+    ap.add_argument("--align", default="depth_to_color",
                     choices=list(camera_modes.ALIGN_MODES),
                     help="initial alignment direction (live-changeable)")
     ap.add_argument("--imu-axes", default=None,

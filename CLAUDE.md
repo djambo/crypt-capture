@@ -169,10 +169,10 @@ Two repos:
   restart (depth mode/color res/fps) so pyk4a is touched from one thread, then
   re-reads intrinsics (depth- *or* color-camera, per alignment) and re-sends the
   `CCAL` handshake so the relay rebuilds the cloud — **no `CPV1`/viewer change**.
-  Alignment: `color_to_depth` (default, 1 pt/depth pixel, color warped into the
-  depth grid) vs **`depth_to_color`** (1 pt/*color* pixel — depth warped into the
-  color grid → much more color detail / a denser cloud, the "higher-res color"
-  win, at more points + some depth holes). `color_resolution`/`fps` are also
+  Alignment: **`depth_to_color`** (default, 1 pt/*color* pixel — depth warped
+  into the color grid → much more color detail / a denser cloud, the "higher-res
+  color" win, at more points + some depth holes) vs `color_to_depth` (1 pt/depth
+  pixel, color warped into the depth grid — fewer, cleaner points). `color_resolution`/`fps` are also
   accepted (not in the UI yet). Mode tables are pyk4a-free + unit-tested
   (`tests/test_camera.py`); `sim_node` resizes its synthetic grid + re-sends
   calib so it's testable headless; verified end-to-end (sim 640×576/98k pts →
