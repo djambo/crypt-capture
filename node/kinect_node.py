@@ -71,7 +71,7 @@ _FPS_ENUM = {5: FPS.FPS_5, 15: FPS.FPS_15, 30: FPS.FPS_30}
 
 # When IMU streaming is on, re-read + re-send the gravity vector this often (in
 # frames) so the cloud reorients live as the camera turns, without spamming.
-IMU_EVERY = 10
+IMU_EVERY = 5
 
 
 def _build_config(cfg, sync, sub_delay_us):
@@ -120,36 +120,74 @@ def _accel_to_depth(k4a, x, y, z):
         return x, y, z
 
 
-def _read_gravity_optical(k4a, samples=5):
-    """Average a few accelerometer samples into a GRAVITY (down) unit vector in
-    the depth-camera optical frame (x right, y down, z forward), or None if the
-    IMU yields nothing.
+_AXIS_IDX = {"x": 0, "y": 1, "z": 2}
 
-    A static accelerometer reports the +1g reaction force pointing UP, so the
-    gravity (down) direction is the negated, normalized average — first rotated
-    from the IMU's own axes into the depth frame (see `_accel_to_depth`). Called
-    once at connect and then continuously while `set_imu` streaming is on, so the
-    cloud reorients live as the camera is physically turned.
+
+def parse_imu_axes(spec):
+    """Parse a manual IMU->depth axis remap like "-y,-x,-z" into a function
+    (x,y,z)->(x,y,z). For when the factory ACCEL->DEPTH extrinsic isn't available
+    and the floor comes out wrong: pass the permutation/signs that put gravity on
+    depth +Y when the camera is level. Returns None for an empty spec."""
+    if not spec:
+        return None
+    parts = [p.strip().lower() for p in spec.split(",")]
+    if len(parts) != 3:
+        raise ValueError("--imu-axes needs 3 comma-separated terms, e.g. -y,-x,-z")
+    plan = []
+    for p in parts:
+        sign = -1.0 if p.startswith("-") else 1.0
+        plan.append((sign, _AXIS_IDX[p.lstrip("+-")]))
+    return lambda x, y, z: tuple(s * (x, y, z)[i] for s, i in plan)
+
+
+def _drain_accel(k4a, max_drain=4000):
+    """Return the FRESHEST accelerometer sample (x,y,z) by draining the IMU FIFO.
+
+    The Kinect streams IMU at ~1.6 kHz into a queue; if we read only a sample or
+    two per call we keep consuming *stale* ones and the orientation lags badly.
+    So take one (briefly blocking, in case the queue is momentarily empty) then
+    pull the rest non-blocking and keep the last. Returns None if nothing.
     """
-    acc = [0.0, 0.0, 0.0]
-    n = 0
-    for _ in range(samples):
+    last = None
+    try:
+        s = k4a.get_imu_sample()            # prime: brief block for one sample
+        a = s.get("acc_sample") if isinstance(s, dict) else None
+        if a:
+            last = a
+    except Exception:
+        pass
+    for _ in range(max_drain):              # drain the backlog to the newest
         try:
-            sample = k4a.get_imu_sample()
+            s = k4a.get_imu_sample(0)       # non-blocking; raises when empty
         except Exception:
             break
-        a = sample.get("acc_sample") if isinstance(sample, dict) else None
-        if not a:
-            continue
-        acc[0] += a[0]; acc[1] += a[1]; acc[2] += a[2]
-        n += 1
-    if n == 0:
-        return None
-    ax, ay, az = _accel_to_depth(k4a, acc[0] / n, acc[1] / n, acc[2] / n)
-    mag = math.sqrt(ax * ax + ay * ay + az * az)
+        if not s:
+            break
+        a = s.get("acc_sample") if isinstance(s, dict) else None
+        if a:
+            last = a
+    return last
+
+
+def _read_gravity_optical(k4a, axes=None):
+    """Freshest GRAVITY (down) unit vector in the depth optical frame (x right,
+    y down, z forward), plus the raw accel (for logging). A static accelerometer
+    reports the +1g reaction pointing UP, so gravity (down) is the negated,
+    normalized reading — first mapped from the IMU's own axes into the depth
+    frame, via a manual `axes` remap if given, else the factory ACCEL->DEPTH
+    extrinsic. Returns (gravity, raw_accel), either of which may be None.
+    """
+    a = _drain_accel(k4a)
+    if a is None:
+        return None, None
+    if axes is not None:
+        dx, dy, dz = axes(a[0], a[1], a[2])
+    else:
+        dx, dy, dz = _accel_to_depth(k4a, a[0], a[1], a[2])
+    mag = math.sqrt(dx * dx + dy * dy + dz * dz)
     if mag < 1e-6:
-        return None
-    return (-ax / mag, -ay / mag, -az / mag)   # down = -reaction, normalized
+        return None, a
+    return (-dx / mag, -dy / mag, -dz / mag), a
 
 
 def _read_intrinsics(k4a, align):
@@ -169,7 +207,9 @@ def _read_intrinsics(k4a, align):
 
 def run(host, port, sensor_id, frames, min_depth, max_depth,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
-        depth_mode=None, color_resolution=None, fps=None, align=None):
+        depth_mode=None, color_resolution=None, fps=None, align=None,
+        imu_axes=None):
+    imu_axes_fn = parse_imu_axes(imu_axes)
     cfg = dict(camera_modes.DEFAULTS)
     if depth_mode:
         cfg["depth_mode"] = depth_mode
@@ -292,12 +332,15 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                                           idist))
                 # Initial orientation: a gravity (down) vector from the IMU, sent
                 # once per (re)connect/reconfig alongside the intrinsics so the
-                # relay/viewer can level the cloud to the floor.
-                g = _read_gravity_optical(k4a)
+                # relay/viewer can level the cloud to the floor. The raw accel is
+                # logged so a wrong floor can be diagnosed (and fixed via
+                # --imu-axes) without guessing.
+                g, raw = _read_gravity_optical(k4a, imu_axes_fn)
                 if g is not None:
                     sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
-                    print("sensor %d: gravity(optical) = (%.3f, %.3f, %.3f)"
-                          % (sensor_id, g[0], g[1], g[2]))
+                    print("sensor %d: accel raw=(%.2f, %.2f, %.2f) -> "
+                          "gravity(optical)=(%.3f, %.3f, %.3f)"
+                          % (sensor_id, raw[0], raw[1], raw[2], g[0], g[1], g[2]))
                 calib_sent = True
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):
@@ -357,12 +400,18 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             acc["color"] += tcol - tz; acc["send"] += ts - tcol
             sent += 1
 
-            # Live orientation: while streaming is on, re-read the IMU and push a
-            # fresh gravity vector so the viewer reorients as the camera turns.
+            # Live orientation: while streaming is on, re-read the IMU (freshest
+            # sample, FIFO drained) and push a fresh gravity vector so the viewer
+            # reorients as the camera turns. Logged occasionally for diagnostics.
             if imu["stream"] and sent % IMU_EVERY == 0:
-                g = _read_gravity_optical(k4a, samples=3)
+                g, raw = _read_gravity_optical(k4a, imu_axes_fn)
                 if g is not None:
                     sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
+                    if sent % 60 == 0:
+                        print("sensor %d: gravity(optical)=(%.3f, %.3f, %.3f) "
+                              "[accel raw=(%.2f, %.2f, %.2f)]"
+                              % (sensor_id, g[0], g[1], g[2],
+                                 raw[0], raw[1], raw[2]))
             if sent % 30 == 0:
                 now = time.time()
                 fps_meas = 30.0 / (now - win_t0)     # windowed, not cumulative
@@ -418,12 +467,16 @@ def main():
     ap.add_argument("--align", default="color_to_depth",
                     choices=list(camera_modes.ALIGN_MODES),
                     help="initial alignment direction (live-changeable)")
+    ap.add_argument("--imu-axes", default=None,
+                    help="manual IMU->depth axis remap, e.g. '-y,-x,-z', for when "
+                         "the factory ACCEL->DEPTH extrinsic is unavailable and "
+                         "the floor comes out wrong (see the logged 'accel raw')")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.min_depth, args.max_depth, args.sync, args.sub_delay_us,
         args.preview_stride, args.profile,
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
-        fps=args.camera_fps, align=args.align)
+        fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes)
 
 
 if __name__ == "__main__":
