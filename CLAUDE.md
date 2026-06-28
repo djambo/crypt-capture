@@ -177,6 +177,17 @@ Two repos:
   (`tests/test_camera.py`); `sim_node` resizes its synthetic grid + re-sends
   calib so it's testable headless; verified end-to-end (sim 640×576/98k pts →
   1280×720 color grid → 1024² WFOV, intrinsics rebuilt each switch).
+- ✅ **Cross-alignment registration** (`CEXT` handshake): `color_to_depth` builds
+  the cloud in the depth optical frame, `depth_to_color` in the *color* frame —
+  and the Kinect's colour camera is tilted ~a few° about X + offset ~cm from
+  depth, so switching alignment used to tilt/shift the cloud. The node now sends
+  a **grid→depth extrinsic** (`_grid_to_depth_extrinsic` → `convert_3d_to_3d`;
+  identity for color_to_depth, the factory COLOR→DEPTH transform for
+  depth_to_color) alongside `CCAL`; the relay applies `P_depth = R·P + t` in
+  optical space before the view flip (`unproject(extrinsic=…)`), so both
+  alignments register to **one canonical depth frame**. Additive + identity-
+  default (no `CPV1`/viewer change, no regression to the default path);
+  unit-tested (`tests/test_extrinsic.py`).
 - ✅ **Observability:** node prints a *windowed* fps (was a misleading
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
@@ -269,7 +280,7 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py
+tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py, test_extrinsic.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md

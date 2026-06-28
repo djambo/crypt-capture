@@ -25,7 +25,7 @@ import time
 from array import array
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib, encode_imu
+from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
@@ -136,6 +136,10 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         gx, gy, gz = SIM_GRAVITY_OPTICAL
         mag = math.sqrt(gx * gx + gy * gy + gz * gz) or 1.0
         sock.sendall(encode_imu(sensor_id, gx / mag, gy / mag, gz / mag))
+        # Identity grid->depth extrinsic (the sim grid is already "depth"); proves
+        # the registration path end-to-end without a real colour camera.
+        sock.sendall(encode_extrinsic(sensor_id,
+                                      (1, 0, 0, 0, 1, 0, 0, 0, 1), (0, 0, 0)))
 
     sent = 0
     try:

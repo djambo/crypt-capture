@@ -30,6 +30,18 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-06-28 — Cross-alignment registration (no viewer action)
+**Status: NEW — informational, no viewer change.** Switching `align`
+color→depth ↔ depth→colour used to slightly **tilt the cloud about X** (+ a small
+shift) because the two modes deliver points in different camera frames (depth vs
+colour camera, which is tilted ~a few° about X + offset ~cm on the Kinect). The
+node now sends a **grid→depth extrinsic** with `CCAL` and the relay transforms
+`depth_to_color` points into the depth frame, so both alignments register to one
+canonical frame. **No `CPV1` change and nothing to do in the viewer** — the cloud
+just stops moving when you switch alignment.
+
+---
+
 ## 2026-06-28 — IMU orientation: gravity vector in `CPV1` (floor/up)
 **Status: NEW — not yet applied**
 
