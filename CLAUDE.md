@@ -198,9 +198,15 @@ Two repos:
   frames so the cloud reorients as the camera is physically turned (driven by the
   viewer's "camera orientation" toggle). To avoid lag the read **drains the IMU
   FIFO** (`_drain_accel`) and uses the freshest sample (the Kinect queues IMU at
-  ~1.6 kHz; reading a couple per call consumes stale ones). The node logs `accel
-  raw=… -> gravity(optical)=…`; if the factory extrinsic is unavailable and the
-  floor is wrong, `--imu-axes "-y,-x,-z"` (`parse_imu_axes`) is a manual remap.
+  ~1.6 kHz; reading a couple per call consumes stale ones).
+  **IMU axis convention:** the Azure Kinect IMU is rotated ~90° about depth-X, so
+  left raw a level camera's gravity lands on depth +Z (forward) and the floor
+  tips up onto the far wall. The node applies the built-in map `(x,y,z)->(x,z,-y)`
+  (`_default_accel_to_depth`) by default → gravity back on +Y (down), verified on
+  real hardware. The pyk4a factory ACCEL->DEPTH extrinsic proved unreliable
+  (often not exposed) so it's **opt-in** via `--imu-extrinsic`; `--imu-axes` (e.g.
+  `"x,z,-y"`, `parse_imu_axes`) overrides outright. The node logs `accel raw=… ->
+  gravity(optical)=…` for diagnosis.
   `sim_node` emits a known-good vector (and wobbles it while streaming) so the
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).

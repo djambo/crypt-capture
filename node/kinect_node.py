@@ -97,14 +97,25 @@ def _build_config(cfg, sync, sub_delay_us):
 _IMU_EXTRINSIC_WARNED = [False]
 
 
-def _accel_to_depth(k4a, x, y, z):
-    """Rotate an accelerometer-frame vector into the depth-camera optical frame
-    using the Kinect's factory ACCEL->DEPTH extrinsics. The Kinect IMU has its
-    own axes (its "down" is NOT on the depth-Y axis), so skipping this leaves the
-    floor sideways. We transform the tip and the origin and subtract, which
-    cancels the translation and leaves a pure rotation (good for a direction).
-    Falls back to identity (with a one-time warning) if pyk4a doesn't expose it.
+def _default_accel_to_depth(x, y, z):
+    """Azure Kinect DK accelerometer -> depth-camera optical axis convention.
+
+    The IMU is rotated ~90° about the depth camera's X axis from the depth
+    frame: a level camera's gravity, left raw, lands on depth +Z (forward) and
+    tips the floor up onto the far wall. The depth frame is X right, Y down,
+    Z forward, so the accel axes map (x, y, z) -> (x, z, -y), which puts gravity
+    back on +Y (down). Verified against real hardware. This captures the axis
+    convention shared by all Azure Kinect DK units; the small per-device
+    calibration rotation (a few degrees) is negligible for floor leveling and is
+    only recovered with --imu-extrinsic.
     """
+    return (x, z, -y)
+
+
+def _sdk_accel_to_depth(k4a, x, y, z):
+    """Factory ACCEL->DEPTH extrinsic via pyk4a (transform tip and origin and
+    subtract → pure rotation, translation cancels). Returns None if pyk4a doesn't
+    expose it on this build."""
     try:
         cal = k4a.calibration
         accel = pyk4a.CalibrationType.ACCEL
@@ -112,12 +123,8 @@ def _accel_to_depth(k4a, x, y, z):
         p1 = cal.convert_3d_to_3d((x, y, z), accel, depth)
         p0 = cal.convert_3d_to_3d((0.0, 0.0, 0.0), accel, depth)
         return (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
-    except Exception as exc:
-        if not _IMU_EXTRINSIC_WARNED[0]:
-            print("IMU: no ACCEL->DEPTH extrinsic (%s); using raw axes — the "
-                  "floor orientation may be wrong on this pyk4a build" % exc)
-            _IMU_EXTRINSIC_WARNED[0] = True
-        return x, y, z
+    except Exception:
+        return None
 
 
 _AXIS_IDX = {"x": 0, "y": 1, "z": 2}
@@ -169,21 +176,32 @@ def _drain_accel(k4a, max_drain=4000):
     return last
 
 
-def _read_gravity_optical(k4a, axes=None):
+def _read_gravity_optical(k4a, axes=None, use_extrinsic=False):
     """Freshest GRAVITY (down) unit vector in the depth optical frame (x right,
     y down, z forward), plus the raw accel (for logging). A static accelerometer
     reports the +1g reaction pointing UP, so gravity (down) is the negated,
     normalized reading — first mapped from the IMU's own axes into the depth
-    frame, via a manual `axes` remap if given, else the factory ACCEL->DEPTH
-    extrinsic. Returns (gravity, raw_accel), either of which may be None.
+    frame. Mapping precedence: an explicit `--imu-axes` remap, else (opt-in) the
+    factory ACCEL->DEPTH extrinsic, else the built-in Azure Kinect axis
+    convention. Returns (gravity, raw_accel), either of which may be None.
     """
     a = _drain_accel(k4a)
     if a is None:
         return None, None
     if axes is not None:
         dx, dy, dz = axes(a[0], a[1], a[2])
+    elif use_extrinsic:
+        r = _sdk_accel_to_depth(k4a, a[0], a[1], a[2])
+        if r is None:
+            if not _IMU_EXTRINSIC_WARNED[0]:
+                print("IMU: --imu-extrinsic requested but pyk4a exposes no "
+                      "ACCEL->DEPTH on this build; using the default axis map")
+                _IMU_EXTRINSIC_WARNED[0] = True
+            dx, dy, dz = _default_accel_to_depth(a[0], a[1], a[2])
+        else:
+            dx, dy, dz = r
     else:
-        dx, dy, dz = _accel_to_depth(k4a, a[0], a[1], a[2])
+        dx, dy, dz = _default_accel_to_depth(a[0], a[1], a[2])
     mag = math.sqrt(dx * dx + dy * dy + dz * dz)
     if mag < 1e-6:
         return None, a
@@ -208,7 +226,7 @@ def _read_intrinsics(k4a, align):
 def run(host, port, sensor_id, frames, min_depth, max_depth,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
-        imu_axes=None):
+        imu_axes=None, imu_extrinsic=False):
     imu_axes_fn = parse_imu_axes(imu_axes)
     cfg = dict(camera_modes.DEFAULTS)
     if depth_mode:
@@ -335,7 +353,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                 # relay/viewer can level the cloud to the floor. The raw accel is
                 # logged so a wrong floor can be diagnosed (and fixed via
                 # --imu-axes) without guessing.
-                g, raw = _read_gravity_optical(k4a, imu_axes_fn)
+                g, raw = _read_gravity_optical(k4a, imu_axes_fn, imu_extrinsic)
                 if g is not None:
                     sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
                     print("sensor %d: accel raw=(%.2f, %.2f, %.2f) -> "
@@ -404,7 +422,7 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             # sample, FIFO drained) and push a fresh gravity vector so the viewer
             # reorients as the camera turns. Logged occasionally for diagnostics.
             if imu["stream"] and sent % IMU_EVERY == 0:
-                g, raw = _read_gravity_optical(k4a, imu_axes_fn)
+                g, raw = _read_gravity_optical(k4a, imu_axes_fn, imu_extrinsic)
                 if g is not None:
                     sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
                     if sent % 60 == 0:
@@ -468,15 +486,21 @@ def main():
                     choices=list(camera_modes.ALIGN_MODES),
                     help="initial alignment direction (live-changeable)")
     ap.add_argument("--imu-axes", default=None,
-                    help="manual IMU->depth axis remap, e.g. '-y,-x,-z', for when "
-                         "the factory ACCEL->DEPTH extrinsic is unavailable and "
-                         "the floor comes out wrong (see the logged 'accel raw')")
+                    help="override the IMU->depth axis map, e.g. 'x,z,-y' (the "
+                         "default) or '-y,-x,-z'; use the logged 'accel raw' to "
+                         "pick the permutation that puts gravity on depth +Y when "
+                         "the camera is level")
+    ap.add_argument("--imu-extrinsic", action="store_true",
+                    help="use pyk4a's factory ACCEL->DEPTH extrinsic instead of "
+                         "the built-in axis convention (falls back to it if the "
+                         "build doesn't expose the extrinsic)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.min_depth, args.max_depth, args.sync, args.sub_delay_us,
         args.preview_stride, args.profile,
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
-        fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes)
+        fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes,
+        imu_extrinsic=args.imu_extrinsic)
 
 
 if __name__ == "__main__":
