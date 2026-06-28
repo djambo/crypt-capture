@@ -123,6 +123,16 @@ _REST = struct.Struct("<BBHQQHHII")    # frame header after the 4s magic
 IMU_MAGIC = b"CIMU"
 _IMU = struct.Struct("<4sIfff")        # magic, sensor_id, gx, gy, gz (unit vec)
 
+# --- grid -> depth extrinsic ---------------------------------------------
+# Which camera frame the streamed point grid lives in depends on alignment
+# (depth-optical for color_to_depth, color-optical for depth_to_color). To keep
+# every alignment registered to ONE canonical frame (the depth optical frame),
+# the node sends the rigid transform that maps a grid-frame point into the depth
+# frame: P_depth = R·P_grid + t. Identity for color_to_depth; the factory
+# COLOR->DEPTH extrinsic for depth_to_color. R is row-major 3x3, t is metres.
+EXTRINSIC_MAGIC = b"CEXT"
+_EXTRINSIC = struct.Struct("<4sI" + "f" * 12)   # magic, sensor, R(9), t(3)
+
 
 def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
     d = tuple(dist) + (0.0,) * (8 - len(dist))
@@ -133,6 +143,13 @@ def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
 def encode_imu(sensor_id, gx, gy, gz):
     """Encode a per-sensor gravity (down) unit vector in the depth optical frame."""
     return _IMU.pack(IMU_MAGIC, sensor_id, gx, gy, gz)
+
+
+def encode_extrinsic(sensor_id, R, t):
+    """Encode the grid->depth rigid transform. R: 9 floats row-major (3x3),
+    t: 3 floats (metres). P_depth = R·P_grid + t."""
+    vals = list(R)[:9] + list(t)[:3]
+    return _EXTRINSIC.pack(EXTRINSIC_MAGIC, sensor_id, *vals)
 
 
 def read_message(sock):
@@ -158,6 +175,13 @@ def read_message(sock):
             return None
         sid, gx, gy, gz = struct.unpack("<Ifff", rest)
         return ("imu", {"sensor_id": sid, "gravity": (gx, gy, gz)})
+    if magic == EXTRINSIC_MAGIC:
+        rest = _recv_exactly(sock, _EXTRINSIC.size - 4)
+        if not rest:
+            return None
+        vals = struct.unpack("<I" + "f" * 12, rest)
+        return ("extrinsic", {"sensor_id": vals[0],
+                              "R": vals[1:10], "t": vals[10:13]})
     if magic != MAGIC:
         raise ValueError("bad magic %r — stream desynced" % (magic,))
     head = _recv_exactly(sock, _REST.size)

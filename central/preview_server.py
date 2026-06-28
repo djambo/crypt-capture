@@ -103,11 +103,17 @@ def compute_ray_table(w, h, fx, fy, cx, cy, dist, iters=8):
 
 
 def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
-              color_grid=None):
+              color_grid=None, extrinsic=None):
     """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels, using the
     distortion-aware full-res ray table. The grid may be node-downsampled
     (`node_stride`): grid pixel (u,v) maps to ray_table[v*node_stride, u*node_stride].
     `stride` is an additional relay-side downsample.
+
+    `extrinsic` (R 3x3, t 3) optionally rigid-transforms the points from the
+    streamed grid's camera frame into the canonical DEPTH frame (P_depth = R·P+t),
+    applied in optical space BEFORE the optical->view flip. This registers
+    depth_to_color frames to the same frame as color_to_depth so switching
+    alignment doesn't tilt/shift the cloud. None = no transform (identity).
     """
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     us = np.arange(0, w, stride)
@@ -120,9 +126,14 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     rx = ray_x[np.ix_(vs * node_stride, us * node_stride)]
     ry = ray_y[np.ix_(vs * node_stride, us * node_stride)]
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
-    x = rx[m] * z
-    y = -(ry[m] * z)                                 # +Y up
-    xyz = np.column_stack((x, y, -z)).astype(np.float32)   # camera looks down -Z
+    xo = rx[m] * z                                   # optical: x right
+    yo = ry[m] * z                                   #          y down
+    zo = z                                           #          z forward
+    if extrinsic is not None:
+        R, t = extrinsic
+        opt = np.column_stack((xo, yo, zo)) @ R.T + t   # P_depth = R·P + t
+        xo, yo, zo = opt[:, 0], opt[:, 1], opt[:, 2]
+    xyz = np.column_stack((xo, -yo, -zo)).astype(np.float32)  # optical->view flip
     rgb = None
     if color_grid is not None:
         rgb = color_grid[vs][:, us][m]
@@ -174,6 +185,7 @@ class PreviewServer:
         self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy,dist)
         self._ray = {}                      # sensor_id -> (w,h,ray_x,ray_y)
         self._sensor_gravity = {}           # sensor_id -> (gx,gy,gz) view-frame
+        self._sensor_extrinsic = {}         # sensor_id -> (R 3x3, t 3) or None
         self.frames_relayed = 0
 
     # --- browser (WebSocket) side ---------------------------------------
@@ -305,6 +317,21 @@ class PreviewServer:
                         sid, None if g is None else
                         "(%.3f, %.3f, %.3f)" % g))
                     continue
+                if kind == "extrinsic":
+                    sid = payload["sensor_id"]
+                    R = np.asarray(payload["R"], dtype=np.float32).reshape(3, 3)
+                    t = np.asarray(payload["t"], dtype=np.float32)
+                    # Skip the transform when it's identity+zero (color_to_depth),
+                    # so the default path stays a pure no-op.
+                    if np.allclose(R, np.eye(3), atol=1e-6) and \
+                            np.allclose(t, 0.0, atol=1e-6):
+                        self._sensor_extrinsic[sid] = None
+                    else:
+                        self._sensor_extrinsic[sid] = (R, t)
+                    print("[preview] sensor %d grid->depth extrinsic %s" % (
+                        sid, "identity" if self._sensor_extrinsic[sid] is None
+                        else "set (registers to depth frame)"))
+                    continue
                 frame = payload
                 if not frame.depth_rvl:
                     continue
@@ -318,8 +345,10 @@ class PreviewServer:
                 if frame.color_aligned and frame.color:
                     cgrid = aligned_color_grid(frame.color, depth,
                                                frame.width, frame.height)
+                extrinsic = self._sensor_extrinsic.get(frame.sensor_id)
                 xyz, rgb = unproject(depth, frame.width, frame.height,
-                                     ray_x, ray_y, self.stride, ns, cgrid)
+                                     ray_x, ray_y, self.stride, ns, cgrid,
+                                     extrinsic)
                 if xyz.shape[0] > self.max_points:
                     idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
                     xyz = xyz[idx]

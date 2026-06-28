@@ -48,8 +48,11 @@ from pyk4a import (
 )
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib, encode_imu
+from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
 from node import camera_modes
+
+_IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+                       (0.0, 0.0, 0.0))
 from node.background import BackgroundSubtractor, denoise_mask
 
 # Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
@@ -208,6 +211,47 @@ def _read_gravity_optical(k4a, axes=None, use_extrinsic=False):
     return (-dx / mag, -dy / mag, -dz / mag), a
 
 
+_EXT_WARNED = [False]
+
+
+def _grid_to_depth_extrinsic(k4a, align):
+    """The rigid transform taking a streamed-grid point into the DEPTH optical
+    frame, so every alignment registers to one canonical frame. Identity for
+    color_to_depth (the grid IS the depth image); the factory COLOR->DEPTH
+    extrinsic for depth_to_color (the grid is the colour image, whose camera is
+    tilted ~a few° about X + offset ~a few cm from depth — that's the tilt you
+    see when switching alignment). Returns (R 9 row-major, t 3 metres).
+
+    Built from convert_3d_to_3d on basis vectors (translation cancels for the
+    columns, then the origin gives t). Falls back to identity if pyk4a doesn't
+    expose the COLOR/DEPTH extrinsic.
+    """
+    if align != "depth_to_color":
+        return _IDENTITY_EXTRINSIC
+    try:
+        cal = k4a.calibration
+        color = pyk4a.CalibrationType.COLOR
+        depth = pyk4a.CalibrationType.DEPTH
+        o = cal.convert_3d_to_3d((0.0, 0.0, 0.0), color, depth)
+        ex = cal.convert_3d_to_3d((1000.0, 0.0, 0.0), color, depth)
+        ey = cal.convert_3d_to_3d((0.0, 1000.0, 0.0), color, depth)
+        ez = cal.convert_3d_to_3d((0.0, 0.0, 1000.0), color, depth)
+        c0 = [(ex[i] - o[i]) / 1000.0 for i in range(3)]   # R columns
+        c1 = [(ey[i] - o[i]) / 1000.0 for i in range(3)]
+        c2 = [(ez[i] - o[i]) / 1000.0 for i in range(3)]
+        R = (c0[0], c1[0], c2[0],                           # row-major 3x3
+             c0[1], c1[1], c2[1],
+             c0[2], c1[2], c2[2])
+        t = (o[0] / 1000.0, o[1] / 1000.0, o[2] / 1000.0)   # mm -> m
+        return R, t
+    except Exception as exc:
+        if not _EXT_WARNED[0]:
+            print("extrinsic: no COLOR->DEPTH from pyk4a (%s); depth_to_color "
+                  "frames won't register to the depth frame" % exc)
+            _EXT_WARNED[0] = True
+        return _IDENTITY_EXTRINSIC
+
+
 def _read_intrinsics(k4a, align):
     """Intrinsics for the camera the streamed grid lives in: the COLOR camera in
     depth_to_color, else the DEPTH camera. Returns (fx, fy, cx, cy, dist8)."""
@@ -348,6 +392,10 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                 sock.sendall(encode_calib(sensor_id, depth.shape[1],
                                           depth.shape[0], ifx, ify, icx, icy,
                                           idist))
+                # grid->depth extrinsic so depth_to_color registers to the same
+                # frame as color_to_depth (no tilt/shift when switching align).
+                R, t = _grid_to_depth_extrinsic(k4a, align)
+                sock.sendall(encode_extrinsic(sensor_id, R, t))
                 # Initial orientation: a gravity (down) vector from the IMU, sent
                 # once per (re)connect/reconfig alongside the intrinsics so the
                 # relay/viewer can level the cloud to the floor. The raw accel is

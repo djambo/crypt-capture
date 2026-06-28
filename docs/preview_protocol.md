@@ -98,7 +98,9 @@ change**). Fields:
   `color_to_depth` (default) streams **one point per depth pixel** (color warped
   into the depth grid); `depth_to_color` streams **one point per color pixel**
   (depth warped into the color grid) → much more color detail / a denser cloud,
-  at more points and some depth holes.
+  at more points and some depth holes. Both alignments are registered to the same
+  (depth) frame relay-side via a node-sent grid→depth extrinsic, so switching
+  doesn't tilt/shift the cloud — no viewer impact.
 - `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart;
   mostly matters in `depth_to_color`, where the point grid IS the color image).
 - `fps` — `5`/`15`/`30`, auto-clamped (WFOV-unbinned & 3072p cap at 15) (restart).
