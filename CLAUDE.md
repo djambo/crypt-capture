@@ -377,7 +377,11 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   `/etc/default/kinect-node`) so it auto-starts and relaunches on failure — the
   node has no internal reconnect loop, so systemd is the supervisor. The env file
   defaults `CENTRAL_HOST=auto` (LAN discovery, below) so a changing central DHCP
-  IP needs no reconfig. `--headless`
+  IP needs no reconfig. A non-fatal `ExecStartPre` (`deploy/update-node.sh`)
+  **fetches + hard-resets the code to `origin/$UPDATE_BRANCH` on every start**
+  (toggle `AUTO_UPDATE`), so the headless workflow is push → reboot → runs latest;
+  offline just runs the on-disk code. Updates code only — unit/env changes still
+  need a re-run of the installer. `--headless`
   drops the desktop GUI (`multi-user.target`) for more capture headroom: the node
   draws no windows and the Nano is CPU-bound, so the desktop + any connected VNC
   session just steal cycles from RVL/color. Caveat: verify the closed depth

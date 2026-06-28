@@ -153,6 +153,44 @@ hostname** (`mylaptop.local`, if the laptop runs Bonjour/Avahi) or a **DHCP
 reservation** on the router so the laptop keeps one IP. Use Ethernet for the rig
 where you can — it's the intended transport and doesn't isolate clients.
 
+### Auto-update the code on boot (push → reboot → runs latest)
+
+With no GUI you can't pull updates by hand. The service does it for you: a
+pre-start step (`deploy/update-node.sh`) **fetches and hard-resets the code to
+the remote** before launching, so your workflow becomes *push to the branch →
+reboot the Jetson → it runs the latest*. It's **best-effort**: if the Jetson is
+offline or can't reach the remote, it logs and runs the on-disk code anyway
+(capture is never blocked by a failed pull).
+
+Config in `/etc/default/kinect-node`:
+```sh
+AUTO_UPDATE=1          # 0 to freeze the on-device code
+UPDATE_BRANCH=main     # track this branch (set to your feature branch while testing)
+```
+- It runs as the service **User=**, so that user must own the clone and have pull
+  access. Confirm after a reboot: `journalctl -u kinect-node | grep update-node`
+  → `now at <sha> (origin/main)`.
+- **Hard reset discards on-device edits** — this is an appliance, edit via push,
+  not on the Jetson. (Switch to `git pull --ff-only` in the script if you must
+  keep local edits.)
+- It updates **code only**. Changes to the unit itself or to
+  `/etc/default/kinect-node` (e.g. a new CLI flag) still need a re-run of
+  `deploy/install-node-service.sh`.
+- A broken commit on the tracked branch will be pulled and (with `Restart=always`)
+  crash-loop every node — so push to `main` only what you've tested, or keep the
+  Jetsons on a branch you promote deliberately.
+
+**Private repo?** A non-interactive service can't type a password (the script
+sets `GIT_TERMINAL_PROMPT=0` so it fails fast rather than hanging). Give the
+device non-interactive pull access one of these ways:
+- **SSH deploy key** (recommended): `ssh-keygen -t ed25519` as the service user,
+  add the public key as a read-only Deploy Key on the GitHub repo, and set the
+  clone's remote to SSH (`git remote set-url origin git@github.com:djambo/crypt-capture.git`).
+- **Cached HTTPS token**: `git config --global credential.helper store` then do
+  one manual `git pull` with a PAT to cache it.
+
+A **public** repo needs none of this — anonymous HTTPS pull just works.
+
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a
   few fps. That's expected for validation. Production: a NumPy-vectorized or

@@ -15,6 +15,14 @@ CENTRAL_PORT=9000
 # This node's sensor id (0..N-1; one per Kinect/Jetson):
 SENSOR_ID=0
 
+# Self-update: on every (re)start, fetch + hard-reset the code to the remote so a
+# reboot runs the latest pushed code. Non-fatal — offline just runs on-disk code.
+#   AUTO_UPDATE   1 = update on start (default), 0 = never touch the code
+#   UPDATE_BRANCH branch to track (after this work merges, leave it at main)
+# Hard reset DISCARDS any local edits on the Jetson — edit via push, not on-device.
+AUTO_UPDATE=1
+UPDATE_BRANCH=main
+
 # Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
 #   --preview-stride 2          downsample the live cloud (recommended for preview)
 #   --align color_to_depth      fewer / cleaner points
