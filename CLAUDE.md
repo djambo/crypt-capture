@@ -226,6 +226,18 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
+- ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
+  relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
+  new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
+  `CRYPTDISC1 Q <rig_id>`, the relay's responder thread replies
+  `CRYPTDISC1 R <rig_id> <node_tcp_port>` and the node learns central's IP from
+  the reply's source address, then connects TCP as before. Enabled with
+  `--host auto` (node, the systemd default) + on by default in the relay
+  (`--rig-id`/`--no-discovery` to tune). Stdlib-only + 3.6-safe; `sim_node` also
+  supports `--host auto`; unit-tested (`tests/test_discovery.py`, loopback +
+  broadcast round-trip). Falls back to a fixed host/mDNS/DHCP-reservation where
+  Wi-Fi blocks broadcast (AP isolation) — see `docs/jetson_setup.md` §9.
+
 ## The big technical decisions (and WHY) — from a deep-research pass
 
 - **Geometry-based, NOT Gaussian splatting.** We have real metric depth from 4
@@ -276,7 +288,8 @@ Two repos:
 
 ```
 protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay),
-            control.py (central->node commands, CTL1)
+            control.py (central->node commands, CTL1),
+            discovery.py (UDP LAN auto-discovery of central by rig id)
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
@@ -284,7 +297,10 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py, test_extrinsic.py
+deploy/     kinect-node.service (+ .default env + install-node-service.sh):
+            run the Jetson node as a boot-time, auto-restarting systemd service
+tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
+            test_extrinsic.py, test_discovery.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
@@ -318,6 +334,11 @@ python3 -m scripts.preview_client --frames 30
 # Real cam, faster + metric (node sends its own intrinsics; no --calib needed):
 #   python3 -m node.kinect_node --host LAPTOP --port 9000 --sensor 0 --frames 0 --preview-stride 2 --profile
 #   python3 -m central.preview_server
+# Auto-find central by rig id (no fixed IP; survives the laptop's DHCP changing):
+#   python3 -m central.preview_server                       # answers discovery by default
+#   python3 -m node.kinect_node --host auto --sensor 0 --frames 0
+# Discovery tests (query/reply encode + loopback round-trip):
+python3 -m tests.test_discovery
 
 # Live control (capture a background plate on all nodes without a browser):
 python3 -m scripts.send_command --port 8080 capture-bg --frames 60
@@ -354,6 +375,25 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   central-only, x86/3.8+ — they don't run on the Nano.)
 - **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
   to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
+  (The `deploy/` systemd unit applies this automatically as a root `ExecStartPre`.)
+- **Run on boot / headless**: `deploy/install-node-service.sh` installs the node
+  as a systemd service (`Restart=always`, USB-buffer fix, per-device config in
+  `/etc/default/kinect-node`) so it auto-starts and relaunches on failure — the
+  node has no internal reconnect loop, so systemd is the supervisor. The env file
+  defaults `CENTRAL_HOST=auto` (LAN discovery, below) so a changing central DHCP
+  IP needs no reconfig. A non-fatal `ExecStartPre` (`deploy/update-node.sh`)
+  **fetches + hard-resets the code to `origin/$UPDATE_BRANCH` on every start**
+  (toggle `AUTO_UPDATE`), so the headless workflow is push → reboot → runs latest;
+  offline just runs the on-disk code. Updates code only — unit/env changes still
+  need a re-run of the installer. `--headless`
+  drops the desktop GUI (`multi-user.target`) for more capture headroom: the node
+  draws no windows and the Nano is CPU-bound, so the desktop + any connected VNC
+  session just steal cycles from RVL/color. **Caveat (confirmed on hardware): the
+  closed depth engine needs a GPU/OpenGL context** — as a bare service it dies
+  with `depth engine … error code: 204`. So keep `graphical.target` and pass the
+  X session into the service via `DISPLAY` + `XAUTHORITY` in
+  `/etc/default/kinect-node` (EnvironmentFile); the perf win is then just not
+  keeping a VNC client attached, not full headless. See `docs/jetson_setup.md` §9.
 - See `docs/jetson_setup.md`.
 
 ## Rendering R&D already done (in the `crypt` repo)

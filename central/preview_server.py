@@ -34,7 +34,7 @@ import time
 
 import numpy as np
 
-from protocol import control, rvl, websocket
+from protocol import control, discovery, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
@@ -407,9 +407,21 @@ def main():
                     help="ADDITIONAL relay-side downsample on top of the node's "
                          "--preview-stride (1 = none; total = node*relay)")
     ap.add_argument("--max-points", type=int, default=200000)
+    ap.add_argument("--rig-id", default=discovery.DEFAULT_RIG_ID,
+                    help="discovery rig id nodes use to find this relay")
+    ap.add_argument("--discovery-port", type=int, default=discovery.DISCOVERY_PORT)
+    ap.add_argument("--no-discovery", action="store_true",
+                    help="don't answer LAN discovery broadcasts")
     args = ap.parse_args()
     server = PreviewServer(calib=args.calib, stride=args.stride,
                            max_points=args.max_points)
+    if not args.no_discovery:
+        # Answer nodes broadcasting "where is central?" with our node port, so a
+        # node configured with --host auto finds us regardless of our DHCP IP.
+        discovery.start_responder(args.node_port, rig_id=args.rig_id,
+                                  port=args.discovery_port)
+        print("[preview] discovery responder on udp:%d (rig '%s')"
+              % (args.discovery_port, args.rig_id))
     try:
         server.run(args.node_host, args.node_port, args.ws_host, args.ws_port)
     except KeyboardInterrupt:

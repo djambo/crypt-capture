@@ -1,0 +1,42 @@
+[Unit]
+Description=crypt-capture Azure Kinect node (live point-cloud streamer)
+Documentation=https://github.com/djambo/crypt-capture
+# Wait for the network: the node makes an OUTBOUND connection to the central
+# relay, so there is no point starting before the LAN is up.
+After=network-online.target
+Wants=network-online.target
+# Never give up retrying, however fast it fails — the central relay is often
+# simply offline when the Jetson boots, and we want the node to keep knocking.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Per-device config (central host/port, sensor id, extra flags) lives in this
+# file so the unit itself stays generic. The installer drops a sample at
+# /etc/default/kinect-node from deploy/kinect-node.default — EDIT IT per device.
+EnvironmentFile=/etc/default/kinect-node
+# pyk4a needs to find the Azure Kinect libs (see docs/jetson_setup.md).
+Environment=K4A_DLL_DIR=/usr/lib/aarch64-linux-gnu
+# Filled in by deploy/install-node-service.sh for this device.
+User=__USER__
+WorkingDirectory=__WORKDIR__
+# Raise the USB transfer buffer (root) before opening the Kinect — without this
+# the Jetson throws "libusb errno=12" under load (see CLAUDE.md gotchas). The
+# leading '+' runs just this line as root even though the service drops to User=.
+ExecStartPre=+/bin/sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'
+# Pull the latest code before launching (as User=, so it uses that user's git
+# credentials). The leading '-' makes it non-fatal: offline / no-access just runs
+# the on-disk code. Toggle with AUTO_UPDATE / pick a branch with UPDATE_BRANCH in
+# /etc/default/kinect-node.
+ExecStartPre=-__WORKDIR__/deploy/update-node.sh
+# -u = unbuffered stdout so logs reach journald live. --frames 0 = stream until
+# killed. $EXTRA_ARGS is unbraced on purpose so multiple flags word-split.
+ExecStart=/usr/bin/python3 -u -m node.kinect_node --host ${CENTRAL_HOST} --port ${CENTRAL_PORT} --sensor ${SENSOR_ID} --frames 0 $EXTRA_ARGS
+# If central drops or the node errors, exit and let systemd relaunch it. This IS
+# the "if the connection fails, quit and rerun it" behaviour the project wants.
+Restart=always
+RestartSec=3
+
+[Install]
+# multi-user.target so it starts whether or not the desktop GUI is enabled.
+WantedBy=multi-user.target

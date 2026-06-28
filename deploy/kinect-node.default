@@ -1,0 +1,43 @@
+# crypt-capture Kinect node — per-device configuration.
+# Installed to /etc/default/kinect-node and read by the kinect-node systemd unit.
+# After editing:  sudo systemctl restart kinect-node
+
+# Central machine running central.preview_server.
+#   auto          = find it on the LAN by rig id (recommended; survives the
+#                   central laptop getting a new DHCP IP). Needs the relay
+#                   running with discovery enabled (the default).
+#   <ip/hostname> = connect to a fixed address instead.
+CENTRAL_HOST=auto
+# TCP port for a fixed CENTRAL_HOST. Ignored when CENTRAL_HOST=auto (discovery
+# returns the relay's own node port).
+CENTRAL_PORT=9000
+
+# This node's sensor id (0..N-1; one per Kinect/Jetson):
+SENSOR_ID=0
+
+# Self-update: on every (re)start, fetch + hard-reset the code to the remote so a
+# reboot runs the latest pushed code. Non-fatal — offline just runs on-disk code.
+#   AUTO_UPDATE   1 = update on start (default), 0 = never touch the code
+#   UPDATE_BRANCH branch to track (after this work merges, leave it at main)
+# Hard reset DISCARDS any local edits on the Jetson — edit via push, not on-device.
+AUTO_UPDATE=1
+UPDATE_BRANCH=main
+
+# Azure Kinect depth engine needs a GPU/OpenGL context. A bare systemd service
+# has no DISPLAY, so the depth engine fails with "error code: 204" — even though
+# launching by hand from the desktop works. Point these at the running X session
+# (run `echo $DISPLAY` and `echo ${XAUTHORITY:-$HOME/.Xauthority}` in a desktop
+# terminal to get the right values) so the service can borrow its GL context.
+# Required while the desktop (graphical.target) is up; the depth engine can't run
+# truly headless on this hardware. Uncomment + adjust:
+#DISPLAY=:0
+#XAUTHORITY=/home/USER/.Xauthority
+
+# Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
+#   --preview-stride 2          downsample the live cloud (recommended for preview)
+#   --align color_to_depth      fewer / cleaner points
+#   --depth-mode WFOV_UNBINNED  wide FOV
+#   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
+#   --rig-id studioB            only needed if >1 rig shares the LAN (must match
+#                               the relay's --rig-id; default is "crypt")
+EXTRA_ARGS=--preview-stride 2

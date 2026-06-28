@@ -47,7 +47,7 @@ from pyk4a import (
     PyK4A, Config, DepthMode, ColorResolution, FPS, ImageFormat, WiredSyncMode,
 )
 
-from protocol import control, rvl
+from protocol import control, discovery, rvl
 from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
 from node import camera_modes
 
@@ -270,7 +270,21 @@ def _read_intrinsics(k4a, align):
 def run(host, port, sensor_id, frames,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
-        imu_axes=None, imu_extrinsic=False):
+        imu_axes=None, imu_extrinsic=False, rig_id=discovery.DEFAULT_RIG_ID,
+        discovery_port=discovery.DISCOVERY_PORT):
+    # --host auto: find the central relay by broadcasting for its rig id, so a
+    # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
+    # failure we exit (nonzero) and let systemd relaunch us to try again.
+    if host == "auto":
+        print("discovery: broadcasting for central (rig '%s', udp:%d)..."
+              % (rig_id, discovery_port))
+        found = discovery.discover_central(rig_id, port=discovery_port)
+        if found is None:
+            raise SystemExit("discovery: no central relay answered for rig '%s'"
+                             % rig_id)
+        host, port = found
+        print("discovery: found central at %s:%d" % (host, port))
+
     imu_axes_fn = parse_imu_axes(imu_axes)
     cfg = dict(camera_modes.DEFAULTS)
     if depth_mode:
@@ -499,8 +513,17 @@ def run(host, port, sensor_id, frames,
 
 def main():
     ap = argparse.ArgumentParser(description="Azure Kinect capture node")
-    ap.add_argument("--host", required=True, help="central recorder IP")
-    ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--host", required=True,
+                    help="central recorder IP, or 'auto' to find it on the LAN "
+                         "by rig id (survives a changing central DHCP IP)")
+    ap.add_argument("--port", type=int, default=9000,
+                    help="central TCP port (ignored with --host auto; the "
+                         "discovered relay supplies its own port)")
+    ap.add_argument("--rig-id", default=discovery.DEFAULT_RIG_ID,
+                    help="discovery rig id; must match the relay's --rig-id")
+    ap.add_argument("--discovery-port", type=int,
+                    default=discovery.DISCOVERY_PORT,
+                    help="UDP port for --host auto discovery")
     ap.add_argument("--sensor", type=int, default=0, help="sensor_id 0..N-1")
     ap.add_argument("--frames", type=int, default=60, help="0 = until Ctrl-C")
     ap.add_argument("--sync", choices=["standalone", "master", "sub"],
@@ -539,7 +562,8 @@ def main():
         args.preview_stride, args.profile,
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
         fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes,
-        imu_extrinsic=args.imu_extrinsic)
+        imu_extrinsic=args.imu_extrinsic, rig_id=args.rig_id,
+        discovery_port=args.discovery_port)
 
 
 if __name__ == "__main__":

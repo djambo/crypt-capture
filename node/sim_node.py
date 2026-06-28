@@ -24,7 +24,7 @@ import threading
 import time
 from array import array
 
-from protocol import control, rvl
+from protocol import control, discovery, rvl
 from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
 from node import camera_modes
 
@@ -73,7 +73,15 @@ def synth_frame(width, height, frame_id, sensor_id, stride=1):
 
 
 def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
-        preview_stride=1):
+        preview_stride=1, rig_id=discovery.DEFAULT_RIG_ID,
+        discovery_port=discovery.DISCOVERY_PORT):
+    if host == "auto":                          # find central by rig id (see discovery.py)
+        found = discovery.discover_central(rig_id, port=discovery_port)
+        if found is None:
+            raise SystemExit("discovery: no central relay answered for rig '%s'"
+                             % rig_id)
+        host, port = found
+        print("discovery: found central at %s:%d" % (host, port))
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     period = 1.0 / fps
@@ -178,9 +186,14 @@ def main():
     ap.add_argument("--fps", type=float, default=30.0)
     ap.add_argument("--preview-stride", type=int, default=1,
                     help="downsample the streamed cloud by this factor on the node")
+    ap.add_argument("--rig-id", default=discovery.DEFAULT_RIG_ID,
+                    help="discovery rig id (with --host auto)")
+    ap.add_argument("--discovery-port", type=int,
+                    default=discovery.DISCOVERY_PORT)
     args = ap.parse_args()
     n = run(args.host, args.port, args.sensor, args.frames, args.fps,
-            preview_stride=args.preview_stride)
+            preview_stride=args.preview_stride, rig_id=args.rig_id,
+            discovery_port=args.discovery_port)
     print("sensor %d: streamed %d frames" % (args.sensor, n))
 
 
