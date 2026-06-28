@@ -42,7 +42,9 @@ k4aviewer          # you should see depth + color
 k4arecorder -l 3 test.mkv && echo "capture OK"
 ```
 If the camera isn't detected on first boot, power-cycle the Kinect / reboot
-(known Nano quirk).
+(known Nano quirk). Under the systemd service this is handled automatically by a
+software USB re-enumeration on start — see §9 "Kinect won't stream until
+replugged after a cold boot".
 
 ## 5. Python
 ```bash
@@ -204,6 +206,29 @@ device non-interactive pull access one of these ways:
   one manual `git pull` with a PAT to cache it.
 
 A **public** repo needs none of this — anonymous HTTPS pull just works.
+
+### Kinect won't stream until replugged after a cold boot
+
+A common Azure Kinect quirk: after a cold boot the camera enumerates on USB but
+in a wedged state the SDK can't `start()` (you'd see it fail until you physically
+unplug/replug the camera). The camera has its **own barrel-jack power**, so a
+replug doesn't power-cycle it — it just forces the USB link to **re-enumerate**,
+which clears the wedge. The service does that re-enumeration in software so no
+hands are needed: a root pre-start step (`deploy/reset-kinect-usb.sh`) toggles
+the Kinect's sysfs `authorized` flag (logical disconnect/reconnect) before the
+node opens the camera.
+
+```sh
+RESET_USB_ON_START=1   # in /etc/default/kinect-node; 0 to disable
+```
+Confirm after a reboot: `journalctl -u kinect-node | grep reset-kinect` →
+`re-enumerating … (045e:097x Azure Kinect)`. If the soft reset still isn't enough
+on your hardware (rare — it matches what the physical replug does), escalate to a
+real port power-cycle with [`uhubctl`](https://github.com/mvp/uhubctl)
+(`uhubctl -a cycle -l <hub> -p <port>`, needs a hub with per-port power switching)
+or a powered USB3 hub, and add it as another `ExecStartPre`. Also worth ruling
+out USB autosuspend: `cat /sys/bus/usb/devices/*/power/control` — set the
+Kinect's to `on` via a udev rule if it reads `auto`.
 
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a
