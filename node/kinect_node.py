@@ -69,6 +69,10 @@ _COLOR_ENUM = {
 }
 _FPS_ENUM = {5: FPS.FPS_5, 15: FPS.FPS_15, 30: FPS.FPS_30}
 
+# When IMU streaming is on, re-read + re-send the gravity vector this often (in
+# frames) so the cloud reorients live as the camera turns, without spamming.
+IMU_EVERY = 10
+
 
 def _build_config(cfg, sync, sub_delay_us):
     mode = {
@@ -90,20 +94,42 @@ def _build_config(cfg, sync, sub_delay_us):
     )
 
 
-def _read_gravity_optical(k4a, samples=10):
+_IMU_EXTRINSIC_WARNED = [False]
+
+
+def _accel_to_depth(k4a, x, y, z):
+    """Rotate an accelerometer-frame vector into the depth-camera optical frame
+    using the Kinect's factory ACCEL->DEPTH extrinsics. The Kinect IMU has its
+    own axes (its "down" is NOT on the depth-Y axis), so skipping this leaves the
+    floor sideways. We transform the tip and the origin and subtract, which
+    cancels the translation and leaves a pure rotation (good for a direction).
+    Falls back to identity (with a one-time warning) if pyk4a doesn't expose it.
+    """
+    try:
+        cal = k4a.calibration
+        accel = pyk4a.CalibrationType.ACCEL
+        depth = pyk4a.CalibrationType.DEPTH
+        p1 = cal.convert_3d_to_3d((x, y, z), accel, depth)
+        p0 = cal.convert_3d_to_3d((0.0, 0.0, 0.0), accel, depth)
+        return (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+    except Exception as exc:
+        if not _IMU_EXTRINSIC_WARNED[0]:
+            print("IMU: no ACCEL->DEPTH extrinsic (%s); using raw axes — the "
+                  "floor orientation may be wrong on this pyk4a build" % exc)
+            _IMU_EXTRINSIC_WARNED[0] = True
+        return x, y, z
+
+
+def _read_gravity_optical(k4a, samples=5):
     """Average a few accelerometer samples into a GRAVITY (down) unit vector in
     the depth-camera optical frame (x right, y down, z forward), or None if the
     IMU yields nothing.
 
     A static accelerometer reports the +1g reaction force pointing UP, so the
-    gravity (down) direction is the negated, normalized average reading.
-
-    NOTE (hardware): the Kinect IMU has its own axes, rotated from the depth
-    optical frame by a factory extrinsic. pyk4a doesn't reliably expose that
-    rotation, so we pass the reading through as-if depth-aligned; on real
-    hardware the resulting "down" may need an axis/sign tweak (the same kind of
-    iterative bring-up the depth/colour paths went through). The sim node feeds
-    a known-good vector so the whole plumbing + viewer are testable headless.
+    gravity (down) direction is the negated, normalized average — first rotated
+    from the IMU's own axes into the depth frame (see `_accel_to_depth`). Called
+    once at connect and then continuously while `set_imu` streaming is on, so the
+    cloud reorients live as the camera is physically turned.
     """
     acc = [0.0, 0.0, 0.0]
     n = 0
@@ -119,7 +145,7 @@ def _read_gravity_optical(k4a, samples=10):
         n += 1
     if n == 0:
         return None
-    ax, ay, az = acc[0] / n, acc[1] / n, acc[2] / n
+    ax, ay, az = _accel_to_depth(k4a, acc[0] / n, acc[1] / n, acc[2] / n)
     mag = math.sqrt(ax * ax + ay * ay + az * az)
     if mag < 1e-6:
         return None
@@ -165,6 +191,8 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     # control reader thread.
     rng = {"min": min_depth, "max": max_depth, "denoise": 2}
     bg = BackgroundSubtractor()
+    # IMU orientation streaming, toggled live from the UI ("camera orientation").
+    imu = {"stream": False}
 
     # Live camera reconfig (set_camera): the reader thread only *records* the
     # request under a lock; the capture loop performs the (re)start so pyk4a is
@@ -195,6 +223,9 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
         elif c == "set_bg_margin":
             bg.margin = int(cmd.get("mm", bg.margin))
             print("sensor %d: bg margin -> %d mm" % (sensor_id, bg.margin))
+        elif c == "set_imu":
+            imu["stream"] = bool(cmd.get("enabled", False))
+            print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
         elif c == "set_camera":
             with cfg_lock:
                 changed = camera_modes.apply_camera_command(cfg, cmd)
@@ -325,6 +356,13 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             acc["cap"] += td - tc; acc["depth"] += tz - td
             acc["color"] += tcol - tz; acc["send"] += ts - tcol
             sent += 1
+
+            # Live orientation: while streaming is on, re-read the IMU and push a
+            # fresh gravity vector so the viewer reorients as the camera turns.
+            if imu["stream"] and sent % IMU_EVERY == 0:
+                g = _read_gravity_optical(k4a, samples=3)
+                if g is not None:
+                    sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
             if sent % 30 == 0:
                 now = time.time()
                 fps_meas = 30.0 / (now - win_t0)     # windowed, not cumulative

@@ -34,6 +34,9 @@ DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
 # y down, z forward) — a slightly tilted, mostly-upright camera, so the viewer
 # shows a non-trivial floor tilt (proving the IMU path end-to-end, no hardware).
 SIM_GRAVITY_OPTICAL = (0.15, 0.98, 0.10)
+# While IMU streaming is on, the sim wobbles the down vector so you can SEE the
+# floor reorient live (mimics physically turning the camera). Cadence in frames.
+IMU_EVERY = 10
 
 
 def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1):
@@ -88,6 +91,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
     # just resizes the synthetic blob — geometry is illustrative, not metric.
     cfg = dict(camera_modes.DEFAULTS)
     state = {"w": width, "h": height, "resend_calib": True}
+    imu_state = {"stream": False}              # live orientation toggle (set_imu)
     cfg_lock = threading.Lock()
 
     def on_command(cmd):
@@ -110,6 +114,10 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                     state["resend_calib"] = True
                     print("sensor %d: set_camera %s -> grid %dx%d (align=%s)"
                           % (sensor_id, changed, w, h, cfg["align"]))
+        elif c == "set_imu":
+            imu_state["stream"] = bool(cmd.get("enabled", False))
+            print("sensor %d: imu streaming -> %s"
+                  % (sensor_id, imu_state["stream"]))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -149,6 +157,15 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             )
             sock.sendall(frame.encode())
             sent += 1
+
+            # Live orientation: wobble the synthetic down vector while streaming,
+            # so the viewer's floor/gizmo visibly reorient (no real IMU).
+            if imu_state["stream"] and sent % IMU_EVERY == 0:
+                t = sent * 0.05
+                gx, gy, gz = math.sin(t) * 0.3, 1.0, math.cos(t) * 0.3
+                mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+                sock.sendall(encode_imu(sensor_id, gx / mag, gy / mag, gz / mag))
+
             time.sleep(period)
     finally:
         # shutdown (not just close) so the control-reader thread's recv wakes
