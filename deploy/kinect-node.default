@@ -2,8 +2,14 @@
 # Installed to /etc/default/kinect-node and read by the kinect-node systemd unit.
 # After editing:  sudo systemctl restart kinect-node
 
-# Central machine running central.preview_server (IP or hostname on the LAN):
-CENTRAL_HOST=192.168.1.10
+# Central machine running central.preview_server.
+#   auto          = find it on the LAN by rig id (recommended; survives the
+#                   central laptop getting a new DHCP IP). Needs the relay
+#                   running with discovery enabled (the default).
+#   <ip/hostname> = connect to a fixed address instead.
+CENTRAL_HOST=auto
+# TCP port for a fixed CENTRAL_HOST. Ignored when CENTRAL_HOST=auto (discovery
+# returns the relay's own node port).
 CENTRAL_PORT=9000
 
 # This node's sensor id (0..N-1; one per Kinect/Jetson):
@@ -14,4 +20,6 @@ SENSOR_ID=0
 #   --align color_to_depth      fewer / cleaner points
 #   --depth-mode WFOV_UNBINNED  wide FOV
 #   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
+#   --rig-id studioB            only needed if >1 rig shares the LAN (must match
+#                               the relay's --rig-id; default is "crypt")
 EXTRA_ARGS=--preview-stride 2

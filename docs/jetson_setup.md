@@ -104,7 +104,9 @@ journalctl -u kinect-node -f                  # watch it stream / reconnect
 ```
 Per-device settings (central IP/port, sensor id, extra flags like
 `--preview-stride 2`) live in `/etc/default/kinect-node`; the unit
-(`deploy/kinect-node.service`) stays generic. It raises the USB buffer
+(`deploy/kinect-node.service`) stays generic. `CENTRAL_HOST` defaults to `auto`
+(LAN discovery — see below); set it to a fixed IP/hostname only if you'd rather
+pin it. It raises the USB buffer
 (`usbfs_memory_mb=256`) as a root `ExecStartPre`, waits for the network, and
 uses `Restart=always` / `RestartSec=3` with no start-rate limit, so it keeps
 knocking until central comes up.
@@ -128,6 +130,28 @@ competing with capture. So:
 > `journalctl -u kinect-node -f` — if depth frames flow, you're good. If the
 > depth engine fails to start headless, revert to `graphical.target` (the
 > service still auto-starts there) and just avoid keeping a VNC client attached.
+
+### Finding central without a fixed IP (`--host auto`)
+
+If the laptop running central gets a new DHCP IP, you don't want to re-edit
+every Jetson. With `CENTRAL_HOST=auto` (the default), the node **broadcasts on
+the LAN** for the relay and connects to whoever answers — identified by a **rig
+id**, not an address. The relay answers these broadcasts automatically (it runs
+a small UDP discovery responder on `udp:9001`); nothing extra to start.
+
+- One rig per LAN: leave the default rig id (`crypt`) on both sides — no config.
+- Multiple rigs sharing a LAN: give each its own id — relay
+  `python3 -m central.preview_server --rig-id studioB`, node
+  `EXTRA_ARGS=... --rig-id studioB`.
+- Verify from the Jetson: `journalctl -u kinect-node -f` shows
+  `discovery: found central at <ip>:<port>` then frames. If discovery times out
+  it exits and systemd retries in 3 s (e.g. central not up yet).
+
+If your Wi-Fi blocks broadcast (AP/client isolation — common on guest networks),
+discovery won't get through; fall back to a fixed `CENTRAL_HOST` using an **mDNS
+hostname** (`mylaptop.local`, if the laptop runs Bonjour/Avahi) or a **DHCP
+reservation** on the router so the laptop keeps one IP. Use Ethernet for the rig
+where you can — it's the intended transport and doesn't isolate clients.
 
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a
