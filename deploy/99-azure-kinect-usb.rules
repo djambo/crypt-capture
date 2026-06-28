@@ -1,0 +1,14 @@
+# Azure Kinect DK — keep the USB devices from autosuspending so the camera is
+# ready to start() after a cold boot. Without this the port can come up suspended
+# (power/control=auto) and the SDK reports "libusb device(s) are all unavailable"
+# until a physical replug wakes it. Setting power/control=on at enumeration time
+# prevents the wedge from ever forming (complements deploy/reset-kinect-usb.sh,
+# which re-asserts it at service start).
+#
+# Install: deploy/install-node-service.sh copies this to /etc/udev/rules.d/ and
+# reloads. VID 045e = Microsoft; 097a–097e = the Kinect hub + cameras.
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="097a", ATTR{power/control}="on"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="097b", ATTR{power/control}="on"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="097c", ATTR{power/control}="on"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="097d", ATTR{power/control}="on"
+SUBSYSTEM=="usb", ATTR{idVendor}=="045e", ATTR{idProduct}=="097e", ATTR{power/control}="on"
