@@ -20,13 +20,20 @@ import argparse
 import math
 import random
 import socket
+import threading
 import time
 from array import array
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib
+from protocol.frame import Frame, encode_calib, encode_imu
+from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
+
+# Synthetic gravity (down) unit vector in the depth OPTICAL frame (x right,
+# y down, z forward) — a slightly tilted, mostly-upright camera, so the viewer
+# shows a non-trivial floor tilt (proving the IMU path end-to-end, no hardware).
+SIM_GRAVITY_OPTICAL = (0.15, 0.98, 0.10)
 
 
 def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1):
@@ -74,6 +81,15 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
 
     rng = {"min": 0, "max": 65535}             # live-tunable via control channel
 
+    # Mutable camera config + current synthetic grid, so set_camera is testable
+    # headless: changing the depth FOV mode / alignment switches the grid size
+    # the sim emits, and re-sends the CCAL handshake (proving the relay rebuilds
+    # its ray table at the new resolution). The sim has no real cameras, so it
+    # just resizes the synthetic blob — geometry is illustrative, not metric.
+    cfg = dict(camera_modes.DEFAULTS)
+    state = {"w": width, "h": height, "resend_calib": True}
+    cfg_lock = threading.Lock()
+
     def on_command(cmd):
         c = cmd.get("cmd")
         if c == "set_depth":
@@ -83,6 +99,17 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 rng["max"] = int(cmd["max"])
             print("sensor %d: depth mask -> [%d, %d] mm"
                   % (sensor_id, rng["min"], rng["max"]))
+        elif c == "set_camera":
+            with cfg_lock:
+                changed = camera_modes.apply_camera_command(cfg, cmd)
+                changed.pop("restart", None)
+                if changed:
+                    w, h = camera_modes.grid_dims(
+                        cfg["depth_mode"], cfg["color_resolution"], cfg["align"])
+                    state["w"], state["h"] = w, h
+                    state["resend_calib"] = True
+                    print("sensor %d: set_camera %s -> grid %dx%d (align=%s)"
+                          % (sensor_id, changed, w, h, cfg["align"]))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -91,15 +118,26 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
 
     control.start_reader(sock, on_command)
 
-    # Send synthetic intrinsics on connect (a plausible ~75° FOV pinhole), so the
-    # node-intrinsics path works headless and needs no --calib on the relay.
-    fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
-    sock.sendall(encode_calib(sensor_id, width, height, fx, fx,
-                              width / 2.0, height / 2.0))
+    def send_calib(w, h):
+        # Synthetic intrinsics (a plausible ~75° FOV pinhole), so the
+        # node-intrinsics path works headless and needs no --calib on the relay.
+        fx = (w / 2.0) / math.tan(math.radians(75.0) / 2.0)
+        sock.sendall(encode_calib(sensor_id, w, h, fx, fx, w / 2.0, h / 2.0))
+        # A fixed synthetic gravity vector so the orientation path is exercised
+        # without a real IMU (the relay re-expresses it in the cloud frame).
+        gx, gy, gz = SIM_GRAVITY_OPTICAL
+        mag = math.sqrt(gx * gx + gy * gy + gz * gz) or 1.0
+        sock.sendall(encode_imu(sensor_id, gx / mag, gy / mag, gz / mag))
 
     sent = 0
     try:
         while frames <= 0 or sent < frames:   # frames <= 0 => until Ctrl-C
+            with cfg_lock:
+                width, height = state["w"], state["h"]
+                resend = state["resend_calib"]
+                state["resend_calib"] = False
+            if resend:                         # (re)announce grid + intrinsics
+                send_calib(width, height)
             depth, color, gw, gh = synth_frame(width, height, sent, sensor_id,
                                                rng["min"], rng["max"], s)
             comp = rvl.compress(depth)

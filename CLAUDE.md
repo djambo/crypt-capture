@@ -162,10 +162,38 @@ Two repos:
   `< min_neighbors` valid 8-neighbours → removes the isolated ToF-noise points
   that flicker after background subtraction; the dense subject is untouched.
   Default `min_neighbors=2`, live-tunable via `set_denoise` (0 = off).
+- ✅ **Live camera controls** (`node/camera_modes.py`, `set_camera` command):
+  the UI picks which Kinect data to send — **depth FOV mode** (NFOV/WFOV ×
+  full/binned) and **alignment direction** — live, and the stream adapts. The
+  reader thread records the request; the **capture loop** does the sensor
+  restart (depth mode/color res/fps) so pyk4a is touched from one thread, then
+  re-reads intrinsics (depth- *or* color-camera, per alignment) and re-sends the
+  `CCAL` handshake so the relay rebuilds the cloud — **no `CPV1`/viewer change**.
+  Alignment: `color_to_depth` (default, 1 pt/depth pixel, color warped into the
+  depth grid) vs **`depth_to_color`** (1 pt/*color* pixel — depth warped into the
+  color grid → much more color detail / a denser cloud, the "higher-res color"
+  win, at more points + some depth holes). `color_resolution`/`fps` are also
+  accepted (not in the UI yet). Mode tables are pyk4a-free + unit-tested
+  (`tests/test_camera.py`); `sim_node` resizes its synthetic grid + re-sends
+  calib so it's testable headless; verified end-to-end (sim 640×576/98k pts →
+  1280×720 color grid → 1024² WFOV, intrinsics rebuilt each switch).
 - ✅ **Observability:** node prints a *windowed* fps (was a misleading
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
   the bottleneck (wire vs GPU) is obvious.
+- ✅ **IMU orientation** (gravity vector → cloud "up"/floor): the node reads the
+  Kinect accelerometer (`_read_gravity_optical`), and sends a per-sensor gravity
+  (down) unit vector alongside the `CCAL` handshake via a new `CIMU` message
+  (`frame.encode_imu`/`read_message`). The relay re-expresses it in the
+  cloud/view frame (`gravity_to_view`, applying the same Y/Z flip as the
+  unprojector) and attaches it to **every** `CPV1` frame as a trailing optional
+  block (new `FLAG_GRAVITY = 0x4`, 3×float32 after positions+rgb). Gives the
+  cloud an initial orientation before extrinsic calibration; the viewer draws a
+  floor grid + camera-orientation gizmo from it. `sim_node` emits a known-good
+  slightly-tilted vector so the path is testable headless; unit-tested
+  (`tests/test_imu.py`) and verified end-to-end (sim→relay→browser). **Hardware
+  caveat:** the IMU↔depth factory extrinsic isn't applied (pyk4a doesn't reliably
+  expose it), so "down" may need an axis/sign tweak on a real Kinect.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -219,12 +247,13 @@ Two repos:
 protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws relay),
             control.py (central->node commands, CTL1)
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
+            camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py, test_background.py
+tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
@@ -261,6 +290,13 @@ python3 -m scripts.preview_client --frames 30
 
 # Live control (tune the depth mask on all nodes without a browser):
 python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
+# Live camera controls (pick which Kinect data to send; stream adapts):
+python3 -m scripts.send_command --port 8080 set-camera --align depth_to_color
+python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNED
+# Camera-mode logic tests (pyk4a-free):
+python3 -m tests.test_camera
+# IMU / gravity path tests (CIMU round-trip + optical->view + CPV1 block):
+python3 -m tests.test_imu
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -315,9 +351,11 @@ trigger-record-download.
    in the **`crypt` repo** (consumes `docs/preview_protocol.md`); optional color.
 3. 🟡 **M1 — Control plane.** ✅ central → node command channel (`protocol/
    control.py`, `CTL1`) with browser→relay→node fan-out; first command
-   `set_depth` (live depth-mask tuning) done & verified. ⏳ remaining:
+   `set_depth` (live depth-mask tuning) done & verified. Also done:
+   `capture_bg/clear_bg/set_bg_margin/set_denoise`, and **`set_camera`** (live
+   depth FOV mode + alignment direction; color res/fps accepted). ⏳ remaining:
    `arm/record/stop/status` commands (M3 needs them); optional status/echo back
-   to the UI.
+   to the UI (no ack today — feedback is the cloud changing).
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.

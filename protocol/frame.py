@@ -112,6 +112,17 @@ CALIB_MAGIC = b"CCAL"
 _CALIB = struct.Struct("<4sIHHffff" + "ffffffff")
 _REST = struct.Struct("<BBHQQHHII")    # frame header after the 4s magic
 
+# --- node IMU / orientation handshake ------------------------------------
+# Each node also sends a per-sensor GRAVITY (down) unit vector derived from the
+# Kinect accelerometer, expressed in the depth-camera OPTICAL frame (x right,
+# y down, z forward). It gives the cloud an initial orientation (which way is
+# down / where the floor is) before any extrinsic calibration. Low-rate and
+# static-ish (the rig doesn't move), so it's sent alongside the CCAL handshake,
+# keyed by sensor_id. central re-expresses it in the cloud/view frame and
+# forwards it to the viewer.
+IMU_MAGIC = b"CIMU"
+_IMU = struct.Struct("<4sIfff")        # magic, sensor_id, gx, gy, gz (unit vec)
+
 
 def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
     d = tuple(dist) + (0.0,) * (8 - len(dist))
@@ -119,10 +130,15 @@ def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
                        fx, fy, cx, cy, *d[:8])
 
 
+def encode_imu(sensor_id, gx, gy, gz):
+    """Encode a per-sensor gravity (down) unit vector in the depth optical frame."""
+    return _IMU.pack(IMU_MAGIC, sensor_id, gx, gy, gz)
+
+
 def read_message(sock):
     """Read one node->central message, dispatching on the leading magic.
 
-    Returns ("frame", Frame), ("calib", dict), or None on clean close.
+    Returns ("frame", Frame), ("calib", dict), ("imu", dict), or None on close.
     """
     magic = _recv_exactly(sock, 4)
     if not magic:
@@ -136,6 +152,12 @@ def read_message(sock):
         return ("calib", {"sensor_id": sid, "width": w, "height": h,
                           "fx": fx, "fy": fy, "cx": cx, "cy": cy,
                           "dist": vals[7:15]})
+    if magic == IMU_MAGIC:
+        rest = _recv_exactly(sock, _IMU.size - 4)
+        if not rest:
+            return None
+        sid, gx, gy, gz = struct.unpack("<Ifff", rest)
+        return ("imu", {"sensor_id": sid, "gravity": (gx, gy, gz)})
     if magic != MAGIC:
         raise ValueError("bad magic %r — stream desynced" % (magic,))
     head = _recv_exactly(sock, _REST.size)

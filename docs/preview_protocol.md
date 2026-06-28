@@ -25,7 +25,7 @@ can stay source-agnostic (see the North Star in `CLAUDE.md`).
 | field | type | meaning |
 |---|---|---|
 | magic | `4s` | `CPV1` |
-| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present |
+| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present |
 | sensor_id | `u32` | source sensor (0..N-1) |
 | frame_id | `u32` | capture frame index (low 32 bits) |
 | count | `u32` | number of points |
@@ -40,11 +40,20 @@ Then the payload blocks, in order:
    depth-aligned color (`kinect_node` via `transformed_color`; `sim_node`
    always). The relay sets bit1 whenever it has color for the frame; a viewer
    must still handle bit1 = 0 (geometry only) gracefully.
+3. **gravity** *(only if flag bit2 set)* — `3 × float32`, a **gravity (down)
+   unit vector** in the same view/world frame as positions, derived from the
+   sensor's IMU accelerometer. It gives the cloud an initial orientation (which
+   way is down / where the floor lies) before any extrinsic calibration. Static-
+   ish (the rig doesn't move) but attached to every frame so a late-joining
+   viewer always has it. **Read it with a `DataView` (`getFloat32`), not a
+   `Float32Array` view:** when rgb is present this block starts at a non-4-byte-
+   aligned offset and a typed-array view would throw.
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The viewer must read `count` from the header, not
-assume a fixed size. The `rgb` block, when present, starts at byte
-`20 + count*12`.
+assume a fixed size. The `rgb` block, when present, starts at byte `20 +
+count*12`; the `gravity` block starts right after it (`20 + count*12`, plus
+`count*3` when rgb is present).
 
 ## Viewer side (sketch, lives in `crypt`)
 
@@ -72,6 +81,30 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | command | meaning |
 |---|---|
 | `{"cmd":"set_depth","min":<mm>,"max":<mm>}` | set the working depth mask; pixels outside `[min,max]` mm are dropped (background removal). Either field optional. |
+| `{"cmd":"capture_bg","frames":<n>}` / `{"cmd":"clear_bg"}` / `{"cmd":"set_bg_margin","mm":<n>}` | background-plate subtraction (snapshot the empty scene, then stream only the subject). |
+| `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
+| `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
+
+**`set_camera`** lets the UI choose the camera mode live; the stream adapts (the
+node restarts the sensor as needed, re-reads its intrinsics, and re-sends the
+`CCAL` handshake — the relay then rebuilds the cloud with **no `CPV1`/viewer
+change**). Fields:
+
+- `depth_mode` — depth FOV mode: `NFOV_UNBINNED` (640×576), `NFOV_2X2BINNED`
+  (320×288), `WFOV_2X2BINNED` (512×512), `WFOV_UNBINNED` (1024×1024, 15 fps).
+  Restarts the sensor.
+- `align` — alignment direction (free, per-frame, no restart):
+  `color_to_depth` (default) streams **one point per depth pixel** (color warped
+  into the depth grid); `depth_to_color` streams **one point per color pixel**
+  (depth warped into the color grid) → much more color detail / a denser cloud,
+  at more points and some depth holes.
+- `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart;
+  mostly matters in `depth_to_color`, where the point grid IS the color image).
+- `fps` — `5`/`15`/`30`, auto-clamped (WFOV-unbinned & 3072p cap at 15) (restart).
+
+No ack is sent — the feedback is the cloud changing resolution/density. A camera
+change also resets the node's background plate (the grid is a different size), so
+the viewer should re-capture the background afterwards.
 
 (`arm` / `record` / `stop` will use this same channel later.)
 

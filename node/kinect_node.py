@@ -7,8 +7,20 @@ removal that also makes RVL compress well; AI matting with RVM/BGMv2 is the
 later upgrade), RVL-compresses the masked depth, and streams Frames to the
 central recorder using the exact same wire protocol as the simulator.
 
-Color is pulled as MJPG straight from the sensor (no re-encode needed for a
-first bring-up; NVENC H.26x is the production upgrade).
+Color is pulled as BGRA from the sensor and warped to match the streamed point
+grid (see "alignment" below).
+
+**Live camera controls** (`set_camera` over the control channel, driven from the
+UI): the depth FOV mode, color resolution, fps, and alignment direction can all
+be changed while streaming.
+  - depth FOV mode / color res / fps changes restart the sensor;
+  - alignment is a free per-frame switch:
+      color_to_depth — color warped into the DEPTH grid (1 pt / depth pixel);
+      depth_to_color — depth warped into the COLOR grid (1 pt / color pixel) ->
+                       much more color detail / a denser cloud.
+The node re-reads its intrinsics (depth- or color-camera, per alignment) and
+re-sends the CCAL handshake after any change, so the relay re-derives the cloud
+correctly with zero viewer changes. See node/camera_modes.py for the tables.
 
 Requires on the node: Azure Kinect SDK + depth engine installed (see
 docs/jetson_setup.md), and `pip install pyk4a numpy`.
@@ -24,7 +36,9 @@ Multi-sensor (later): give the master sensor --sync master and the others
 """
 
 import argparse
+import math
 import socket
+import threading
 import time
 
 import numpy as np
@@ -34,31 +48,113 @@ from pyk4a import (
 )
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib
+from protocol.frame import Frame, encode_calib, encode_imu
+from node import camera_modes
 from node.background import BackgroundSubtractor, denoise_mask
 
+# Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
+_DEPTH_ENUM = {
+    "NFOV_UNBINNED": DepthMode.NFOV_UNBINNED,
+    "NFOV_2X2BINNED": DepthMode.NFOV_2X2BINNED,
+    "WFOV_2X2BINNED": DepthMode.WFOV_2X2BINNED,
+    "WFOV_UNBINNED": DepthMode.WFOV_UNBINNED,
+}
+_COLOR_ENUM = {
+    "720P": ColorResolution.RES_720P,
+    "1080P": ColorResolution.RES_1080P,
+    "1440P": ColorResolution.RES_1440P,
+    "1536P": ColorResolution.RES_1536P,
+    "2160P": ColorResolution.RES_2160P,
+    "3072P": ColorResolution.RES_3072P,
+}
+_FPS_ENUM = {5: FPS.FPS_5, 15: FPS.FPS_15, 30: FPS.FPS_30}
 
-def _build_config(sync, sub_delay_us):
+
+def _build_config(cfg, sync, sub_delay_us):
     mode = {
         "standalone": WiredSyncMode.STANDALONE,
         "master": WiredSyncMode.MASTER,
         "sub": WiredSyncMode.SUBORDINATE,
     }[sync]
+    fps = camera_modes.clamp_fps(cfg["fps"], cfg["depth_mode"],
+                                 cfg["color_resolution"])
     return Config(
-        color_resolution=ColorResolution.RES_720P,
+        color_resolution=_COLOR_ENUM[cfg["color_resolution"]],
         color_format=ImageFormat.COLOR_BGRA32,      # raw pixels: needed to warp
                                                     # color into the depth grid
-        depth_mode=DepthMode.NFOV_UNBINNED,         # 640x576 depth grid
-        camera_fps=FPS.FPS_30,
+        depth_mode=_DEPTH_ENUM[cfg["depth_mode"]],
+        camera_fps=_FPS_ENUM[fps],
         synchronized_images_only=True,
         wired_sync_mode=mode,
         subordinate_delay_off_master_usec=sub_delay_us,
     )
 
 
+def _read_gravity_optical(k4a, samples=10):
+    """Average a few accelerometer samples into a GRAVITY (down) unit vector in
+    the depth-camera optical frame (x right, y down, z forward), or None if the
+    IMU yields nothing.
+
+    A static accelerometer reports the +1g reaction force pointing UP, so the
+    gravity (down) direction is the negated, normalized average reading.
+
+    NOTE (hardware): the Kinect IMU has its own axes, rotated from the depth
+    optical frame by a factory extrinsic. pyk4a doesn't reliably expose that
+    rotation, so we pass the reading through as-if depth-aligned; on real
+    hardware the resulting "down" may need an axis/sign tweak (the same kind of
+    iterative bring-up the depth/colour paths went through). The sim node feeds
+    a known-good vector so the whole plumbing + viewer are testable headless.
+    """
+    acc = [0.0, 0.0, 0.0]
+    n = 0
+    for _ in range(samples):
+        try:
+            sample = k4a.get_imu_sample()
+        except Exception:
+            break
+        a = sample.get("acc_sample") if isinstance(sample, dict) else None
+        if not a:
+            continue
+        acc[0] += a[0]; acc[1] += a[1]; acc[2] += a[2]
+        n += 1
+    if n == 0:
+        return None
+    ax, ay, az = acc[0] / n, acc[1] / n, acc[2] / n
+    mag = math.sqrt(ax * ax + ay * ay + az * az)
+    if mag < 1e-6:
+        return None
+    return (-ax / mag, -ay / mag, -az / mag)   # down = -reaction, normalized
+
+
+def _read_intrinsics(k4a, align):
+    """Intrinsics for the camera the streamed grid lives in: the COLOR camera in
+    depth_to_color, else the DEPTH camera. Returns (fx, fy, cx, cy, dist8)."""
+    ctype = (pyk4a.CalibrationType.COLOR if align == "depth_to_color"
+             else pyk4a.CalibrationType.DEPTH)
+    mat = k4a.calibration.get_camera_matrix(ctype)
+    fx, fy, cx, cy = mat[0][0], mat[1][1], mat[0][2], mat[1][2]
+    try:                                            # k1,k2,p1,p2,k3,k4,k5,k6
+        dist = tuple(float(c) for c in
+                     k4a.calibration.get_distortion_coefficients(ctype))
+    except Exception:
+        dist = (0.0,) * 8                           # fall back to pinhole
+    return fx, fy, cx, cy, dist
+
+
 def run(host, port, sensor_id, frames, min_depth, max_depth,
-        sync="standalone", sub_delay_us=0, preview_stride=1, profile=False):
-    k4a = PyK4A(_build_config(sync, sub_delay_us))
+        sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
+        depth_mode=None, color_resolution=None, fps=None, align=None):
+    cfg = dict(camera_modes.DEFAULTS)
+    if depth_mode:
+        cfg["depth_mode"] = depth_mode
+    if color_resolution:
+        cfg["color_resolution"] = color_resolution
+    if fps:
+        cfg["fps"] = int(fps)
+    if align:
+        cfg["align"] = align
+
+    k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
     k4a.start()
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -69,6 +165,12 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     # control reader thread.
     rng = {"min": min_depth, "max": max_depth, "denoise": 2}
     bg = BackgroundSubtractor()
+
+    # Live camera reconfig (set_camera): the reader thread only *records* the
+    # request under a lock; the capture loop performs the (re)start so pyk4a is
+    # only ever touched from one thread.
+    cfg_lock = threading.Lock()
+    pending = {"reconfig": False, "restart": False}
 
     def on_command(cmd):
         c = cmd.get("cmd")
@@ -93,19 +195,28 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
         elif c == "set_bg_margin":
             bg.margin = int(cmd.get("mm", bg.margin))
             print("sensor %d: bg margin -> %d mm" % (sensor_id, bg.margin))
+        elif c == "set_camera":
+            with cfg_lock:
+                changed = camera_modes.apply_camera_command(cfg, cmd)
+                if changed.pop("restart", False):
+                    pending["restart"] = True
+                if changed:                         # any real field changed
+                    pending["reconfig"] = True
+                    print("sensor %d: set_camera %s -> mode=%s color=%s fps=%d "
+                          "align=%s" % (
+                              sensor_id, changed, cfg["depth_mode"],
+                              cfg["color_resolution"],
+                              camera_modes.clamp_fps(cfg["fps"], cfg["depth_mode"],
+                                                     cfg["color_resolution"]),
+                              cfg["align"]))
 
     control.start_reader(sock, on_command)
 
-    # Read this camera's own depth intrinsics; central will key them by sensor_id
-    # (no manual calib files, scales to N cameras). Sent once, before frames.
-    mat = k4a.calibration.get_camera_matrix(pyk4a.CalibrationType.DEPTH)
-    ifx, ify, icx, icy = mat[0][0], mat[1][1], mat[0][2], mat[1][2]
-    try:                                            # k1,k2,p1,p2,k3,k4,k5,k6
-        idist = tuple(float(c) for c in
-                      k4a.calibration.get_distortion_coefficients(
-                          pyk4a.CalibrationType.DEPTH))
-    except Exception:
-        idist = (0.0,) * 8                          # fall back to pinhole
+    # Read intrinsics for the active alignment; central keys them by sensor_id
+    # (no manual calib files, scales to N cameras). (Re)sent before frames after
+    # any reconfig via the calib_sent flag.
+    align = cfg["align"]
+    ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
     calib_sent = False
 
     sent = 0
@@ -114,15 +225,48 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
     acc = {"cap": 0.0, "depth": 0.0, "color": 0.0, "send": 0.0}  # profiling
     try:
         while frames <= 0 or sent < frames:
+            # Apply any pending live camera reconfig before grabbing a frame, so
+            # pyk4a start/stop happens only on this (capture) thread.
+            with cfg_lock:
+                do_reconfig = pending["reconfig"]
+                do_restart = pending["restart"]
+                pending["reconfig"] = False
+                pending["restart"] = False
+                cur = dict(cfg)
+            if do_reconfig:
+                if do_restart:
+                    k4a.stop()
+                    k4a = PyK4A(_build_config(cur, sync, sub_delay_us))
+                    k4a.start()
+                align = cur["align"]
+                bg.clear()                          # plate is wrong-shaped now
+                ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
+                calib_sent = False
+                print("sensor %d: camera reconfigured (restart=%s) -> %s"
+                      % (sensor_id, do_restart, cur))
+
             tc = time.time()
             cap = k4a.get_capture()
-            if cap.depth is None:
+            # The streamed point grid is the depth image (color_to_depth) or the
+            # depth warped into the color image (depth_to_color).
+            if align == "depth_to_color":
+                depth = cap.transformed_depth        # (Hc, Wc) uint16, mm
+            else:
+                depth = cap.depth                    # (Hd, Wd) uint16, mm
+            if depth is None:
                 continue
-            depth = cap.depth                       # uint16 (H, W), millimetres
-            if not calib_sent:                      # full-res dims for intrinsics
+            if not calib_sent:                      # full-res grid dims + intrinsics
                 sock.sendall(encode_calib(sensor_id, depth.shape[1],
                                           depth.shape[0], ifx, ify, icx, icy,
                                           idist))
+                # Initial orientation: a gravity (down) vector from the IMU, sent
+                # once per (re)connect/reconfig alongside the intrinsics so the
+                # relay/viewer can level the cloud to the floor.
+                g = _read_gravity_optical(k4a)
+                if g is not None:
+                    sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
+                    print("sensor %d: gravity(optical) = (%.3f, %.3f, %.3f)"
+                          % (sensor_id, g[0], g[1], g[2]))
                 calib_sent = True
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):
@@ -147,19 +291,24 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             comp = rvl.compress(masked.ravel())
             tz = time.time()
 
-            # Depth-aligned color: warp the color image into the depth camera's
-            # geometry, then keep RGB for the foreground pixels only, in the SAME
-            # row-major order as the non-zero depth pixels (relay re-pairs 1:1).
+            # Aligned color: the color image already in the SAME geometry as the
+            # streamed depth grid (transformed_color for color_to_depth, the raw
+            # color image for depth_to_color). Keep RGB for the foreground pixels
+            # only, row-major, one triple per non-zero depth pixel (relay re-pairs
+            # 1:1).
             color = b""
             color_aligned = False
             try:
-                tcolor = cap.transformed_color           # (H, W, 4) BGRA or None
+                if align == "depth_to_color":
+                    csrc = cap.color                 # (Hc, Wc, 4) BGRA
+                else:
+                    csrc = cap.transformed_color     # (Hd, Wd, 4) BGRA
             except Exception:
-                tcolor = None
-            if tcolor is not None:
+                csrc = None
+            if csrc is not None:
                 if s > 1:
-                    tcolor = tcolor[::s, ::s]
-                rgb = tcolor[..., 2::-1]                  # BGRA -> RGB
+                    csrc = csrc[::s, ::s]
+                rgb = csrc[..., 2::-1]                # BGRA -> RGB
                 color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
                 color_aligned = True
             tcol = time.time()
@@ -178,11 +327,11 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
             sent += 1
             if sent % 30 == 0:
                 now = time.time()
-                fps = 30.0 / (now - win_t0)          # windowed, not cumulative
+                fps_meas = 30.0 / (now - win_t0)     # windowed, not cumulative
                 pts = int((masked != 0).sum())
                 kb = (len(comp) + len(color)) / 1024.0
                 msg = ("sensor %d: %d frames | %.1f fps | %d pts | %.0f KB/f"
-                       % (sensor_id, sent, fps, pts, kb))
+                       % (sensor_id, sent, fps_meas, pts, kb))
                 if profile:
                     msg += "  [cap %.0f depth %.0f color %.0f send %.0f ms/f]" % (
                         acc["cap"] / 30 * 1000, acc["depth"] / 30 * 1000,
@@ -219,10 +368,24 @@ def main():
                          "(2 = quarter the points; recommended for live preview)")
     ap.add_argument("--profile", action="store_true",
                     help="print per-stage timing (cap/depth/color/send)")
+    ap.add_argument("--depth-mode", default="NFOV_UNBINNED",
+                    choices=list(camera_modes.DEPTH_MODES),
+                    help="initial depth FOV mode (live-changeable from the UI)")
+    ap.add_argument("--color-resolution", default="720P",
+                    choices=list(camera_modes.COLOR_RESOLUTIONS),
+                    help="initial color resolution (live-changeable)")
+    ap.add_argument("--camera-fps", type=int, default=30,
+                    choices=list(camera_modes.FPS_CHOICES),
+                    help="initial fps (auto-clamped per mode)")
+    ap.add_argument("--align", default="color_to_depth",
+                    choices=list(camera_modes.ALIGN_MODES),
+                    help="initial alignment direction (live-changeable)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.min_depth, args.max_depth, args.sync, args.sub_delay_us,
-        args.preview_stride, args.profile)
+        args.preview_stride, args.profile,
+        depth_mode=args.depth_mode, color_resolution=args.color_resolution,
+        fps=args.camera_fps, align=args.align)
 
 
 if __name__ == "__main__":

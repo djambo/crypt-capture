@@ -59,6 +59,16 @@ def main():
                         "8-neighbours to keep a point; 0 = off)")
     dn.add_argument("--min-neighbors", type=int, required=True)
 
+    sc = sub.add_parser("set-camera", help="change depth FOV mode / color "
+                        "resolution / fps / alignment live (streaming adapts)")
+    sc.add_argument("--depth-mode",
+                    choices=["NFOV_UNBINNED", "NFOV_2X2BINNED",
+                             "WFOV_2X2BINNED", "WFOV_UNBINNED"])
+    sc.add_argument("--color-resolution",
+                    choices=["720P", "1080P", "1440P", "1536P", "2160P", "3072P"])
+    sc.add_argument("--fps", type=int, choices=[5, 15, 30])
+    sc.add_argument("--align", choices=["color_to_depth", "depth_to_color"])
+
     args = ap.parse_args()
     if args.cmd == "set-depth":
         command = {"cmd": "set_depth"}
@@ -76,6 +86,17 @@ def main():
     elif args.cmd == "set-denoise":
         send(args.host, args.port,
              {"cmd": "set_denoise", "min_neighbors": args.min_neighbors})
+    elif args.cmd == "set-camera":
+        command = {"cmd": "set_camera"}
+        if args.depth_mode is not None:
+            command["depth_mode"] = args.depth_mode
+        if args.color_resolution is not None:
+            command["color_resolution"] = args.color_resolution
+        if args.fps is not None:
+            command["fps"] = args.fps
+        if args.align is not None:
+            command["align"] = args.align
+        send(args.host, args.port, command)
 
 
 if __name__ == "__main__":

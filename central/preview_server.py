@@ -39,12 +39,27 @@ from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("set_depth", "capture_bg", "clear_bg", "set_bg_margin",
-                       "set_denoise")
+                       "set_denoise", "set_camera")
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
 FLAG_POSITIONS = 0x1
 FLAG_RGB = 0x2
+FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (down) vec
+
+
+def gravity_to_view(g_optical):
+    """Re-express a gravity (down) unit vector from the depth OPTICAL frame
+    (x right, y down, z forward) into the cloud/view frame the viewer renders in
+    (x right, y up, z toward viewer). The unprojector negates Y and Z to build
+    the cloud, so gravity transforms the same way. Returns a normalized tuple, or
+    None if degenerate."""
+    gx, gy, gz = g_optical
+    vx, vy, vz = gx, -gy, -gz
+    n = math.sqrt(vx * vx + vy * vy + vz * vz)
+    if n < 1e-9:
+        return None
+    return (vx / n, vy / n, vz / n)
 
 
 def default_intrinsics(w, h, hfov_deg=75.0):
@@ -131,15 +146,19 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
     return grid
 
 
-def build_message(sensor_id, frame_id, xyz, rgb=None):
+def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
     count = int(xyz.shape[0])
-    flags = FLAG_POSITIONS | (FLAG_RGB if rgb is not None else 0)
+    flags = (FLAG_POSITIONS
+             | (FLAG_RGB if rgb is not None else 0)
+             | (FLAG_GRAVITY if gravity is not None else 0))
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
     payload = header + np.ascontiguousarray(xyz, dtype="<f4").tobytes()
     if rgb is not None:
         payload += np.ascontiguousarray(rgb, dtype=np.uint8).tobytes()
+    if gravity is not None:                  # trailing 12-byte block (after rgb)
+        payload += np.asarray(gravity, dtype="<f4").tobytes()
     return payload
 
 
@@ -154,6 +173,7 @@ class PreviewServer:
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
         self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy,dist)
         self._ray = {}                      # sensor_id -> (w,h,ray_x,ray_y)
+        self._sensor_gravity = {}           # sensor_id -> (gx,gy,gz) view-frame
         self.frames_relayed = 0
 
     # --- browser (WebSocket) side ---------------------------------------
@@ -277,6 +297,14 @@ class PreviewServer:
                               payload["cx"], payload["cy"],
                               " ".join("%.3f" % c for c in d)))
                     continue
+                if kind == "imu":
+                    sid = payload["sensor_id"]
+                    g = gravity_to_view(payload["gravity"])
+                    self._sensor_gravity[sid] = g
+                    print("[preview] sensor %d gravity(view) = %s" % (
+                        sid, None if g is None else
+                        "(%.3f, %.3f, %.3f)" % g))
+                    continue
                 frame = payload
                 if not frame.depth_rvl:
                     continue
@@ -297,7 +325,9 @@ class PreviewServer:
                     xyz = xyz[idx]
                     if rgb is not None:
                         rgb = rgb[idx]
-                out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb)
+                gravity = self._sensor_gravity.get(frame.sensor_id)
+                out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb,
+                                    gravity)
                 self._broadcast(out)
                 self.frames_relayed += 1
 
