@@ -280,6 +280,8 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
+deploy/     kinect-node.service (+ .default env + install-node-service.sh):
+            run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py, test_extrinsic.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
@@ -350,6 +352,17 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   central-only, x86/3.8+ — they don't run on the Nano.)
 - **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
   to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
+  (The `deploy/` systemd unit applies this automatically as a root `ExecStartPre`.)
+- **Run on boot / headless**: `deploy/install-node-service.sh` installs the node
+  as a systemd service (`Restart=always`, USB-buffer fix, per-device config in
+  `/etc/default/kinect-node`) so it auto-starts and relaunches on failure — the
+  node has no internal reconnect loop, so systemd is the supervisor. `--headless`
+  drops the desktop GUI (`multi-user.target`) for more capture headroom: the node
+  draws no windows and the Nano is CPU-bound, so the desktop + any connected VNC
+  session just steal cycles from RVL/color. Caveat: verify the closed depth
+  engine still starts headless before relying on it (it can want a GL/display
+  context); revert with `systemctl set-default graphical.target`. See
+  `docs/jetson_setup.md` §9.
 - See `docs/jetson_setup.md`.
 
 ## Rendering R&D already done (in the `crypt` repo)

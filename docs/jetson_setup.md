@@ -84,6 +84,51 @@ print("valid depth px:", sum(1 for v in d if v), "/", len(d))
 PY
 ```
 
+## 9. Run on boot + restart on failure (systemd) — and go headless
+
+Instead of VNC-ing in and launching the node by hand each boot, install it as a
+**systemd service** so it starts automatically and relaunches if it dies (e.g.
+the central relay was offline, or the camera hiccuped). The node has no internal
+reconnect loop — it exits on a connection failure — so systemd supervising it is
+the intended design.
+
+From the repo root **on the Jetson**:
+```bash
+sudo deploy/install-node-service.sh           # keep the GUI
+#   or, also drop the desktop for more headroom (see caveat below):
+sudo deploy/install-node-service.sh --headless
+
+sudo nano /etc/default/kinect-node            # set CENTRAL_HOST + SENSOR_ID
+sudo systemctl start kinect-node
+journalctl -u kinect-node -f                  # watch it stream / reconnect
+```
+Per-device settings (central IP/port, sensor id, extra flags like
+`--preview-stride 2`) live in `/etc/default/kinect-node`; the unit
+(`deploy/kinect-node.service`) stays generic. It raises the USB buffer
+(`usbfs_memory_mb=256`) as a root `ExecStartPre`, waits for the network, and
+uses `Restart=always` / `RestartSec=3` with no start-rate limit, so it keeps
+knocking until central comes up.
+
+### Why headless (and why VNC hurts)
+
+The node opens **no GUI windows** — it's pure capture + network streaming — and
+on the Nano it's **CPU-bound at ~92% of the 30 fps sensor cap** (`RVL 22 +
+color 14 ms/f` on 4 cores). A connected VNC session continuously re-encodes the
+framebuffer, and the desktop compositor burns CPU/GPU/RAM (only 4 GB total) — all
+competing with capture. So:
+- **Don't keep a VNC client connected while streaming.** With the service you
+  never need VNC to *launch* anything; SSH in to manage it.
+- **`--headless` disables the desktop entirely** (`systemctl set-default
+  multi-user.target`) — the biggest single win. Revert any time with
+  `sudo systemctl set-default graphical.target`.
+
+> ⚠️ **Verify headless once before relying on it.** The closed Azure Kinect
+> depth engine has, on some setups, wanted an OpenGL/display context. Test it:
+> `sudo systemctl set-default multi-user.target && sudo reboot`, then SSH in and
+> `journalctl -u kinect-node -f` — if depth frames flow, you're good. If the
+> depth engine fails to start headless, revert to `graphical.target` (the
+> service still auto-starts there) and just avoid keeping a VNC client attached.
+
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a
   few fps. That's expected for validation. Production: a NumPy-vectorized or

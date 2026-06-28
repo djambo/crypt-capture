@@ -1,0 +1,17 @@
+# crypt-capture Kinect node — per-device configuration.
+# Installed to /etc/default/kinect-node and read by the kinect-node systemd unit.
+# After editing:  sudo systemctl restart kinect-node
+
+# Central machine running central.preview_server (IP or hostname on the LAN):
+CENTRAL_HOST=192.168.1.10
+CENTRAL_PORT=9000
+
+# This node's sensor id (0..N-1; one per Kinect/Jetson):
+SENSOR_ID=0
+
+# Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
+#   --preview-stride 2          downsample the live cloud (recommended for preview)
+#   --align color_to_depth      fewer / cleaner points
+#   --depth-mode WFOV_UNBINNED  wide FOV
+#   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
+EXTRA_ARGS=--preview-stride 2
