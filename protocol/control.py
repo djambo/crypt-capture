@@ -9,7 +9,7 @@ blocks on `read_command` and applies each command.
 
 Wire format (little-endian): magic `CTL1` + u32 length + UTF-8 JSON body.
 Commands are dicts with a `"cmd"` key, e.g.:
-    {"cmd": "set_depth", "min": 500, "max": 4000}     # depth mask, millimetres
+    {"cmd": "set_bg_margin", "mm": 60}     # background-subtraction threshold
 (arm / record / stop will reuse this same channel later.)
 
 Stdlib only and Python-3.6-safe — this runs on the Jetson node.

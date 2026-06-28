@@ -108,12 +108,16 @@ Two repos:
 - ✅ **M1 (started) — Control plane** (`protocol/control.py`): central → node
   commands over a new `CTL1` framing, sent back down the node's existing TCP
   socket (full-duplex; a tiny idle reader thread on the node applies them — no
-  frame-path impact). First command is **`set_depth`** (live depth-mask tuning,
-  the background-cutoff control). Path: browser WS **text** JSON → relay forwards
-  whitelisted commands → node. Drive it headless with `scripts/send_command.py`.
-  Verified end-to-end (sim cloud dropped 24.6k→3.6k pts on `set_depth max=1200`).
+  frame-path impact). Path: browser WS **text** JSON → relay forwards whitelisted
+  commands → node. Commands: `capture_bg`/`clear_bg`/`set_bg_margin`/
+  `set_denoise` (background subtraction), `set_camera` (live mode), `set_imu`
+  (orientation). Drive them headless with `scripts/send_command.py`.
   `arm/record/stop` will reuse this channel (M3). Node `run()` now `shutdown()`s
   the socket before close so the reader thread wakes cleanly.
+  **Removed:** the `set_depth` near/far range-clip command — the node now streams
+  the **full depth range** and culls via background subtraction + the speckle
+  filter, so the depth-mask command, the node clip, and `--min-depth/--max-depth`
+  are all gone (the viewer had already dropped the UI).
 - ✅ **Perf/quality pass (Nano-era):** the streamed cloud was always downsampled
   at the relay (`--stride`); that now moves to the **node** (`--preview-stride`,
   carried in a new frame-header `stride` field) so RVL + color + wire all shrink
@@ -315,8 +319,8 @@ python3 -m scripts.preview_client --frames 30
 #   python3 -m node.kinect_node --host LAPTOP --port 9000 --sensor 0 --frames 0 --preview-stride 2 --profile
 #   python3 -m central.preview_server
 
-# Live control (tune the depth mask on all nodes without a browser):
-python3 -m scripts.send_command --port 8080 set-depth --min 400 --max 4000
+# Live control (capture a background plate on all nodes without a browser):
+python3 -m scripts.send_command --port 8080 capture-bg --frames 60
 # Live camera controls (pick which Kinect data to send; stream adapts):
 python3 -m scripts.send_command --port 8080 set-camera --align depth_to_color
 python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNED
@@ -377,10 +381,11 @@ trigger-record-download.
    `scripts/preview_client.py`. ⏳ *remaining*: the browser three.js/WebXR viewer
    in the **`crypt` repo** (consumes `docs/preview_protocol.md`); optional color.
 3. 🟡 **M1 — Control plane.** ✅ central → node command channel (`protocol/
-   control.py`, `CTL1`) with browser→relay→node fan-out; first command
-   `set_depth` (live depth-mask tuning) done & verified. Also done:
-   `capture_bg/clear_bg/set_bg_margin/set_denoise`, and **`set_camera`** (live
-   depth FOV mode + alignment direction; color res/fps accepted). ⏳ remaining:
+   control.py`, `CTL1`) with browser→relay→node fan-out. Commands:
+   `capture_bg/clear_bg/set_bg_margin/set_denoise` (background subtraction),
+   **`set_camera`** (live depth FOV mode + alignment; color res/fps accepted),
+   `set_imu` (orientation). (The `set_depth` range-clip command was removed — the
+   node streams the full range and culls via background subtraction.) ⏳ remaining:
    `arm/record/stop/status` commands (M3 needs them); optional status/echo back
    to the UI (no ack today — feedback is the cloud changing).
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
