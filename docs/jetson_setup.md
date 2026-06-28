@@ -210,25 +210,39 @@ A **public** repo needs none of this — anonymous HTTPS pull just works.
 ### Kinect won't stream until replugged after a cold boot
 
 A common Azure Kinect quirk: after a cold boot the camera enumerates on USB but
-in a wedged state the SDK can't `start()` (you'd see it fail until you physically
-unplug/replug the camera). The camera has its **own barrel-jack power**, so a
-replug doesn't power-cycle it — it just forces the USB link to **re-enumerate**,
-which clears the wedge. The service does that re-enumeration in software so no
-hands are needed: a root pre-start step (`deploy/reset-kinect-usb.sh`) toggles
-the Kinect's sysfs `authorized` flag (logical disconnect/reconnect) before the
-node opens the camera.
+the SDK can't open it (`libusb device(s) are all unavailable` / won't `start()`)
+until you physically unplug/replug it. The usual root cause is **USB
+autosuspend** — the port comes up asleep (`power/control=auto`) and the replug is
+just what wakes it. Check yours: `cat /sys/bus/usb/devices/*/power/control` — any
+`auto` on a Kinect device is the culprit.
+
+The fix keeps the device **awake**, two layers, both installed for you:
+1. A **udev rule** (`deploy/99-azure-kinect-usb.rules`, installed to
+   `/etc/udev/rules.d/`) sets `power/control=on` for the Kinect at enumeration
+   time, so the wedge never forms at boot.
+2. A gentle root pre-start step (`deploy/reset-kinect-usb.sh`) re-asserts
+   `power/control=on` (and wakes an already-suspended device) before the node
+   opens the camera. It **never disconnects** the device, so it can't break a
+   working camera.
 
 ```sh
-RESET_USB_ON_START=1   # in /etc/default/kinect-node; 0 to disable
+RESET_USB_ON_START=1   # in /etc/default/kinect-node; 0 to disable the pre-start step
 ```
-Confirm after a reboot: `journalctl -u kinect-node | grep reset-kinect` →
-`re-enumerating … (045e:097x Azure Kinect)`. If the soft reset still isn't enough
-on your hardware (rare — it matches what the physical replug does), escalate to a
-real port power-cycle with [`uhubctl`](https://github.com/mvp/uhubctl)
-(`uhubctl -a cycle -l <hub> -p <port>`, needs a hub with per-port power switching)
-or a powered USB3 hub, and add it as another `ExecStartPre`. Also worth ruling
-out USB autosuspend: `cat /sys/bus/usb/devices/*/power/control` — set the
-Kinect's to `on` via a udev rule if it reads `auto`.
+Confirm after a reboot: `journalctl -u kinect-node | grep kinect-usb` →
+`autosuspend off for … (045e:097x …)`, then the camera opens.
+
+**Escalation if keeping it awake still isn't enough** (the wedge is a true
+enumeration hang, not just suspend): set `KINECT_USB_RESET=reenumerate` in the
+env file to also force a full USB re-enumeration (software "replug", toggles the
+device `authorized` flag with a settle delay). That's heavier and briefly makes
+the camera unavailable, so it's off by default. If even that fails, do a real
+port power-cycle with [`uhubctl`](https://github.com/mvp/uhubctl)
+(`uhubctl -a cycle -l <hub> -p <port>`, needs a hub with per-port power
+switching) or a powered USB3 hub.
+
+> ⚠️ Don't re-enumerate the Kinect's internal hubs unconditionally on every start
+> — it can leave the camera "unavailable" and crash-loop. Keeping the device
+> awake (above) is the safe default; reach for re-enumeration only as a fallback.
 
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a

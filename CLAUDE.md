@@ -395,12 +395,15 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   `/etc/default/kinect-node` (EnvironmentFile); the perf win is then just not
   keeping a VNC client attached, not full headless. See `docs/jetson_setup.md` §9.
 - **Kinect cold-boot wedge**: the camera often enumerates but won't `start()`
-  after a cold boot until physically replugged (its barrel-jack power stays on, so
-  the replug just re-enumerates USB). A root `ExecStartPre`
-  (`deploy/reset-kinect-usb.sh`, toggle `RESET_USB_ON_START`) does that in
-  software by toggling the device's sysfs `authorized` flag, so it streams
-  hands-off. Escalate to `uhubctl`/powered hub only if the soft reset ever proves
-  insufficient. See `docs/jetson_setup.md` §9.
+  after a cold boot until physically replugged. Root cause is usually **USB
+  autosuspend** (`power/control=auto`); the replug just wakes it. Fix keeps it
+  awake: a udev rule (`deploy/99-azure-kinect-usb.rules`) sets `power/control=on`
+  at enumeration, and a gentle root `ExecStartPre` (`deploy/reset-kinect-usb.sh`,
+  toggle `RESET_USB_ON_START`) re-asserts it — **never disconnects** the device.
+  (A first attempt that toggled the internal hubs' `authorized` flag every start
+  REGRESSED it — left the camera "libusb … unavailable" and crash-looped — so the
+  full re-enumeration is now opt-in only via `KINECT_USB_RESET=reenumerate`, with
+  `uhubctl`/powered-hub as the last resort.) See `docs/jetson_setup.md` §9.
 - See `docs/jetson_setup.md`.
 
 ## Rendering R&D already done (in the `crypt` repo)

@@ -43,6 +43,15 @@ fi
 sed -e "s|__USER__|$RUN_USER|g" -e "s|__WORKDIR__|$REPO_DIR|g" \
     "$SCRIPT_DIR/$UNIT" > "/etc/systemd/system/$UNIT"
 
+# Keep the Kinect USB from autosuspending (a common cause of "camera won't start
+# until I replug it" after a cold boot). Installed as a udev rule so it applies
+# at enumeration time, every boot.
+install -m 644 "$SCRIPT_DIR/99-azure-kinect-usb.rules" \
+    /etc/udev/rules.d/99-azure-kinect-usb.rules
+udevadm control --reload-rules 2>/dev/null || true
+udevadm trigger 2>/dev/null || true
+echo "  installed USB no-autosuspend udev rule"
+
 systemctl daemon-reload
 systemctl enable "$UNIT"
 
