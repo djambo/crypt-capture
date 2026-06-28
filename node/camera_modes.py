@@ -48,7 +48,9 @@ DEFAULTS = {
     "depth_mode": "NFOV_UNBINNED",
     "color_resolution": "720P",
     "fps": 30,
-    "align": "color_to_depth",
+    # depth_to_color is the default: denser cloud / much more colour detail, and
+    # it now registers to the depth frame (CEXT) so there's no alignment penalty.
+    "align": "depth_to_color",
 }
 
 
