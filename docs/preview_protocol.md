@@ -25,7 +25,7 @@ can stay source-agnostic (see the North Star in `CLAUDE.md`).
 | field | type | meaning |
 |---|---|---|
 | magic | `4s` | `CPV1` |
-| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present |
+| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present |
 | sensor_id | `u32` | source sensor (0..N-1) |
 | frame_id | `u32` | capture frame index (low 32 bits) |
 | count | `u32` | number of points |
@@ -40,11 +40,20 @@ Then the payload blocks, in order:
    depth-aligned color (`kinect_node` via `transformed_color`; `sim_node`
    always). The relay sets bit1 whenever it has color for the frame; a viewer
    must still handle bit1 = 0 (geometry only) gracefully.
+3. **gravity** *(only if flag bit2 set)* — `3 × float32`, a **gravity (down)
+   unit vector** in the same view/world frame as positions, derived from the
+   sensor's IMU accelerometer. It gives the cloud an initial orientation (which
+   way is down / where the floor lies) before any extrinsic calibration. Static-
+   ish (the rig doesn't move) but attached to every frame so a late-joining
+   viewer always has it. **Read it with a `DataView` (`getFloat32`), not a
+   `Float32Array` view:** when rgb is present this block starts at a non-4-byte-
+   aligned offset and a typed-array view would throw.
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The viewer must read `count` from the header, not
-assume a fixed size. The `rgb` block, when present, starts at byte
-`20 + count*12`.
+assume a fixed size. The `rgb` block, when present, starts at byte `20 +
+count*12`; the `gravity` block starts right after it (`20 + count*12`, plus
+`count*3` when rgb is present).
 
 ## Viewer side (sketch, lives in `crypt`)
 

@@ -30,6 +30,54 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-06-28 — IMU orientation: gravity vector in `CPV1` (floor/up)
+**Status: NEW — not yet applied**
+
+**Summary.** Each sensor now ships a **gravity (down) unit vector** from its
+Kinect accelerometer, giving the cloud an initial orientation (which way is down
+/ where the floor is) before any extrinsic calibration. The node reads the IMU
+and sends it to the relay (new internal `CIMU` handshake message); the relay
+re-expresses it in the cloud/view frame and attaches it to **every** `CPV1`
+frame as a new optional trailing block. Use it to draw a floor grid and a
+camera-orientation gizmo, and (later) to seed floor-plane detection in the cloud.
+
+**Protocol impact (additive, backward compatible).**
+- `CPV1` header unchanged (20 bytes). **`flags` bit2 (`0x4`) = gravity present.**
+- New trailing block **after** positions (and rgb, if present): **`3 × float32`**
+  = a normalized down vector in the view frame (`x` right, `y` up, `z` toward
+  viewer), so for a level camera it's ≈ `(0, -1, 0)`. World "up" is its negation.
+- Offset: `20 + count*12`, plus `count*3` when rgb (bit1) is set.
+- bit2 may be 0 on any frame (no IMU) — keep handling its absence.
+
+**⚠️ Gotcha.** When rgb is present the gravity block starts at a **non-4-byte-
+aligned** offset, so a `new Float32Array(buffer, offset, 3)` view **throws**
+(`start offset … multiple of 4`). Read it with a `DataView` instead:
+
+```js
+// after reading count, flags, and advancing `off` past positions (+ rgb):
+let gravity = null
+if (flags & 0x4 && off + 12 <= buffer.byteLength) {
+  gravity = [dv.getFloat32(off, true),
+             dv.getFloat32(off + 4, true),
+             dv.getFloat32(off + 8, true)]   // cloud-frame down unit vector
+}
+```
+
+**Viewer action.** Render the orientation: a subtle floor `GridHelper` tilted so
+its +Y normal aligns to `-gravity` (the IMU-estimated floor under the cloud),
+and a small gizmo at the **camera origin** (0,0,0 — the cloud is in camera space)
+= a wireframe cube + R/G/B axis sticks + a "down" stick along `gravity`. The gap
+between the axis-aligned gizmo and the tilted grid shows the camera's tilt.
+
+**Hardware note (FYI, no viewer action).** The Kinect IMU has its own axes
+(rotated from the depth optical frame by a factory extrinsic pyk4a doesn't
+reliably expose), so on real hardware the "down" direction may need an axis/sign
+tweak — the same iterative bring-up the depth/colour paths went through. The
+`sim_node` feeds a known-good, slightly-tilted vector so the whole path + your
+viewer are testable headless (you'll see a ~10° floor tilt).
+
+---
+
 ## 2026-06-25 — Camera controls (pick which Kinect data to send)
 **Status: NEW — not yet applied**
 

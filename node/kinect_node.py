@@ -36,6 +36,7 @@ Multi-sensor (later): give the master sensor --sync master and the others
 """
 
 import argparse
+import math
 import socket
 import threading
 import time
@@ -47,7 +48,7 @@ from pyk4a import (
 )
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib
+from protocol.frame import Frame, encode_calib, encode_imu
 from node import camera_modes
 from node.background import BackgroundSubtractor, denoise_mask
 
@@ -87,6 +88,42 @@ def _build_config(cfg, sync, sub_delay_us):
         wired_sync_mode=mode,
         subordinate_delay_off_master_usec=sub_delay_us,
     )
+
+
+def _read_gravity_optical(k4a, samples=10):
+    """Average a few accelerometer samples into a GRAVITY (down) unit vector in
+    the depth-camera optical frame (x right, y down, z forward), or None if the
+    IMU yields nothing.
+
+    A static accelerometer reports the +1g reaction force pointing UP, so the
+    gravity (down) direction is the negated, normalized average reading.
+
+    NOTE (hardware): the Kinect IMU has its own axes, rotated from the depth
+    optical frame by a factory extrinsic. pyk4a doesn't reliably expose that
+    rotation, so we pass the reading through as-if depth-aligned; on real
+    hardware the resulting "down" may need an axis/sign tweak (the same kind of
+    iterative bring-up the depth/colour paths went through). The sim node feeds
+    a known-good vector so the whole plumbing + viewer are testable headless.
+    """
+    acc = [0.0, 0.0, 0.0]
+    n = 0
+    for _ in range(samples):
+        try:
+            sample = k4a.get_imu_sample()
+        except Exception:
+            break
+        a = sample.get("acc_sample") if isinstance(sample, dict) else None
+        if not a:
+            continue
+        acc[0] += a[0]; acc[1] += a[1]; acc[2] += a[2]
+        n += 1
+    if n == 0:
+        return None
+    ax, ay, az = acc[0] / n, acc[1] / n, acc[2] / n
+    mag = math.sqrt(ax * ax + ay * ay + az * az)
+    if mag < 1e-6:
+        return None
+    return (-ax / mag, -ay / mag, -az / mag)   # down = -reaction, normalized
 
 
 def _read_intrinsics(k4a, align):
@@ -222,6 +259,14 @@ def run(host, port, sensor_id, frames, min_depth, max_depth,
                 sock.sendall(encode_calib(sensor_id, depth.shape[1],
                                           depth.shape[0], ifx, ify, icx, icy,
                                           idist))
+                # Initial orientation: a gravity (down) vector from the IMU, sent
+                # once per (re)connect/reconfig alongside the intrinsics so the
+                # relay/viewer can level the cloud to the floor.
+                g = _read_gravity_optical(k4a)
+                if g is not None:
+                    sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
+                    print("sensor %d: gravity(optical) = (%.3f, %.3f, %.3f)"
+                          % (sensor_id, g[0], g[1], g[2]))
                 calib_sent = True
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):

@@ -25,10 +25,15 @@ import time
 from array import array
 
 from protocol import control, rvl
-from protocol.frame import Frame, encode_calib
+from protocol.frame import Frame, encode_calib, encode_imu
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
+
+# Synthetic gravity (down) unit vector in the depth OPTICAL frame (x right,
+# y down, z forward) — a slightly tilted, mostly-upright camera, so the viewer
+# shows a non-trivial floor tilt (proving the IMU path end-to-end, no hardware).
+SIM_GRAVITY_OPTICAL = (0.15, 0.98, 0.10)
 
 
 def synth_frame(width, height, frame_id, sensor_id, dmin=0, dmax=65535, stride=1):
@@ -118,6 +123,11 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         # node-intrinsics path works headless and needs no --calib on the relay.
         fx = (w / 2.0) / math.tan(math.radians(75.0) / 2.0)
         sock.sendall(encode_calib(sensor_id, w, h, fx, fx, w / 2.0, h / 2.0))
+        # A fixed synthetic gravity vector so the orientation path is exercised
+        # without a real IMU (the relay re-expresses it in the cloud frame).
+        gx, gy, gz = SIM_GRAVITY_OPTICAL
+        mag = math.sqrt(gx * gx + gy * gy + gz * gz) or 1.0
+        sock.sendall(encode_imu(sensor_id, gx / mag, gy / mag, gz / mag))
 
     sent = 0
     try:

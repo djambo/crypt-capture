@@ -181,6 +181,19 @@ Two repos:
   cumulative average) + pts + KB/frame; relay logs `fps in | pts | KB/f |
   viewers`. Viewer gets a dual **recv vs render** fps HUD (see updates doc) so
   the bottleneck (wire vs GPU) is obvious.
+- ✅ **IMU orientation** (gravity vector → cloud "up"/floor): the node reads the
+  Kinect accelerometer (`_read_gravity_optical`), and sends a per-sensor gravity
+  (down) unit vector alongside the `CCAL` handshake via a new `CIMU` message
+  (`frame.encode_imu`/`read_message`). The relay re-expresses it in the
+  cloud/view frame (`gravity_to_view`, applying the same Y/Z flip as the
+  unprojector) and attaches it to **every** `CPV1` frame as a trailing optional
+  block (new `FLAG_GRAVITY = 0x4`, 3×float32 after positions+rgb). Gives the
+  cloud an initial orientation before extrinsic calibration; the viewer draws a
+  floor grid + camera-orientation gizmo from it. `sim_node` emits a known-good
+  slightly-tilted vector so the path is testable headless; unit-tested
+  (`tests/test_imu.py`) and verified end-to-end (sim→relay→browser). **Hardware
+  caveat:** the IMU↔depth factory extrinsic isn't applied (pyk4a doesn't reliably
+  expose it), so "down" may need an axis/sign tweak on a real Kinect.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -240,7 +253,7 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
-tests/      test_rvl.py, test_background.py, test_camera.py
+tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
@@ -282,6 +295,8 @@ python3 -m scripts.send_command --port 8080 set-camera --align depth_to_color
 python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNED
 # Camera-mode logic tests (pyk4a-free):
 python3 -m tests.test_camera
+# IMU / gravity path tests (CIMU round-trip + optical->view + CPV1 block):
+python3 -m tests.test_imu
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
