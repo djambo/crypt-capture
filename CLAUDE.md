@@ -394,16 +394,17 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   X session into the service via `DISPLAY` + `XAUTHORITY` in
   `/etc/default/kinect-node` (EnvironmentFile); the perf win is then just not
   keeping a VNC client attached, not full headless. See `docs/jetson_setup.md` §9.
-- **Kinect cold-boot wedge**: the camera often enumerates but won't `start()`
-  after a cold boot until physically replugged. Root cause is usually **USB
-  autosuspend** (`power/control=auto`); the replug just wakes it. Fix keeps it
-  awake: a udev rule (`deploy/99-azure-kinect-usb.rules`) sets `power/control=on`
-  at enumeration, and a gentle root `ExecStartPre` (`deploy/reset-kinect-usb.sh`,
-  toggle `RESET_USB_ON_START`) re-asserts it — **never disconnects** the device.
-  (A first attempt that toggled the internal hubs' `authorized` flag every start
-  REGRESSED it — left the camera "libusb … unavailable" and crash-looped — so the
-  full re-enumeration is now opt-in only via `KINECT_USB_RESET=reenumerate`, with
-  `uhubctl`/powered-hub as the last resort.) See `docs/jetson_setup.md` §9.
+- **Kinect cold-boot enumeration (NOT software-fixable here)**: on a cold boot
+  the depth camera (`045e:097c`) often doesn't enumerate, so the SDK can't open
+  the device (`libusb … unavailable` / `LIBUSB_ERROR_IO` on the BOS descriptor).
+  Cause is hardware **power-up ordering** — the camera must be powered/ready
+  before the host scans USB. Reliable workflow: boot the Jetson first (Kinect
+  barrel-jack power on), then enumerate the camera; the service's `Restart=always`
+  grabs it the moment it appears. A per-start USB-reset experiment (autosuspend
+  toggle / `authorized` re-enumeration) was **tried and removed** — it made the
+  depth cam drop off the bus entirely and crash-loop. **Do not reintroduce
+  per-start USB resets.** Confirm the Kinect's own 5V supply + solid-white LED if
+  it won't enumerate. See `docs/jetson_setup.md` §9.
 - See `docs/jetson_setup.md`.
 
 ## Rendering R&D already done (in the `crypt` repo)

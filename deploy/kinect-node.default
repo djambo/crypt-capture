@@ -23,16 +23,11 @@ SENSOR_ID=0
 AUTO_UPDATE=1
 UPDATE_BRANCH=main
 
-# The Azure Kinect often won't start() on a cold boot until physically replugged
-# — usually because its USB port autosuspended. RESET_USB_ON_START=1 (default)
-# runs a gentle pre-start step that disables autosuspend / wakes the device
-# (never disconnects it). Set 0 to disable. A udev rule installed by
-# install-node-service.sh also prevents autosuspend at boot.
-RESET_USB_ON_START=1
-# If the no-suspend fix alone isn't enough, KINECT_USB_RESET=reenumerate also
-# forces a full USB re-enumeration (software "replug") on start — heavier, briefly
-# makes the camera unavailable. Leave unset (= nosuspend) unless you need it.
-#KINECT_USB_RESET=reenumerate
+# Cold-boot note: the Kinect's depth camera must be powered + ready BEFORE the
+# host enumerates it, or it won't appear on USB (no software reset reliably fixes
+# this on the Jetson). The reliable flow is: boot the Jetson first, then connect
+# the Kinect (barrel-jack power, then USB). The service retries continuously, so
+# it grabs the camera as soon as it appears — no manual launch needed.
 
 # Azure Kinect depth engine needs a GPU/OpenGL context. A bare systemd service
 # has no DISPLAY, so the depth engine fails with "error code: 204" — even though
