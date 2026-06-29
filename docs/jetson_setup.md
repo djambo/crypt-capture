@@ -41,10 +41,10 @@ k4aviewer          # you should see depth + color
 # or headless:
 k4arecorder -l 3 test.mkv && echo "capture OK"
 ```
-If the camera isn't detected on first boot, power-cycle the Kinect / reboot
-(known Nano quirk). Under the systemd service this is handled automatically by a
-software USB re-enumeration on start — see §9 "Kinect won't stream until
-replugged after a cold boot".
+If the camera isn't detected on first boot, the fix is power-up ordering: boot
+the Jetson first (with the Kinect's barrel-jack power on), then connect/enumerate
+the camera — see §9 "Kinect won't enumerate on a cold boot". (No software reset
+substitutes for this on the Jetson.)
 
 ## 5. Python
 ```bash
@@ -207,42 +207,36 @@ device non-interactive pull access one of these ways:
 
 A **public** repo needs none of this — anonymous HTTPS pull just works.
 
-### Kinect won't stream until replugged after a cold boot
+### Kinect won't enumerate on a cold boot — power-up ordering, not software
 
-A common Azure Kinect quirk: after a cold boot the camera enumerates on USB but
-the SDK can't open it (`libusb device(s) are all unavailable` / won't `start()`)
-until you physically unplug/replug it. The usual root cause is **USB
-autosuspend** — the port comes up asleep (`power/control=auto`) and the replug is
-just what wakes it. Check yours: `cat /sys/bus/usb/devices/*/power/control` — any
-`auto` on a Kinect device is the culprit.
+After a cold boot the Kinect's **depth camera** (`045e:097c`) often doesn't appear
+on USB, so the SDK fails to open the device (`libusb device(s) are all
+unavailable` / `LIBUSB_ERROR_IO` reading the BOS descriptor). The cause is
+hardware **power-up ordering**: the camera must be powered and ready *before* the
+USB host scans the bus, or the depth processor is missed. A physical replug fixes
+it because it re-enumerates the device once it's ready.
 
-The fix keeps the device **awake**, two layers, both installed for you:
-1. A **udev rule** (`deploy/99-azure-kinect-usb.rules`, installed to
-   `/etc/udev/rules.d/`) sets `power/control=on` for the Kinect at enumeration
-   time, so the wedge never forms at boot.
-2. A gentle root pre-start step (`deploy/reset-kinect-usb.sh`) re-asserts
-   `power/control=on` (and wakes an already-suspended device) before the node
-   opens the camera. It **never disconnects** the device, so it can't break a
-   working camera.
+**There is no reliable software fix for this on the Jetson** — we tried (a
+pre-start USB re-enumeration / autosuspend toggle) and it did more harm than
+good: toggling the device made the depth camera drop off the bus entirely and
+crash-loop. That experiment has been removed. Don't reintroduce per-start USB
+resets here.
 
-```sh
-RESET_USB_ON_START=1   # in /etc/default/kinect-node; 0 to disable the pre-start step
-```
-Confirm after a reboot: `journalctl -u kinect-node | grep kinect-usb` →
-`autosuspend off for … (045e:097x …)`, then the camera opens.
+The reliable workflow:
+1. **Boot the Jetson first** (with the Kinect's barrel-jack power on so the camera
+   is ready), **then** connect — or the camera was already connected and powered
+   before boot. The point is the depth camera must be live when the host
+   enumerates.
+2. The `kinect-node` service **retries continuously** (`Restart=always`), so the
+   moment the camera enumerates it grabs it and streams — no manual launch.
 
-**Escalation if keeping it awake still isn't enough** (the wedge is a true
-enumeration hang, not just suspend): set `KINECT_USB_RESET=reenumerate` in the
-env file to also force a full USB re-enumeration (software "replug", toggles the
-device `authorized` flag with a settle delay). That's heavier and briefly makes
-the camera unavailable, so it's off by default. If even that fails, do a real
-port power-cycle with [`uhubctl`](https://github.com/mvp/uhubctl)
-(`uhubctl -a cycle -l <hub> -p <port>`, needs a hub with per-port power
-switching) or a powered USB3 hub.
-
-> ⚠️ Don't re-enumerate the Kinect's internal hubs unconditionally on every start
-> — it can leave the camera "unavailable" and crash-loop. Keeping the device
-> awake (above) is the safe default; reach for re-enumeration only as a fallback.
+If the camera still won't enumerate: confirm the Kinect's **own 5V barrel-jack
+supply** is connected (the Jetson ports can't power the depth camera alone) and
+its status **LED is solid white**. A pulsing LED or a missing `045e:097c` in
+`lsusb` is a power/readiness problem, not a software one. As a last resort a
+powered USB3 hub with switchable per-port power + [`uhubctl`](https://github.com/mvp/uhubctl)
+can power-cycle the port on a schedule, but that's hardware, not part of this
+service.
 
 ## Notes / known limits
 - **Speed:** pure-Python RVL is ~tens of ms/frame; on the Nano you'll get only a

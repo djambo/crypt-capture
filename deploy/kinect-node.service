@@ -29,10 +29,6 @@ ExecStartPre=+/bin/sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory
 # the on-disk code. Toggle with AUTO_UPDATE / pick a branch with UPDATE_BRANCH in
 # /etc/default/kinect-node.
 ExecStartPre=-__WORKDIR__/deploy/update-node.sh
-# Software "replug" the Kinect (root) so a cold-boot wedged USB state doesn't need
-# a physical unplug/replug to start streaming. '+' = root, '-' = non-fatal. Runs
-# after update-node so the freshly-pulled script is used. Toggle RESET_USB_ON_START.
-ExecStartPre=-+__WORKDIR__/deploy/reset-kinect-usb.sh
 # -u = unbuffered stdout so logs reach journald live. --frames 0 = stream until
 # killed. $EXTRA_ARGS is unbraced on purpose so multiple flags word-split.
 ExecStart=/usr/bin/python3 -u -m node.kinect_node --host ${CENTRAL_HOST} --port ${CENTRAL_PORT} --sensor ${SENSOR_ID} --frames 0 $EXTRA_ARGS
