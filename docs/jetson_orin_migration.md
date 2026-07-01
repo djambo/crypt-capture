@@ -255,6 +255,26 @@ Everything in `deploy/` is arch-independent and works unchanged. Because you're 
 a fresh branch while bringing the Orin up, set `UPDATE_BRANCH` in
 `/etc/default/kinect-node` to your working branch, or `AUTO_UPDATE=0` to freeze.
 
+**`XAUTHORITY` under GDM autologin** is `/run/user/1000/gdm/Xauthority` — find the
+exact path with `ps -C Xorg -o args= | grep -o '\-auth [^ ]*'`. With `DISPLAY=:0`
++ that `XAUTHORITY` set in `/etc/default/kinect-node`, the service borrows the
+autologin session's GL context and the depth engine starts with **no error 204**
+(verified on the Orin). The service starting before the desktop is up just fails
+once and `Restart=always` retries until the session exists.
+
+> **Depth-camera cold-boot enumeration — confirmed on the Orin too.** After a
+> reboot the log showed the color cam (`045e:097d`), mics, and hubs enumerated but
+> the **depth camera `045e:097c` did not**, so `k4a_device_open()` failed in a loop
+> (`usb_cmd_create(USB_DEVICE_DEPTH_PROCESSOR ...)` / "libusb device(s) are all
+> unavailable"). **Cycling the Kinect's barrel-jack power once** (USB stays
+> connected) re-powered the depth sensor, `097c` enumerated, and the retrying
+> service caught it and streamed immediately. So the operational boot procedure
+> (same quirk as the Nano, no software fix): **boot the Jetson → power-cycle the
+> Kinect (wait for solid-white LED) → the service grabs it in ~3 s.** Diagnose with
+> `lsusb | grep 097c` — if `097c` is absent it's power/enumeration, not the SDK.
+> To fully automate the power cycle, a switchable powered USB hub + `uhubctl`
+> (or a smart plug on the Kinect supply) can toggle it after boot.
+
 ### 8. Validate end-to-end
 Point it at the central relay and confirm frames + fps:
 ```bash
