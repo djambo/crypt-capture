@@ -298,7 +298,17 @@ Two repos:
   `libsoundio1`) + the `libdepthengine.so.2.0` binary; the depth engine still
   needs a GL context. The Orbbec K4A wrapper does **not** support the original
   Kinect DK (Femto only). Node code is already 3.6-safe so it runs unchanged on
-  3.10. Full step-by-step: **`docs/jetson_orin_migration.md`**.
+  3.10. **Migration DONE + verified on hardware** (JetPack 6.2, one Orin Nano
+  streaming live over Ethernet as a boot service): the clean per-node runbook is
+  **`docs/jetson_orin_node_setup.md`**; **`docs/jetson_orin_migration.md`** is the
+  why/gotchas companion. Key hard-won facts baked in: `libsoundio1` was dropped
+  from 22.04 (pull the 20.04 arm64 .deb first — the one make-or-break step); the
+  1.4.2 `libk4a` deb bundles the depth engine; udev rules are required (missing →
+  "libusb unavailable"); JetPack 6 defaults to Wayland so force Xorg+autologin and
+  give the service `DISPLAY=:0`+`XAUTHORITY=/run/user/1000/gdm/Xauthority` for the
+  depth-engine GL context (no error 204); the depth cam (`097c`) cold-boot
+  enumeration self-heals on a normal reboot (USB bus cycles), else power-cycle the
+  Kinect's 5 V adapter. Per node only `SENSOR_ID` differs.
 
 ## Repo layout
 

@@ -5,6 +5,10 @@ Nano** (JetPack 4 / Ubuntu 18.04 / Python 3.6) to a new **Jetson Orin Nano
 Developer Kit**. The Nano bring-up is in `jetson_setup.md`; this doc is the
 *delta* — what changes on the Orin and why.
 
+> **Just provisioning a new node?** Use the clean copy-paste runbook —
+> **`jetson_orin_node_setup.md`** (verified end-to-end on hardware). This doc is
+> the companion "why + gotchas + dead-ends we ruled out."
+
 > The node only runs `node/` + `protocol/` (capture → RVL → stream). It never
 > runs the central relay or the browser viewer. So this migration is entirely a
 > `crypt-capture` concern.
