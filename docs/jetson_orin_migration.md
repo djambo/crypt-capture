@@ -198,12 +198,18 @@ test reports the depth engine missing, extract it from the
 sudo cp libdepthengine.so.2.0 /usr/lib/aarch64-linux-gnu/ && sudo ldconfig
 ```
 
-**udev rules:**
+**udev rules (REQUIRED — don't skip, and the deb does NOT install them).** Without
+them, a non-root smoke test fails with **`libusb device(s) are all unavailable ...
+k4a_device_open() failed`** — which looks like a power/enumeration problem but is
+actually just permissions:
 ```bash
 sudo wget -O /etc/udev/rules.d/99-k4a.rules \
   https://raw.githubusercontent.com/microsoft/Azure-Kinect-Sensor-SDK/develop/scripts/99-k4a.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
+Then **unplug/replug the Kinect's USB** so the rules apply on re-enumeration.
+(If `lsusb | grep -i microsoft` shows *nothing*, it's genuinely power/cable — check
+the Kinect's own 5V barrel-jack + solid-white LED.)
 
 > ⚠️ **The Orbbec K4A wrapper does NOT help here** — it re-implements the k4a API
 > for Orbbec Femto cameras and *explicitly does not support the original Azure
