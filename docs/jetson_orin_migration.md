@@ -26,15 +26,39 @@ Developer Kit**. The Nano bring-up is in `jetson_setup.md`; this doc is the
    future color compression is CPU/FFmpeg, not hardware. If hardware encode ever
    becomes a hard requirement, that's an Orin NX, not the Nano.
 
-## SD card
+## Storage
 
-- **Size:** 64 GB minimum, **128 GB recommended** (JetPack 6 + build tools + the
-  Azure Kinect SDK + takes fill 64 GB fast). Use a **UHS-1, A2**-rated microSD
-  (e.g. SanDisk Extreme / Samsung PRO). A2 random-IO helps boot/build feel.
-- **Do NOT reuse the Nano's card by moving it** — it won't boot and you'd destroy
-  your rollback. Buy a new card; leave the Nano's as-is.
-- You can either flash the SD image yourself (below) or buy a pre-flashed
-  "JetPack for Orin Nano" card to skip step 2.
+**Storage strategy — the node is a *bridge*, not an archive.** A recorded clip is
+downloaded to (or livestreamed onto) the central machine and then **cleared from
+the device**; the node never hoards footage. So on-device storage only has to hold
+the OS + SDK + build tools + a small record-then-offload scratch buffer, not a
+library of takes. That keeps the size requirement modest.
+
+**Buy now — microSD to install the OS and start working:**
+- **128 GB, UHS-I, A2-rated**, reputable brand: **SanDisk Extreme**,
+  **Samsung PRO Plus**, or **Samsung EVO Plus**.
+- Not 64 GB: JetPack + the Azure Kinect SDK + build tools eat ~25–30 GB, and you
+  want room for build churn + the offload scratch buffer. 128 GB is the sweet spot
+  and barely costs more. A2 random-IO makes boot/apt/compiling feel snappier.
+- **Do NOT reuse the Nano's card by moving it** — it won't boot on the Orin and
+  you'd destroy your rollback. Buy a new card; leave the Nano's as-is.
+- You can flash the SD image yourself (step 1) or buy a pre-flashed "JetPack for
+  Orin Nano" card to skip it.
+
+**Buy for the long term — NVMe SSD (the devkit has an M.2 Key-M slot):**
+- **500 GB NVMe M.2 2280, PCIe (NOT SATA).** Picks: **Samsung 970 EVO Plus 500 GB**
+  (Gen3 — rock-solid on Orin, matches the devkit's PCIe **Gen3** slot), **WD Blue
+  SN570**, or **Crucial P3**. Gen4 drives work but only run at Gen3 speed here, so
+  don't pay the premium.
+- Even though clips are transient, NVMe is the right medium once recording is
+  routine: microSD wears out under sustained writes and its sustained write speed
+  is the weakest link. NVMe is faster, far more durable, and can also boot the OS
+  (~15–25 s vs ~45–60 s from SD). 500 GB is generous for a bridge; 1 TB only if you
+  want margin.
+- Recording data rate for sizing: full-res RVL depth + raw foreground RGB is
+  **~0.5 GB/min ≈ ~30 GB/hour per camera** (up to ~1 MB/frame worst case). Since
+  the node offloads and clears, this is a *buffer* budget, not an archive budget —
+  even 500 GB is many sessions' worth of headroom.
 
 ## Which JetPack — recommendation: **JetPack 5.1.x (Ubuntu 20.04)**
 
