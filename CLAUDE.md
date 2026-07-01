@@ -283,6 +283,17 @@ Two repos:
   free validation but too weak for production matting. (If Jetson: Orin NX, not
   Orin Nano — Nano has no NVENC. Azure Kinect itself is discontinued; Orbbec
   Femto Bolt is the successor.)
+  **Orin Nano migration in progress** (the user bought the Nano despite the NVENC
+  caveat — fine, its color path is codec-less today so NVENC isn't on the critical
+  path; software/FFmpeg encode later if needed). Key facts: the Orin Nano *cannot*
+  run JetPack 4/Ubuntu 18.04 (different SoC) — min is **JetPack 5.1.x / Ubuntu
+  20.04 / Python 3.8** (recommended, closest to the 18.04-era Kinect SDK), the SD
+  card can't be physically moved from the Nano (reflash a new ≥64 GB, ideally
+  128 GB, card), and the archived Azure Kinect SDK has no 20.04 ARM64 packages so
+  you install the 18.04 ones + the `libdepthengine.so.2.0` NuGet binary. The
+  Orbbec K4A wrapper does **not** support the original Kinect DK (Femto only).
+  Node code is already 3.6-safe so it runs unchanged on 3.8/3.10. Full step-by-step:
+  **`docs/jetson_orin_migration.md`**.
 
 ## Repo layout
 
