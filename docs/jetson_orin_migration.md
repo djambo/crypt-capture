@@ -99,6 +99,42 @@ Confirm after boot:
 lsb_release -a          # -> 22.04 (JetPack 6)
 cat /etc/nv_tegra_release   # -> R36 (JetPack 6); confirms an Orin image
 ```
+> **First boot needs a monitor + USB keyboard/mouse** for the `oem-config`
+> end-user setup (username/locale). With no display it hangs on
+> "A start job is running for End-user Configuration" — that's waiting for
+> interactive input, not slow progress. Do the first boot with a screen attached,
+> then go headless. Also: `nano` is **not** preinstalled — `sudo apt-get update &&
+> sudo apt-get install -y nano` if you want it.
+
+### 1b. Remote access (SSH) + the Xorg/GL session
+Do the rest over SSH; the node draws no windows.
+```bash
+# on the Jetson (once, via the first-boot desktop):
+sudo systemctl enable --now ssh                 # openssh ships with JetPack
+sudo apt-get install -y avahi-daemon            # advertises <hostname>.local
+hostnamectl                                     # note hostname + your username
+# from your laptop:
+ssh <user>@<hostname>.local
+ssh-copy-id <user>@<hostname>.local             # passwordless (asks for pw once)
+```
+A `Host` alias in the laptop's `~/.ssh/config` (`HostName <hostname>.local`,
+`User <user>`) lets you just `ssh orin`.
+
+**The depth engine needs a live X (Xorg) session with a GL context** — same
+requirement as the Nano, but JetPack 6 **defaults to Wayland**, which doesn't
+provide it. Force Xorg + autologin so the session exists at boot:
+```bash
+sudo nano /etc/gdm3/custom.conf
+#   [daemon]
+#   WaylandEnable=false
+#   AutomaticLoginEnable=true
+#   AutomaticLogin=<user>
+sudo reboot
+```
+Then camera processes over SSH need `export DISPLAY=:0`. If a fully monitor-less
+Orin still fails with **`error code: 204`** (X up but no *hardware* GL), force an
+EDID or add a ~$8 HDMI **dummy plug** — but try without it first; often the Xorg
+autologin session alone is enough.
 
 ### 2. Set the Orin to max performance (it has real headroom now)
 ```bash
@@ -121,42 +157,51 @@ applies (boot the Jetson with the Kinect powered, *then* it enumerates).
 ### 4. Azure Kinect SDK + depth engine — the hard part on 22.04 (aarch64)
 
 There are **no native ARM64 packages for 20.04/22.04** (only 18.04), so install
-the **18.04 arm64** packages onto 22.04. An 18.04-built binary generally runs on
-22.04 (glibc/libstdc++ keep backward ABI compat); `libsoundio1` is the one
-explicit prereq to satisfy first. Two routes, in order of preference:
+the **18.04 arm64** packages onto 22.04. An 18.04-built binary runs fine on 22.04
+(glibc/libstdc++ keep backward ABI compat). **The all-local-`.deb` route below is
+the one that worked on hardware** — it sidesteps the apt-repo friction entirely.
 
-**Route A — add the 18.04 arm64 repo (try first).**
+> **⚠️ The `libsoundio1` gotcha (this is what bites you).** k4a depends on
+> `libsoundio1`, which was **removed from Ubuntu 22.04** — it is *not* in any
+> 22.04 repo, so `apt install libsoundio1` fails with "no installation candidate"
+> and enabling `universe` does **nothing** (dead end — don't bother). You must
+> pull the `.deb` from the **20.04 (focal)** arm64 archive and install it by hand,
+> *before* the k4a packages. This is the single step that turns the whole thing
+> from "impossible" into "works."
+
+**Verified sequence (arm64, k4a 1.4.2 — newest):**
 ```bash
-curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-# NOTE: 18.04 repo on purpose — there is no 20.04/22.04 arm64 multiarch repo
-sudo apt-add-repository -y 'deb https://packages.microsoft.com/ubuntu/18.04/multiarch/prod bionic main'
-sudo apt-get update
-sudo apt-get install -y libsoundio1 libk4a1.4 libk4a1.4-dev k4a-tools
+# 1. the missing dependency, from the Ubuntu 20.04 arm64 archive
+wget http://ports.ubuntu.com/ubuntu-ports/pool/universe/libs/libsoundio/libsoundio1_1.1.0-1_arm64.deb
+
+# 2. the Azure Kinect SDK debs (arm64, 1.4.2)
+BASE=https://packages.microsoft.com/ubuntu/18.04/multiarch/prod/pool/main
+wget $BASE/libk/libk4a1.4/libk4a1.4_1.4.2_arm64.deb
+wget $BASE/libk/libk4a1.4-dev/libk4a1.4-dev_1.4.2_arm64.deb   # -dev needed: pyk4a compiles against it
+wget $BASE/k/k4a-tools/k4a-tools_1.4.2_arm64.deb
+
+# 3. install all four in ONE dpkg call so it resolves their interdependencies
+sudo dpkg -i libsoundio1_1.1.0-1_arm64.deb \
+             libk4a1.4_1.4.2_arm64.deb \
+             libk4a1.4-dev_1.4.2_arm64.deb \
+             k4a-tools_1.4.2_arm64.deb
+sudo apt-get -f install     # pulls any remaining system deps
 ```
-If apt refuses on `libstdc++`/`libc`/dependency versions on 22.04, fall back to
-Route B (more reliable on the newer OS).
+Accept the blue **EULA / debconf prompt** (Tab → OK/Yes) during install.
 
-**Route B — grab the arm64 .debs manually and dpkg them.**
+**The closed depth engine.** The `libk4a1.4` 1.4.2 deb above **already bundles**
+`libdepthengine.so.2.0`, so normally nothing extra is needed. *Only if* the smoke
+test reports the depth engine missing, extract it from the
+`Microsoft.Azure.Kinect.Sensor` NuGet (`.nupkg`→`.zip`→unzip,
+`linux/lib/native/arm64/release/`) and drop it in:
 ```bash
-sudo apt-get install -y libsoundio1     # satisfy the one explicit prereq first
-# arm64 .debs from packages.microsoft.com/ubuntu/18.04/multiarch/prod/pool/main/libk/
-sudo dpkg -i libk4a1.4_*_arm64.deb libk4a1.4-dev_*_arm64.deb k4a-tools_*_arm64.deb
-sudo apt-get -f install
-```
-(Or unpack the `Microsoft.Azure.Kinect.Sensor` NuGet — rename `.nupkg`→`.zip`,
-unzip — which also carries the arm64 libs + the depth engine below.)
-
-**The closed depth engine (both routes).** apt does not ship it. Extract
-`libdepthengine.so.2.0` from the NuGet package at
-`linux/lib/native/arm64/release/` and drop it next to the SDK libs:
-```bash
-sudo cp libdepthengine.so.2.0 /usr/lib/aarch64-linux-gnu/
-sudo ldconfig
+sudo cp libdepthengine.so.2.0 /usr/lib/aarch64-linux-gnu/ && sudo ldconfig
 ```
 
 **udev rules:**
 ```bash
-sudo cp scripts/99-k4a.rules /etc/udev/rules.d/    # from the SDK, or the valdivj repo
+sudo wget -O /etc/udev/rules.d/99-k4a.rules \
+  https://raw.githubusercontent.com/microsoft/Azure-Kinect-Sensor-SDK/develop/scripts/99-k4a.rules
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
