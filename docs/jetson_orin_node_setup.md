@@ -198,9 +198,10 @@ subtraction is the lever, not faster hardware.
 automatically; if two rigs share a LAN, also set a matching `--rig-id` on both
 node (`EXTRA_ARGS`) and relay.
 
-## Known non-blocker
-`extrinsic: no COLOR->DEPTH from pyk4a ('Calibration' has no 'convert_3d_to_3d')`
-— the installed pyk4a lacks that method, so **`depth_to_color`** alignment won't
-register to the depth frame. `color_to_depth` (default path) and the IMU are
-unaffected. Revisit with a pyk4a build that restores `convert_3d_to_3d` only if
-you want the denser `depth_to_color` cloud.
+## Note
+Earlier pyk4a builds threw `extrinsic: no COLOR->DEPTH from pyk4a ('Calibration'
+has no 'convert_3d_to_3d')`, breaking `depth_to_color` registration. Fixed in the
+node: the extrinsics now come from pyk4a's public `get_extrinsic_parameters`
+(with a `color_to_depth_3d` fallback), so both the COLOR->DEPTH registration and
+the factory IMU ACCEL->DEPTH extrinsic work on current pyk4a. If you saw that
+warning before, `git pull` (the service self-updates on restart) clears it.

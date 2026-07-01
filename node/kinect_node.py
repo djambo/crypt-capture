@@ -116,16 +116,17 @@ def _default_accel_to_depth(x, y, z):
 
 
 def _sdk_accel_to_depth(k4a, x, y, z):
-    """Factory ACCEL->DEPTH extrinsic via pyk4a (transform tip and origin and
-    subtract → pure rotation, translation cancels). Returns None if pyk4a doesn't
-    expose it on this build."""
+    """Factory ACCEL->DEPTH rotation via pyk4a's extrinsic getter. The accel is a
+    direction (gravity), so only the rotation is applied — returns (x,y,z) in the
+    depth optical frame, or None if pyk4a doesn't expose the extrinsic on this
+    build."""
     try:
         cal = k4a.calibration
         accel = pyk4a.CalibrationType.ACCEL
         depth = pyk4a.CalibrationType.DEPTH
-        p1 = cal.convert_3d_to_3d((x, y, z), accel, depth)
-        p0 = cal.convert_3d_to_3d((0.0, 0.0, 0.0), accel, depth)
-        return (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+        R_mat, _ = cal.get_extrinsic_parameters(accel, depth)
+        r = np.asarray(R_mat, dtype=float).reshape(3, 3).dot((x, y, z))
+        return (float(r[0]), float(r[1]), float(r[2]))
     except Exception:
         return None
 
@@ -222,20 +223,31 @@ def _grid_to_depth_extrinsic(k4a, align):
     tilted ~a few° about X + offset ~a few cm from depth — that's the tilt you
     see when switching alignment). Returns (R 9 row-major, t 3 metres).
 
-    Built from convert_3d_to_3d on basis vectors (translation cancels for the
-    columns, then the origin gives t). Falls back to identity if pyk4a doesn't
-    expose the COLOR/DEPTH extrinsic.
+    Preferred source is pyk4a's `get_extrinsic_parameters` (R 3x3 + t already in
+    metres, convention P_depth = R·P_color + t). Falls back to deriving it from
+    the public `color_to_depth_3d` converter on basis vectors (mm; translation
+    cancels for the columns, the origin gives t) for builds lacking the getter,
+    then to identity.
     """
     if align != "depth_to_color":
         return _IDENTITY_EXTRINSIC
+    cal = k4a.calibration
+    color = pyk4a.CalibrationType.COLOR
+    depth = pyk4a.CalibrationType.DEPTH
+    # Preferred: the factory COLOR->DEPTH extrinsic straight from pyk4a.
     try:
-        cal = k4a.calibration
-        color = pyk4a.CalibrationType.COLOR
-        depth = pyk4a.CalibrationType.DEPTH
-        o = cal.convert_3d_to_3d((0.0, 0.0, 0.0), color, depth)
-        ex = cal.convert_3d_to_3d((1000.0, 0.0, 0.0), color, depth)
-        ey = cal.convert_3d_to_3d((0.0, 1000.0, 0.0), color, depth)
-        ez = cal.convert_3d_to_3d((0.0, 0.0, 1000.0), color, depth)
+        R_mat, t_vec = cal.get_extrinsic_parameters(color, depth)
+        R = tuple(float(v) for v in np.asarray(R_mat, dtype=float).reshape(9))
+        t = tuple(float(v) for v in np.asarray(t_vec, dtype=float).reshape(3))
+        return R, t
+    except Exception:
+        pass
+    # Fallback: basis vectors through the public 3D converter (works in mm).
+    try:
+        o = cal.color_to_depth_3d((0.0, 0.0, 0.0))
+        ex = cal.color_to_depth_3d((1000.0, 0.0, 0.0))
+        ey = cal.color_to_depth_3d((0.0, 1000.0, 0.0))
+        ez = cal.color_to_depth_3d((0.0, 0.0, 1000.0))
         c0 = [(ex[i] - o[i]) / 1000.0 for i in range(3)]   # R columns
         c1 = [(ey[i] - o[i]) / 1000.0 for i in range(3)]
         c2 = [(ez[i] - o[i]) / 1000.0 for i in range(3)]
