@@ -60,38 +60,44 @@ library of takes. That keeps the size requirement modest.
   the node offloads and clears, this is a *buffer* budget, not an archive budget —
   even 500 GB is many sessions' worth of headroom.
 
-## Which JetPack — recommendation: **JetPack 5.1.x (Ubuntu 20.04)**
+## Which JetPack — recommendation: **JetPack 6.2 (Ubuntu 22.04)**
 
-The Azure Kinect SDK is **archived (Aug 2024), x86-first, and 18.04-era**. The
-closer the OS is to 18.04, the less you fight the closed depth-engine binary.
+The Azure Kinect SDK is **archived (Aug 2024), x86-first, and 18.04-era**, so a
+first instinct is "flash the oldest OS you can" (JetPack 5.1.x / Ubuntu 20.04).
+Two current realities flip that:
+1. **k4a is community-confirmed working on Ubuntu 22.04** via the same manual
+   install you'd do on 20.04 (18.04 arm64 packages + the depth-engine binary), so
+   the old-OS safety margin has largely evaporated.
+2. **JetPack 5.1.x is now hard to put on a current Orin Nano** — NVIDIA moved to
+   JetPack 6 as the default/production; SD images and SDK Manager push 6, and
+   newer units expect JetPack-6-generation firmware. 5.1.x = more pain, less gain.
 
-| JetPack | Ubuntu | Python | Kinect risk | Pick it when |
-|---|---|---|---|---|
-| **5.1.x** | 20.04 | 3.8 | **Lower** — community has run k4a on 20.04 | **Default. Getting the Kinect working fast.** |
-| 6.x | 22.04 | 3.10 | Higher — newer glibc/libsoundio vs an 18.04 binary | You want the longest support life and will debug deps |
+| JetPack | Ubuntu | Python | Notes |
+|---|---|---|---|
+| **6.2** | 22.04 | 3.10 | **Default.** Latest well-supported on Orin Nano + k4a works. |
+| 5.1.x | 20.04 | 3.8 | Fallback only if 6.2 hits an unresolvable k4a dependency wall. |
+| 7.x | 24.04 | — | **Avoid for now** — too new, Orin Nano support shaky, most likely to fight the 18.04-era depth engine. |
 
-**Start on JetPack 5.1.x.** Prove the camera streams, then consider 6.x later if
-you want it — don't take the newer-OS risk while you're still bringing the sensor
-up. (The Orin Nano ships from the factory with a UEFI/QSPI firmware version; very
-new JetPack images may require a firmware update first. Flashing 5.1.x via SDK
-Manager or the official SD image handles this for you.)
+**Flash JetPack 6.2.** (The Orin Nano ships with a UEFI/QSPI firmware version;
+if the SD image won't boot, run SDK Manager once from an x86 host to update
+firmware, then it boots normally.) The node code is Python-3.6-safe so it runs
+unchanged on 3.10.
 
 ## Migration steps
 
 ### 1. Flash the OS
 Two options:
-- **SD-image (simplest):** download the **JetPack 5.1.x SD Card Image for Jetson
-  Orin Nano** from NVIDIA, write it with Balena Etcher to the new card, boot,
-  finish the Ubuntu first-boot wizard.
+- **SD-image (simplest):** download the **JetPack 6.2 SD Card Image for Jetson
+  Orin Nano Developer Kit** from NVIDIA, write it with Balena Etcher to the new
+  card, boot, finish the Ubuntu first-boot wizard.
 - **SDK Manager (from an Ubuntu x86 host):** flash the devkit over USB-C. Use
   this if the SD image won't boot (older factory firmware) — SDK Manager updates
   the QSPI firmware as part of the flow.
 
 Confirm after boot:
 ```bash
-lsb_release -a          # -> 20.04 (JetPack 5)
-cat /etc/nv_tegra_release
-nvcc --version || cat /etc/nv_tegra_release   # confirm it's an Orin image
+lsb_release -a          # -> 22.04 (JetPack 6)
+cat /etc/nv_tegra_release   # -> R36 (JetPack 6); confirms an Orin image
 ```
 
 ### 2. Set the Orin to max performance (it has real headroom now)
@@ -112,27 +118,33 @@ Each Kinect still needs its **own 5V barrel-jack supply** and an active USB3
 cable. The cold-boot power-up-ordering rule from `jetson_setup.md` §9 still
 applies (boot the Jetson with the Kinect powered, *then* it enumerates).
 
-### 4. Azure Kinect SDK + depth engine — the hard part on 20.04
+### 4. Azure Kinect SDK + depth engine — the hard part on 22.04 (aarch64)
 
-There are **no official ARM64 packages for 20.04/22.04** (only 18.04). Two routes,
-in order of preference:
+There are **no native ARM64 packages for 20.04/22.04** (only 18.04), so install
+the **18.04 arm64** packages onto 22.04. An 18.04-built binary generally runs on
+22.04 (glibc/libstdc++ keep backward ABI compat); `libsoundio1` is the one
+explicit prereq to satisfy first. Two routes, in order of preference:
 
-**Route A — install the 18.04 ARM64 packages onto 20.04 (try first).**
+**Route A — add the 18.04 arm64 repo (try first).**
 ```bash
 curl -sSL https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
-# NOTE: 18.04 repo on purpose — there is no 20.04 arm64 multiarch repo
+# NOTE: 18.04 repo on purpose — there is no 20.04/22.04 arm64 multiarch repo
 sudo apt-add-repository -y 'deb https://packages.microsoft.com/ubuntu/18.04/multiarch/prod bionic main'
 sudo apt-get update
-sudo apt-get install -y libk4a1.4 libk4a1.4-dev k4a-tools
+sudo apt-get install -y libsoundio1 libk4a1.4 libk4a1.4-dev k4a-tools
 ```
-If a dependency like `libsoundio1` is unmet on 20.04, install it manually (grab
-the 18.04 `libsoundio1` .deb, or `sudo apt-get install -y libsoundio1`), then
-retry. If the package's `libstdc++`/`libc` deps refuse, fall back to Route B.
+If apt refuses on `libstdc++`/`libc`/dependency versions on 22.04, fall back to
+Route B (more reliable on the newer OS).
 
-**Route B — grab the .debs / NuGet payload manually and dpkg them.** Download the
-`libk4a1.4`, `libk4a1.4-dev`, and `k4a-tools` `.deb`s (or the
-`Microsoft.Azure.Kinect.Sensor` NuGet — rename `.nupkg`→`.zip`, unzip) and
-`sudo dpkg -i` them, `sudo apt-get -f install` to resolve deps.
+**Route B — grab the arm64 .debs manually and dpkg them.**
+```bash
+sudo apt-get install -y libsoundio1     # satisfy the one explicit prereq first
+# arm64 .debs from packages.microsoft.com/ubuntu/18.04/multiarch/prod/pool/main/libk/
+sudo dpkg -i libk4a1.4_*_arm64.deb libk4a1.4-dev_*_arm64.deb k4a-tools_*_arm64.deb
+sudo apt-get -f install
+```
+(Or unpack the `Microsoft.Azure.Kinect.Sensor` NuGet — rename `.nupkg`→`.zip`,
+unzip — which also carries the arm64 libs + the depth engine below.)
 
 **The closed depth engine (both routes).** apt does not ship it. Extract
 `libdepthengine.so.2.0` from the NuGet package at
@@ -168,7 +180,7 @@ If depth is missing but color/IR show, the depth engine `.so` isn't found — re
 step 4's copy + `ldconfig`.
 
 ### 6. Python + deps
-JetPack 5 ships **Python 3.8** (3.10 on JetPack 6). Much simpler than the Nano:
+JetPack 6 ships **Python 3.10** (3.8 on JetPack 5). Much simpler than the Nano:
 ```bash
 sudo apt-get install -y python3-pip
 pip3 install --user numpy pyk4a
