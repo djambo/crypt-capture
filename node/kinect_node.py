@@ -611,7 +611,13 @@ def run(host, port, sensor_id, frames,
             # (fps/pts stats + profile print now live in the sender thread.)
     finally:
         outq.put(None)                        # sender exits after the backlog
-        sender_t.join()
+        sender_t.join(timeout=10.0)
+        if sender_t.is_alive():               # wedged mid-sendall (peer stopped
+            try:                              # reading): kill the socket under
+                sock.shutdown(socket.SHUT_RDWR)   # it so this process can't
+            except OSError:                   # hang forever holding the camera
+                pass
+            sender_t.join(timeout=2.0)
         pool.shutdown()
         try:
             sock.shutdown(socket.SHUT_RDWR)   # wake the control reader + send FIN
