@@ -148,4 +148,12 @@ makes those hand positions valid in the shared world frame automatically.
 - ✅ Math core + headless tests (`central/calibration.py`,
   `tests/test_calibration.py`).
 - ✅ Viewer: per-sensor tinted gizmos + per-sensor IMU down sticks (crypt).
-- ⏳ Steps 1–3 above (script, relay flag, pose message).
+- ✅ Viewer UI shell (crypt): a **cameras** list (one row per connected sensor,
+  tint-matched to its gizmo, per-sensor hide toggle) and an **alignment**
+  section — `Rough Align` / `Fine Align (wand)` buttons + a status line
+  (`ControlPanel.setAlignStatus`). The buttons call `World.roughAlign()` /
+  `World.fineAlign()`, which are the designated **extension points**: replace
+  the stub bodies with the real flows (fine = trigger/monitor the wand pass +
+  relay calib reload; rough = the Tier-1 solve) and drive the status line for
+  operator feedback, mirroring the background-capture UX.
+- ⏳ Steps 1–4 above (script, relay flag, pose message, Tier-1 rough).
