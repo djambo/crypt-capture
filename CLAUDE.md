@@ -510,9 +510,20 @@ trigger-record-download.
    (collect + solve + write `rig_calib.json`), relay `--rig-calib` (apply
    `P_world = R_i·P + t_i` per sensor → one world frame on the wire, no viewer
    change), camera poses → viewer gizmos; then **TSDF fusion** (Open3D) →
-   watertight mesh → glTF/meshopt export for the renderer.
-7. **Phase 3 — creative FX** (particles from capture geometry); SMPL-X template
-   tracking (approach C) for fixed-topology streamable compression.
+   watertight mesh → glTF/meshopt export for the renderer. **Two-tier design**
+   (see the doc): Tier-1 rough = zero-prop (IMU roll/pitch + floor height +
+   body-centroid track for yaw/XY, ~5–10 cm, enough for scene editing);
+   Tier-2 fine = the wand pass (~2–5 mm expected on real ToF). ChArUco was
+   evaluated and rejected (board faces ≤2 cameras → chaining; weak Z; wrong
+   modality — calibrate in the depth space you render). Retroreflective ball
+   in IR = optional segmentation upgrade, same math.
+7. **Phase 3 — creative FX** (particles from capture geometry); **hands as
+   particle attractors** — no Kinect Body Tracking needed (x86-only): run
+   open-source 2D pose/hands (MediaPipe/RTMPose) on the node's color image
+   (Orin has headroom), look up the aligned depth at each keypoint → 3D hand
+   positions as a tiny metadata message (plan in `docs/rig_calibration.md`);
+   SMPL-X template tracking (approach C) for fixed-topology streamable
+   compression.
 
 Deferred (still wanted, off the MVP critical path): **colored mesh** (bake the
 now-aligned color into `mesh_take.py` per-vertex output); **efficient color

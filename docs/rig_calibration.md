@@ -5,6 +5,57 @@ its points into **one shared metric world frame**, so N inward-facing Kinects
 render as one registered scene. This is the M5 milestone's first half (the
 seam-dissolving TSDF fusion builds on top of it).
 
+## Two tiers of alignment (design decision)
+
+Alignment serves two different needs, with different accuracy/effort budgets:
+
+1. **Tier 1 — rough, zero props, seconds** (good enough to start scene editing
+   in the web app; ~5–10 cm / a few degrees). Composed from what the pipeline
+   already measures, per camera:
+   - **IMU gravity** → roll + pitch (already streams; the viewer levels today);
+   - **floor-plane detection** → height (already built, `FloorDetector`);
+   - **the operator's body as the landmark** → yaw + XY: each camera sees the
+     person; match the foreground **centroid track** across cameras (stand
+     centre, raise an arm / walk a small "L" so the track isn't a point). No
+     props, fully automatic — the "walk in and it lines up" experience.
+2. **Tier 2 — fine, the marker-ball wand pass, ~mm** (recording / VR /
+   fusion-ready). The rest of this doc. Optional later stack-ons for the last
+   millimetre: pair-wise **ICP refinement on overlapping static geometry**
+   (floor/walls adjacent cameras share) and a **joint bundle solve** — they
+   *refine* the wand result, never replace it.
+
+**Why the body can't be Tier 2:** the body is non-rigid and each camera sees a
+*different side* of it — there is no observable "same physical point" across
+opposing views, so body-based alignment caps out around centimetres no matter
+how good the detector is. Centroids are for rough; a view-invariant landmark
+(a sphere's centre) is what reaches millimetres.
+
+## Accuracy: sphere (depth) vs ChArUco (color) vs IR — the honest math
+
+- **Sphere/depth:** ToF noise ~1–2 mm random + a few mm systematic per camera.
+  A cap fit over hundreds of points averages the random part to ~0.3 mm; the
+  rigid solve over a 30 s volume-filling trajectory averages further, and
+  rotation error ≈ residual ÷ trajectory extent (~3 mm / 1.5 m ≈ 0.1°).
+  **Expected end-to-end: ~2–5 mm** (synthetic floor <1 mm; real ToF bias sets
+  the ceiling).
+- **ChArUco/color:** subpixel corners are sharper *laterally* (~0.3 mm at 2 m
+  at 4K), but (a) pose-from-a-flat-board is weakly conditioned along Z/tilt
+  (~5–15 mm per shot at 2 m for a 40 cm board), (b) an inward-facing circle
+  forces **pair chaining** (a board faces ≤2 cameras) → errors compound to
+  **~1–2 cm cross-rig** without a bundle solve, and (c) — decisive — it
+  minimises error in *color-image space* while the thing that must register is
+  the *depth clouds*: per-camera depth↔color systematic offsets can leave the
+  rendered clouds ~1 cm apart with no knob to fix. **Calibrate in the modality
+  you render.**
+- **IR:** not a competing method — the depth cam doubles as an IR camera, and a
+  **retroreflective ball** glows in active IR, making detection trivial. It's a
+  *segmentation upgrade* to the same sphere math if background-subtraction
+  detection ever proves flaky. Same accuracy after detection.
+
+**Verdict:** the sphere wins for this rig — per-pair accuracy on par or better,
+no chaining, all cameras solved simultaneously against the same trajectory, and
+matched modality (residuals measured in exactly the space we render).
+
 ## Why a ball, not ICP or a board
 
 - **ICP is out** (user-confirmed intuition): the sensors stand on a circle
@@ -72,10 +123,25 @@ seam-dissolving TSDF fusion builds on top of it).
    message on client connect (and on calib reload) listing per-sensor `[R|t]`;
    the viewer places each sensor's `CameraGizmo` at its true pose. (The viewer
    already renders one tinted gizmo per sensor, currently all at the origin.)
-4. Later polish: per-pair ICP fine refinement on overlapping static
+4. **Tier-1 rough alignment** (independent of 1–3, can land before or after):
+   per-camera IMU+floor for roll/pitch/height + a short body-centroid track
+   match for yaw/XY (a "Rough Align" button in the viewer / a central solve
+   reusing `pair_tracks`+`solve_rigid` on centroids). Writes the same
+   `rig_calib.json` shape, marked `"tier": "rough"`.
+5. Later polish: per-pair ICP fine refinement on overlapping static
    environment; joint (bundle) solve over all pairs instead of star-to-ref;
-   auto ball segmentation (largest spherical cluster) so the operator's body
-   can be in frame.
+   auto ball segmentation (largest spherical cluster / retroreflective ball in
+   IR) so the operator's body can be in frame.
+
+## Related future work (noted here so the design accounts for it)
+
+**Hand positions as particle attractors (Phase 3):** does NOT need the Kinect
+Body Tracking SDK (x86-only, not on Jetson). Modern open-source 2D pose/hands
+(MediaPipe Pose/Hands, RTMPose, MoveNet) runs realtime on the Orin against the
+node's color image, which is already pixel-aligned with depth → keypoint (u,v)
+→ depth lookup → true 3D hand positions, shipped as a tiny per-frame metadata
+message and fed to the viewer's particle fields as attractors. Rig calibration
+makes those hand positions valid in the shared world frame automatically.
 
 ## Status
 
