@@ -173,12 +173,61 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
     return payload
 
 
+class _ViewerOutbox:
+    """Per-viewer sender: a 1-slot "latest frame" mailbox drained by its own
+    thread. `offer()` never blocks — if the previous frame hasn't been sent
+    yet it is replaced (that viewer just skips it). This keeps a slow client
+    (e.g. a viewer on the other side of the internet) from back-pressuring
+    the node ingest loop or starving faster viewers: each connection drops
+    to whatever frame rate its own link sustains, always showing the newest
+    frame."""
+
+    def __init__(self, conn, on_dead):
+        self.conn = conn
+        self._on_dead = on_dead             # called (once) when the send fails
+        self._cv = threading.Condition()
+        self._pending = None
+        self._closed = False
+        self.skipped = 0                    # frames replaced before sending
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def offer(self, frame_bytes):
+        with self._cv:
+            if self._closed:
+                return
+            if self._pending is not None:
+                self.skipped += 1
+            self._pending = frame_bytes
+            self._cv.notify()
+
+    def close(self):
+        with self._cv:
+            self._closed = True
+            self._pending = None
+            self._cv.notify()
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while self._pending is None and not self._closed:
+                    self._cv.wait()
+                if self._closed:
+                    return
+                frame, self._pending = self._pending, None
+            try:
+                self.conn.sendall(frame)
+            except OSError:
+                self._on_dead(self.conn)
+                return
+
+
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=200000):
         self.calib = calib
         self.stride = stride
         self.max_points = max_points
-        self._clients = []                  # browser WebSocket sockets
+        self._clients = {}                  # WebSocket conn -> _ViewerOutbox
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
@@ -202,7 +251,7 @@ class PreviewServer:
                 conn.close()
                 continue
             with self._lock:
-                self._clients.append(conn)
+                self._clients[conn] = _ViewerOutbox(conn, self._drop)
             print("[preview] viewer connected %s (%d total)"
                   % (addr[0], len(self._clients)))
             threading.Thread(target=self._ws_reader, args=(conn,),
@@ -223,6 +272,8 @@ class PreviewServer:
                     except ValueError:
                         continue
                     self._on_browser_command(cmd)
+        except OSError:
+            pass                        # WAN clients vanish abruptly (reset)
         finally:
             self._drop(conn)
 
@@ -247,22 +298,23 @@ class PreviewServer:
 
     def _drop(self, conn):
         with self._lock:
-            if conn in self._clients:
-                self._clients.remove(conn)
+            outbox = self._clients.pop(conn, None)
+        if outbox is not None:
+            outbox.close()
         try:
             conn.close()
         except OSError:
             pass
 
     def _broadcast(self, payload):
+        """Hand the frame to every viewer's outbox. Never blocks — each
+        viewer has its own sender thread and drops stale frames itself, so
+        one slow WAN client can't stall the node loop or other viewers."""
         frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
         with self._lock:
-            clients = list(self._clients)
-        for conn in clients:
-            try:
-                conn.sendall(frame)
-            except OSError:
-                self._drop(conn)
+            outboxes = list(self._clients.values())
+        for outbox in outboxes:
+            outbox.offer(frame)
 
     # --- node (TCP Frame) side ------------------------------------------
     def _intrinsics(self, sensor_id, w, h):

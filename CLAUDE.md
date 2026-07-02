@@ -226,6 +226,18 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
+- ✅ **WAN-safe relay fan-out** (`central/preview_server.py`, `_ViewerOutbox`):
+  `_broadcast` used to `sendall` per client from the node ingest loop, so one
+  slow internet viewer froze the stream for everyone. Each viewer now gets its
+  own sender thread + a 1-slot latest-frame mailbox — the ingest loop never
+  blocks, and every viewer independently drops stale frames and floats at its
+  own link speed (verified: a fully stalled client while a fast one held full
+  ingest fps). Reader-thread disconnect resets are swallowed. This is the
+  relay-side prerequisite for publishing the stream to the internet —
+  topologies, bandwidth math (25k pts ≈ 369 KB/frame ≈ 3 Mbit → fps ≈
+  link_Mbps÷3) and realistic fps targets live in **`docs/remote_streaming.md`**
+  (viewer side: Vercel static deploy + Cloudflare Tunnel for `wss://`; done in
+  the `crypt` repo).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -482,6 +494,13 @@ browser-side preview decode.
 
 ## Open items
 
+- **Public-relay access control**: an internet-exposed relay also exposes the
+  control channel (`capture_bg`/`set_camera`…). Add a shared token (e.g.
+  `?key=` at the WS handshake) before any semi-permanent public link — see
+  `docs/remote_streaming.md`.
+- `CPV2` quantized wire (int16 mm + bbox, 9 B/pt, deflate-friendly) — the step
+  that makes 30 fps over ordinary broadband real (`docs/remote_streaming.md`
+  topology C).
 - Confirm whether any Brekel export retains structured per-sensor depth (its
   site blocks automated checks) before committing to a fully custom capture.
 - RVM GPL-3.0 licensing vs a permissive matting model (BGMv2/MediaPipe/SAM2).
