@@ -253,6 +253,36 @@ Two repos:
   Verified headless: stubbed-pyk4a integration test (order, payload integrity,
   freshness-under-overload via parking, dead-central raise);
   `tests/test_camera.py` updated for the new default.
+- ✅ **Rig extrinsic calibration wiring (M5 first half, 2026-07-02)** — the
+  marker-ball math core is now wired end-to-end (design + verification detail:
+  `docs/rig_calibration.md`):
+  **collect+solve** — `scripts/calibrate_rig.py` (headless WS client: gates
+  frames implausible for the ball via `central/calibration.BallTracker`
+  count/fit-rms gates, fits centers, `solve_rig`, writes `rig_calib.json`);
+  **apply at the relay** — `preview_server --rig-calib` (default
+  `rig_calib.json`, absent = exact no-op): `P_world = R_i·P + t_i` per sensor
+  after unprojection (gravity rotated too) → ONE canonical world frame on the
+  wire, no `CPV1` change; the file is mtime-watched (re-runs re-register
+  live) + a `reload_rig_calib` command;
+  **poses/status to the viewer** — JSON TEXT messages on the preview WS
+  (`rig_poses` on connect + every (re)load/clear; `calib_status` progress),
+  spec in `docs/preview_protocol.md`;
+  **viewer-driven sessions** — relay-handled `calibrate_fine {seconds,
+  ball_radius}` / `calibrate_rough {seconds}` commands (the crypt viewer's
+  Fine/Rough Align buttons + ball-radius field drive them; also
+  `scripts/send_command.py calibrate-fine/-rough/reload-rig-calib`). Sessions
+  collect off the RAW pre-transform clouds so re-runs are correct.
+  **Tier-1 rough solve** — `solve_rough` = per-sensor IMU leveling
+  (`level_rotation`) + yaw-only Kabsch (`solve_yaw_translation`) on
+  body-centroid tracks (yaw-only on purpose: the centroid's toward-camera bias
+  would corrupt a full 3D solve; roll/pitch come from the IMU); world = the
+  ref sensor's leveled frame (floor flat by construction).
+  **Headless proof** — `sim_node --ball 0.05 --pose "yaw,x,y,z"` ray-renders a
+  shared wall-clock-driven sphere from a known pose (pose-true IMU vector);
+  two posed sim nodes → calibrate_rig recovered 50°/1.2 m ground truth to
+  **0.16°/3 mm**, wire clouds register, viewer verified in headless Chromium.
+  `tests/test_rig.py` covers trackers/gates, rough solve, JSON round-trip and
+  the apply step. Remaining: the real-hardware wand pass, then TSDF fusion.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -346,15 +376,18 @@ protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws rel
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
-central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out),
-            calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch)
+central/    recorder.py (records synced takes), preview_server.py (live ws relay + control
+            fan-out + rig-calib apply/reload + viewer-driven calibration sessions),
+            calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch;
+            + trackers/gates, Tier-1 rough solve, rig_calib.json I/O)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
-            send_command.py (send control commands to the relay)
+            send_command.py (send control commands to the relay),
+            calibrate_rig.py (marker-ball wand pass: collect + solve + rig_calib.json)
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
-            test_extrinsic.py, test_discovery.py, test_calibration.py
+            test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
@@ -404,6 +437,19 @@ python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNE
 python3 -m tests.test_camera
 # IMU / gravity path tests (CIMU round-trip + optical->view + CPV1 block):
 python3 -m tests.test_imu
+
+# Rig extrinsic calibration (docs/rig_calibration.md). Headless dry-run: two
+# posed sim nodes share a synthetic ball, the solve must recover the pose:
+python3 -m central.preview_server                          # watches rig_calib.json
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --ball 0.05 --pose "0,0,0,0"
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 1 --frames 0 --ball 0.05 --pose "50,1.2,0.15,-0.6"
+python3 -m scripts.calibrate_rig --seconds 12 --ball-radius 0.05   # writes rig_calib.json; relay auto-reloads
+# Real pass: background captured on all sensors, ball the only foreground,
+# --seconds 30 and the REAL ball radius. Or drive it from the viewer's
+# Fine Align button / headless:
+python3 -m scripts.send_command --port 8080 calibrate-fine --seconds 30 --ball-radius 0.05
+python3 -m scripts.send_command --port 8080 calibrate-rough           # Tier-1, zero props
+python3 -m tests.test_rig      # trackers/gates, rough solve, file round-trip
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -505,18 +551,22 @@ trigger-record-download.
    Kabsch per sensor. `central/calibration.py` (fit_sphere with known radius —
    cap-centroid alone is ~r/2 biased toward each camera; pair_tracks;
    solve_rigid; solve_rig) unit-tested synthetically to <0.01°/<1 mm
-   (`tests/test_calibration.py`); full procedure + wiring plan in
-   **`docs/rig_calibration.md`**. ⏳ remaining: `scripts/calibrate_rig.py`
-   (collect + solve + write `rig_calib.json`), relay `--rig-calib` (apply
-   `P_world = R_i·P + t_i` per sensor → one world frame on the wire, no viewer
-   change), camera poses → viewer gizmos; then **TSDF fusion** (Open3D) →
-   watertight mesh → glTF/meshopt export for the renderer. **Two-tier design**
-   (see the doc): Tier-1 rough = zero-prop (IMU roll/pitch + floor height +
-   body-centroid track for yaw/XY, ~5–10 cm, enough for scene editing);
-   Tier-2 fine = the wand pass (~2–5 mm expected on real ToF). ChArUco was
-   evaluated and rejected (board faces ≤2 cameras → chaining; weak Z; wrong
-   modality — calibrate in the depth space you render). Retroreflective ball
-   in IR = optional segmentation upgrade, same math.
+   (`tests/test_calibration.py`); full procedure + wiring detail in
+   **`docs/rig_calibration.md`**. ✅ *wiring built + verified headless
+   (2026-07-02)*: `scripts/calibrate_rig.py`, relay `--rig-calib` apply
+   (one world frame on the wire, mtime-watched, no viewer change),
+   `rig_poses`/`calib_status` JSON → viewer gizmos + status line,
+   viewer-driven `calibrate_fine`/`calibrate_rough` sessions, Tier-1 rough
+   solve, sim ball/pose mode (ground-truth pose recovered to 0.16°/3 mm
+   end-to-end). **Two-tier design** (see the doc): Tier-1 rough = zero-prop
+   (IMU roll/pitch + body-centroid track for yaw/XY, ~5–10 cm, enough for
+   scene editing); Tier-2 fine = the wand pass (~2–5 mm expected on real
+   ToF). ChArUco was evaluated and rejected (board faces ≤2 cameras →
+   chaining; weak Z; wrong modality — calibrate in the depth space you
+   render). Retroreflective ball in IR = optional segmentation upgrade, same
+   math. ⏳ remaining: the real-hardware wand pass (2 Jetsons, real ball
+   radius); then **TSDF fusion** (Open3D) → watertight mesh → glTF/meshopt
+   export for the renderer.
 7. **Phase 3 — creative FX** (particles from capture geometry); **hands as
    particle attractors** — no Kinect Body Tracking needed (x86-only): run
    open-source 2D pose/hands (MediaPipe/RTMPose) on the node's color image

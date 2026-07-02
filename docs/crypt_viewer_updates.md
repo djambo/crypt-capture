@@ -30,6 +30,51 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-02 — Rig extrinsic calibration: registered clouds + camera poses + Align buttons
+**Status: applied 2026-07-02** (implemented in the viewer in the same
+cross-repo change; recorded here for the log).
+
+**Summary.** The M5 rig-calibration wiring landed (see
+`docs/rig_calibration.md`). The relay can now register **every sensor into one
+canonical world frame ON THE WIRE**: it applies each sensor's solved rigid
+transform (`rig_calib.json`) after unprojection, so multi-sensor clouds arrive
+already registered — **no `CPV1` change** (the per-frame gravity vector is
+rotated into the same frame). Calibration is solved either by the standalone
+`scripts/calibrate_rig.py` (relay auto-reloads the file it writes) or **live
+from the viewer** via two new relay-handled commands.
+
+**Protocol impact (all additive):**
+1. **Upstream commands (handled AT the relay, not forwarded):**
+   `{"cmd":"calibrate_fine","seconds":30,"ball_radius":0.05}` (Tier-2
+   marker-ball wand pass, ~mm), `{"cmd":"calibrate_rough","seconds":10}`
+   (Tier-1 zero-prop: IMU leveling + body-centroid track, ~5–10 cm),
+   `{"cmd":"reload_rig_calib"}` (re-read rig_calib.json now).
+2. **Downstream TEXT messages (JSON)** — the viewer's `onmessage` must branch
+   on `typeof event.data === 'string'`:
+   - `{"type":"rig_poses","tier","ref","sensors":{"<id>":{"R":[[…]×3],"t":[x,y,z],"rms","pairs"}}}`
+     — per-sensor view→world **camera poses**, sent on client connect and on
+     every calib (re)load; empty `sensors` = calibration cleared (reset gizmos
+     to the origin).
+   - `{"type":"calib_status","state":"collecting"|"done"|"failed"|"busy",…}`
+     — live progress of a calibration run (`seconds_left` + per-sensor
+     `centers` while collecting; per-sensor `rms`/`pairs` + `unsolved` on
+     done; `reason` on failed).
+
+**Viewer action (done):** string branch in `ws.onmessage` →
+`rig_poses` poses each sensor's `CameraGizmo` (`setPose(R,t)`/`resetPose()`);
+`calib_status` drives the alignment status line. The `Rough Align` /
+`Fine Align (wand)` buttons now send the commands above, with a **ball radius
+(cm)** input (default 5 cm — set to the real ball's radius). Operator flow for
+fine: capture background on all sensors, step out holding the ball, press Fine
+Align, wave it through the volume for 30 s; mm-level rms in the status =
+good, cm = re-run.
+
+**Headless testing:** `sim_node --ball 0.05 --pose "yaw_deg,x,y,z"` emits a
+synthetic shared ball from a known pose — two such nodes + the relay verify
+the whole path (solve recovered a 50°/1.2 m pose to 0.16°/3 mm end-to-end).
+
+---
+
 ## 2026-06-28 — Removed the depth-mask `set_depth` command (cleanup)
 **Status: NEW — informational.** The near/far depth-mask is gone end-to-end: the
 node streams the **full depth range** and culls via background subtraction + the

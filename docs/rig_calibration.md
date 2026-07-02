@@ -106,32 +106,55 @@ matched modality (residuals measured in exactly the space we render).
   Synthetic end-to-end (3 sensors on a circle, noisy caps, dropped frames,
   clock skew): rotation recovered to <0.01°, translation to <1 mm.
 
-## Wiring plan (next steps, in order)
+## Wiring (BUILT 2026-07-02 — how it actually works)
 
-1. **`scripts/calibrate_rig.py`** (central): connects to the relay WebSocket
+1. ✅ **`scripts/calibrate_rig.py`** (central): connects to the relay WebSocket
    like `scripts/preview_client.py`, collects per-sensor `CPV1` frames for
    `--seconds 30`, runs `fit_sphere` per frame (`--ball-radius`, default
    0.05 m), `solve_rig`, prints residuals, writes `rig_calib.json`
-   (per-sensor R 3×3 row-major, t metres, rms, pairs). Gate: skip frames
-   whose foreground count is implausible for the ball (person still in frame).
-2. **Relay applies the calib** (`central/preview_server.py --rig-calib
-   rig_calib.json`): after unprojection (view space), each sensor's points get
-   `P_world = R_i·P + t_i`. One canonical world frame **on the wire** — the
-   viewer needs no change to see registered clouds, and recording/fusion
-   inherit the same frame (live == recorded, per the north star).
-3. **Camera poses to the viewer** (gizmos): the relay sends a small JSON text
-   message on client connect (and on calib reload) listing per-sensor `[R|t]`;
-   the viewer places each sensor's `CameraGizmo` at its true pose. (The viewer
-   already renders one tinted gizmo per sensor, currently all at the origin.)
-4. **Tier-1 rough alignment** (independent of 1–3, can land before or after):
-   per-camera IMU+floor for roll/pitch/height + a short body-centroid track
-   match for yaw/XY (a "Rough Align" button in the viewer / a central solve
-   reusing `pair_tracks`+`solve_rigid` on centroids). Writes the same
-   `rig_calib.json` shape, marked `"tier": "rough"`.
+   (per-sensor R 3×3 row-major, t metres, rms, pairs; + `tier`/`ref`/
+   `ball_radius`). Frames implausible for the ball are gated (count bounds +
+   sphere-fit rms; `--min-points/--max-points/--max-fit-rms`); the frame-level
+   collection lives in `central/calibration.BallTracker` (shared with the
+   relay sessions below). Correspondence time = client arrival time (hardware
+   sync + a slowly-waved ball keep the pairing error in the residual).
+2. ✅ **Relay applies the calib** (`central/preview_server.py --rig-calib`,
+   default `rig_calib.json`, absent file = exact no-op): after unprojection
+   (view space), each sensor's points get `P_world = R_i·P + t_i` (and its
+   gravity vector is rotated with them). One canonical world frame **on the
+   wire** — the viewer needs no change to see registered clouds, and
+   recording/fusion inherit the same frame (live == recorded, per the north
+   star). The file is **mtime-watched** (re-running the script re-registers
+   live) and re-readable via a `reload_rig_calib` command.
+3. ✅ **Camera poses to the viewer** (gizmos): the relay sends a
+   `{"type":"rig_poses"}` JSON text message on client connect and on every
+   calib (re)load/clear, listing per-sensor `[R|t]` + rms/pairs; the viewer
+   places each sensor's `CameraGizmo` at its true pose (empty = back to the
+   origin). Spec: `docs/preview_protocol.md` §downstream.
+4. ✅ **Viewer-driven runs + Tier-1 rough**: the viewer's `Fine Align (wand)` /
+   `Rough Align` buttons send `calibrate_fine {seconds, ball_radius}` /
+   `calibrate_rough {seconds}`; the RELAY collects (off the raw pre-transform
+   clouds, so re-runs are correct), broadcasts `calib_status` progress ~1 Hz,
+   solves, writes `rig_calib.json` and applies it. Rough =
+   `central/calibration.solve_rough`: per-sensor IMU leveling
+   (`level_rotation`) + a yaw-only Kabsch (`solve_yaw_translation`) on the
+   body-centroid tracks — yaw-only because the centroid is biased toward each
+   camera (~half the body depth) and a full 3D solve would turn that bias into
+   a bogus tilt; roll/pitch come from the IMU instead. The rough world frame
+   is the reference sensor's LEVELED frame (floor flat by construction).
 5. Later polish: per-pair ICP fine refinement on overlapping static
    environment; joint (bundle) solve over all pairs instead of star-to-ref;
    auto ball segmentation (largest spherical cluster / retroreflective ball in
    IR) so the operator's body can be in frame.
+
+**Headless verification** (no hardware): `node/sim_node.py --ball 0.05 --pose
+"yaw_deg,x,y,z"` ray-renders a shared wall-clock-driven sphere from a known
+pose. Two posed sim nodes + the relay: `calibrate_rig.py` recovered a
+50°/1.2 m ground-truth pose to **0.16° / 3 mm**; the on-the-wire clouds then
+register (paired ball centers coincide); the viewer flow (buttons → status →
+gizmo poses) verified in headless Chromium. Unit tests:
+`python3 -m tests.test_rig` (trackers/gates, rough solve, JSON round-trip,
+apply step) alongside the original `tests/test_calibration.py` math tests.
 
 ## Related future work (noted here so the design accounts for it)
 
@@ -148,12 +171,11 @@ makes those hand positions valid in the shared world frame automatically.
 - ✅ Math core + headless tests (`central/calibration.py`,
   `tests/test_calibration.py`).
 - ✅ Viewer: per-sensor tinted gizmos + per-sensor IMU down sticks (crypt).
-- ✅ Viewer UI shell (crypt): a **cameras** list (one row per connected sensor,
-  tint-matched to its gizmo, per-sensor hide toggle) and an **alignment**
-  section — `Rough Align` / `Fine Align (wand)` buttons + a status line
-  (`ControlPanel.setAlignStatus`). The buttons call `World.roughAlign()` /
-  `World.fineAlign()`, which are the designated **extension points**: replace
-  the stub bodies with the real flows (fine = trigger/monitor the wand pass +
-  relay calib reload; rough = the Tier-1 solve) and drive the status line for
-  operator feedback, mirroring the background-capture UX.
-- ⏳ Steps 1–4 above (script, relay flag, pose message, Tier-1 rough).
+- ✅ **Wiring steps 1–4 (2026-07-02)**: `scripts/calibrate_rig.py`, relay
+  `--rig-calib` apply + mtime watch, `rig_poses`/`calib_status` JSON to the
+  viewer, viewer-driven `calibrate_fine`/`calibrate_rough` sessions, Tier-1
+  rough solve (`solve_rough`), sim-node ball/pose test mode, `tests/test_rig.py`.
+  Viewer side (crypt) wired the same day: live Align buttons + ball-radius
+  input + posed gizmos. Verified headless end-to-end (see above).
+- ⏳ Remaining: the real-hardware wand pass (2 Jetsons; set the true ball
+  radius); then TSDF fusion on the registered frames (step 5 polish as needed).
