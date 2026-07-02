@@ -226,21 +226,29 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
-- 🧪 **Multi-core node pipeline** (branch, awaiting hardware test): the node's
-  serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per frame;
-  measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores idle) is
-  now capture → worker pool (`_process_frame`, pure NumPy, GIL-releasing) →
-  ordered sender. pyk4a stays single-threaded on the capture thread; the sender
-  emits in submission order so the wire is unchanged; socket death still raises
-  out of `run()` (systemd restarts). **Freshness beats completeness:** the queue
-  is shallow (workers+1) and a capture that finds it full is dropped pre-submit
-  (`| drop N` in the stats line) — a deep queue turned overload into ~700 ms of
-  view lag on hardware (hand-wave played back after the wave); live preview must
-  show *now*, and recording (M3) is a separate node-local path.
-  `--workers` (default 2). Default `align` flipped to **color_to_depth**
-  (native depth grid holds a sensor-limited 30 fps; the viewer default was
-  flipped to match — it resync()s align on every connect). Verified headless:
-  stubbed-pyk4a integration test (order, payload integrity, dead-central raise);
+- 🧪 **Multi-core node pipeline** (branch, awaiting hardware re-test): the
+  node's serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per
+  frame; measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores
+  idle) is now capture thread → worker **PROCESS** pool (`_process_frame`, pure
+  NumPy) → ordered sender. **Processes, not threads — hard-won:** the stage is
+  ~40 short NumPy calls, and on threads CPython's GIL convoys them (measured on
+  the Orin: all cores idle, clocks maxed, stage wall time 1143 ms for 443 pts —
+  ~30×). The pool is forked before the camera/socket/threads exist; children
+  only run `_process_frame`. pyk4a stays single-threaded on the capture thread;
+  the sender emits in submission order so the wire is unchanged; socket death
+  still raises out of `run()` (systemd restarts). **Freshness beats
+  completeness:** the queue is shallow (workers+1) and when it's full the
+  capture thread **parks in a sleep** (`| sat N%` in the stats line = % of the
+  window spent parked) — it must NOT spin through SDK calls (that GIL churn is
+  what starved the workers), and a deep queue turned overload into ~700 ms of
+  view lag (hand-wave played back after the wave); the Kinect's internal queue
+  discards stale frames while parked so the next capture is fresh. Live preview
+  must show *now*; recording (M3) is a separate node-local path.
+  `--workers` (default 2; raise toward 4 for full-room). Default `align` flipped
+  to **color_to_depth** (native depth grid holds a sensor-limited 30 fps; the
+  viewer default was flipped to match — it resync()s align on every connect).
+  Verified headless: stubbed-pyk4a integration test (order, payload integrity,
+  freshness-under-overload via parking, dead-central raise);
   `tests/test_camera.py` updated for the new default.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a

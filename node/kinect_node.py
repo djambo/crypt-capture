@@ -41,7 +41,7 @@ import queue
 import socket
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pyk4a
@@ -344,6 +344,16 @@ def run(host, port, sensor_id, frames,
     if align:
         cfg["align"] = align
 
+    # Worker pool for the NumPy-heavy per-frame stage. PROCESSES, not threads:
+    # CPython's GIL convoys a stage made of many short NumPy calls when it runs
+    # on threads — measured on the Orin as cores sitting idle while the stage's
+    # wall time inflated ~30x. Real parallelism needs separate interpreters.
+    # Created (forked) BEFORE the camera, socket and helper threads exist, so
+    # the children are clean single-threaded copies; they only ever run
+    # _process_frame (pure NumPy, no pyk4a/socket state).
+    pool = ProcessPoolExecutor(max_workers=max(1, workers))
+    list(pool.map(len, [b""] * max(1, workers)))    # spawn children eagerly
+
     k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
     k4a.start()
     sock = socket.create_connection((host, port))
@@ -417,22 +427,25 @@ def run(host, port, sensor_id, frames,
     # core, so per-frame wall time was the SUM of the stages (measured ~40 ms in
     # depth_to_color close-up -> 25 fps while 5 Orin cores idled). Now the
     # capture thread only talks to pyk4a (the SDK stays single-threaded) and
-    # hands each frame's NumPy-heavy stage (_process_frame) to a small pool;
-    # consecutive frames overlap across cores (the big array ops release the
-    # GIL). A dedicated sender drains results IN SUBMISSION ORDER, so the wire
-    # is identical to the serial loop's. Per-frame wall time becomes roughly
-    # max(stage)/workers, putting the 30 fps sensor cap back in charge.
+    # hands each frame's NumPy-heavy stage (_process_frame) to the worker
+    # PROCESS pool created above; consecutive frames overlap on real cores with
+    # no shared GIL. A dedicated sender drains results
+    # IN SUBMISSION ORDER, so the wire is identical to the serial loop's.
+    # Per-frame wall time becomes roughly max(stage)/workers, putting the
+    # 30 fps sensor cap back in charge.
     # LIVE SEMANTICS: freshness beats completeness. When the workers can't keep
     # up (e.g. full unmasked room), any queued backlog is pure *latency* — every
     # frame waits behind it and the viewer plays the past (hand-wave lag,
     # observed on hardware with a deep queue). So the queue is shallow
-    # (workers+1) and a capture that finds it full is DROPPED before submit (no
-    # wasted worker time): effective fps = worker throughput, but what's on
+    # (workers+1) and when it is full the capture thread PARKS in a short sleep
+    # — it must NOT spin through get_capture/transforms (that GIL churn starved
+    # the workers 30x on hardware). While parked the Kinect keeps running and
+    # its shallow internal queue discards stale frames, so the next capture
+    # after a park is fresh. Effective fps = worker throughput; what's on
     # screen is always ~now. Recording (M3) is a separate node-local full-rate
-    # path, so dropped preview frames cost nothing.
+    # path, so preview frames skipped while parked cost nothing.
     outq = queue.Queue(maxsize=max(1, workers) + 1)
-    pool = ThreadPoolExecutor(max_workers=max(1, workers))
-    state = {"exc": None, "n": 0, "win_t0": t0, "dropped": 0}
+    state = {"exc": None, "n": 0, "win_t0": t0, "park_s": 0.0}
 
     def sender():
         try:
@@ -464,10 +477,13 @@ def run(host, port, sensor_id, frames,
                         msg = ("sensor %d: %d frames | %.1f fps | %d pts | "
                                "%.0f KB/f" % (sensor_id, state["n"], fps_meas,
                                               pts, kb))
-                        drops = state["dropped"]
-                        if drops:                 # capture ran ahead of workers
-                            state["dropped"] = 0
-                            msg += " | drop %d" % drops
+                        win = now - state["win_t0"]
+                        if state["park_s"] > 0.05 and win > 0:
+                            # % of the window the capture thread sat parked =
+                            # how saturated the workers are (frames skipped).
+                            msg += " | sat %d%%" % min(
+                                100, int(100 * state["park_s"] / win))
+                        state["park_s"] = 0.0
                         if profile:
                             # NOTE: stages overlap now — their sum can exceed
                             # the frame period while fps still holds 30.
@@ -513,6 +529,15 @@ def run(host, port, sensor_id, frames,
                 calib_sent = False
                 print("sensor %d: camera reconfigured (restart=%s) -> %s"
                       % (sensor_id, do_restart, cur))
+
+            # Saturated? Park WITHOUT touching the SDK (sleep releases the GIL
+            # and does zero work). The camera keeps running; its internal queue
+            # discards stale frames, so the next capture after a park is fresh.
+            if outq.full():
+                time.sleep(0.004)
+                with acc_lock:
+                    state["park_s"] += 0.004
+                continue
 
             tc = time.time()
             cap = k4a.get_capture()
@@ -561,15 +586,11 @@ def run(host, port, sensor_id, frames,
                 csrc = None
             td = time.time()
 
-            # Freshness beats completeness (live preview): if the pipeline is
-            # saturated, drop THIS capture rather than queue it as latency. We
-            # are the only producer, so full() -> put() cannot race with itself.
-            if outq.full():
-                state["dropped"] += 1
-                continue
             # Snapshot the live-tunable knobs (the control reader mutates them)
-            # and hand the heavy stage to the pool; the sender emits results in
-            # this same submission order.
+            # and hand the heavy stage to a worker process; the sender emits
+            # results in this same submission order. The queue had room at the
+            # park check above and we are the only producer, so this can't
+            # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s)
             outq.put(("frame", fut, sent, s, td - tc))
@@ -642,9 +663,10 @@ def main():
                     choices=list(camera_modes.ALIGN_MODES),
                     help="initial alignment direction (live-changeable)")
     ap.add_argument("--workers", type=int, default=2,
-                    help="worker threads for the mask/RVL/color stage (the "
-                         "capture->workers->sender pipeline; 2 holds 30fps in "
-                         "depth_to_color on the Orin, 1 = minimal pipelining)")
+                    help="worker PROCESSES for the mask/RVL/color stage (the "
+                         "capture->workers->sender pipeline; processes, not "
+                         "threads — CPython's GIL convoys threaded NumPy). "
+                         "Raise toward 4 for full-room/unmasked streaming.")
     ap.add_argument("--imu-axes", default=None,
                     help="override the IMU->depth axis map, e.g. 'x,z,-y' (the "
                          "default) or '-y,-x,-z'; use the logged 'accel raw' to "
