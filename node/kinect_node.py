@@ -37,9 +37,11 @@ Multi-sensor (later): give the master sensor --sync master and the others
 
 import argparse
 import math
+import queue
 import socket
 import threading
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pyk4a
@@ -53,7 +55,7 @@ from node import camera_modes
 
 _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
                        (0.0, 0.0, 0.0))
-from node.background import BackgroundSubtractor, denoise_mask
+from node.background import BackgroundSubtractor, denoise_mask, foreground_mask
 
 # Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
 _DEPTH_ENUM = {
@@ -116,16 +118,17 @@ def _default_accel_to_depth(x, y, z):
 
 
 def _sdk_accel_to_depth(k4a, x, y, z):
-    """Factory ACCEL->DEPTH extrinsic via pyk4a (transform tip and origin and
-    subtract → pure rotation, translation cancels). Returns None if pyk4a doesn't
-    expose it on this build."""
+    """Factory ACCEL->DEPTH rotation via pyk4a's extrinsic getter. The accel is a
+    direction (gravity), so only the rotation is applied — returns (x,y,z) in the
+    depth optical frame, or None if pyk4a doesn't expose the extrinsic on this
+    build."""
     try:
         cal = k4a.calibration
         accel = pyk4a.CalibrationType.ACCEL
         depth = pyk4a.CalibrationType.DEPTH
-        p1 = cal.convert_3d_to_3d((x, y, z), accel, depth)
-        p0 = cal.convert_3d_to_3d((0.0, 0.0, 0.0), accel, depth)
-        return (p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2])
+        R_mat, _ = cal.get_extrinsic_parameters(accel, depth)
+        r = np.asarray(R_mat, dtype=float).reshape(3, 3).dot((x, y, z))
+        return (float(r[0]), float(r[1]), float(r[2]))
     except Exception:
         return None
 
@@ -222,20 +225,31 @@ def _grid_to_depth_extrinsic(k4a, align):
     tilted ~a few° about X + offset ~a few cm from depth — that's the tilt you
     see when switching alignment). Returns (R 9 row-major, t 3 metres).
 
-    Built from convert_3d_to_3d on basis vectors (translation cancels for the
-    columns, then the origin gives t). Falls back to identity if pyk4a doesn't
-    expose the COLOR/DEPTH extrinsic.
+    Preferred source is pyk4a's `get_extrinsic_parameters` (R 3x3 + t already in
+    metres, convention P_depth = R·P_color + t). Falls back to deriving it from
+    the public `color_to_depth_3d` converter on basis vectors (mm; translation
+    cancels for the columns, the origin gives t) for builds lacking the getter,
+    then to identity.
     """
     if align != "depth_to_color":
         return _IDENTITY_EXTRINSIC
+    cal = k4a.calibration
+    color = pyk4a.CalibrationType.COLOR
+    depth = pyk4a.CalibrationType.DEPTH
+    # Preferred: the factory COLOR->DEPTH extrinsic straight from pyk4a.
     try:
-        cal = k4a.calibration
-        color = pyk4a.CalibrationType.COLOR
-        depth = pyk4a.CalibrationType.DEPTH
-        o = cal.convert_3d_to_3d((0.0, 0.0, 0.0), color, depth)
-        ex = cal.convert_3d_to_3d((1000.0, 0.0, 0.0), color, depth)
-        ey = cal.convert_3d_to_3d((0.0, 1000.0, 0.0), color, depth)
-        ez = cal.convert_3d_to_3d((0.0, 0.0, 1000.0), color, depth)
+        R_mat, t_vec = cal.get_extrinsic_parameters(color, depth)
+        R = tuple(float(v) for v in np.asarray(R_mat, dtype=float).reshape(9))
+        t = tuple(float(v) for v in np.asarray(t_vec, dtype=float).reshape(3))
+        return R, t
+    except Exception:
+        pass
+    # Fallback: basis vectors through the public 3D converter (works in mm).
+    try:
+        o = cal.color_to_depth_3d((0.0, 0.0, 0.0))
+        ex = cal.color_to_depth_3d((1000.0, 0.0, 0.0))
+        ey = cal.color_to_depth_3d((0.0, 1000.0, 0.0))
+        ez = cal.color_to_depth_3d((0.0, 0.0, 1000.0))
         c0 = [(ex[i] - o[i]) / 1000.0 for i in range(3)]   # R columns
         c1 = [(ey[i] - o[i]) / 1000.0 for i in range(3)]
         c2 = [(ez[i] - o[i]) / 1000.0 for i in range(3)]
@@ -267,11 +281,45 @@ def _read_intrinsics(k4a, align):
     return fx, fy, cx, cy, dist
 
 
+def _process_frame(depth, csrc, plate, margin, denoise, stride):
+    """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
+    stage, run on a worker thread so consecutive frames overlap across cores.
+    Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
+    ops release the GIL, which is what makes the worker threads truly parallel.
+    `plate`/`margin`/`denoise` are per-frame snapshots (the control reader may
+    mutate the live objects mid-frame). Returns everything the sender needs.
+    """
+    t0 = time.time()
+    keep = depth > 0
+    fg = foreground_mask(plate, depth, margin)
+    if fg is not None:
+        keep &= fg
+    keep = denoise_mask(keep, denoise)              # drop isolated ToF specks
+    masked = np.where(keep, depth, 0).astype(np.uint16)
+    if stride > 1:
+        masked = masked[::stride, ::stride]
+    h, w = masked.shape
+    comp = rvl.compress(masked.ravel())
+    t1 = time.time()
+
+    color = b""
+    color_aligned = False
+    if csrc is not None:
+        if stride > 1:
+            csrc = csrc[::stride, ::stride]
+        rgb = csrc[..., 2::-1]                      # BGRA -> RGB
+        color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
+        color_aligned = True
+    t2 = time.time()
+    pts = int((masked != 0).sum())
+    return comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1
+
+
 def run(host, port, sensor_id, frames,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
         imu_axes=None, imu_extrinsic=False, rig_id=discovery.DEFAULT_RIG_ID,
-        discovery_port=discovery.DISCOVERY_PORT):
+        discovery_port=discovery.DISCOVERY_PORT, workers=2):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -295,6 +343,16 @@ def run(host, port, sensor_id, frames,
         cfg["fps"] = int(fps)
     if align:
         cfg["align"] = align
+
+    # Worker pool for the NumPy-heavy per-frame stage. PROCESSES, not threads:
+    # CPython's GIL convoys a stage made of many short NumPy calls when it runs
+    # on threads — measured on the Orin as cores sitting idle while the stage's
+    # wall time inflated ~30x. Real parallelism needs separate interpreters.
+    # Created (forked) BEFORE the camera, socket and helper threads exist, so
+    # the children are clean single-threaded copies; they only ever run
+    # _process_frame (pure NumPy, no pyk4a/socket state).
+    pool = ProcessPoolExecutor(max_workers=max(1, workers))
+    list(pool.map(len, [b""] * max(1, workers)))    # spawn children eagerly
 
     k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
     k4a.start()
@@ -361,10 +419,97 @@ def run(host, port, sensor_id, frames,
 
     sent = 0
     t0 = time.time()
-    win_t0 = t0                                 # windowed-fps marker
     acc = {"cap": 0.0, "depth": 0.0, "color": 0.0, "send": 0.0}  # profiling
+    acc_lock = threading.Lock()
+
+    # --- capture -> workers -> sender pipeline ------------------------------
+    # The old serial loop ran cap + mask/RVL + color + send back-to-back on ONE
+    # core, so per-frame wall time was the SUM of the stages (measured ~40 ms in
+    # depth_to_color close-up -> 25 fps while 5 Orin cores idled). Now the
+    # capture thread only talks to pyk4a (the SDK stays single-threaded) and
+    # hands each frame's NumPy-heavy stage (_process_frame) to the worker
+    # PROCESS pool created above; consecutive frames overlap on real cores with
+    # no shared GIL. A dedicated sender drains results
+    # IN SUBMISSION ORDER, so the wire is identical to the serial loop's.
+    # Per-frame wall time becomes roughly max(stage)/workers, putting the
+    # 30 fps sensor cap back in charge.
+    # LIVE SEMANTICS: freshness beats completeness. When the workers can't keep
+    # up (e.g. full unmasked room), any queued backlog is pure *latency* — every
+    # frame waits behind it and the viewer plays the past (hand-wave lag,
+    # observed on hardware with a deep queue). So the queue is shallow
+    # (workers+1) and when it is full the capture thread PARKS in a short sleep
+    # — it must NOT spin through get_capture/transforms (that GIL churn starved
+    # the workers 30x on hardware). While parked the Kinect keeps running and
+    # its shallow internal queue discards stale frames, so the next capture
+    # after a park is fresh. Effective fps = worker throughput; what's on
+    # screen is always ~now. Recording (M3) is a separate node-local full-rate
+    # path, so preview frames skipped while parked cost nothing.
+    outq = queue.Queue(maxsize=max(1, workers) + 1)
+    state = {"exc": None, "n": 0, "win_t0": t0, "park_s": 0.0}
+
+    def sender():
+        try:
+            while True:
+                item = outq.get()
+                if item is None:
+                    return
+                if item[0] == "raw":              # calib/extrinsic/imu blobs
+                    sock.sendall(item[1])
+                    continue
+                _, fut, fid, fstride, t_cap = item
+                comp, color, color_aligned, w, h, pts, ms_d, ms_c = fut.result()
+                t_send = time.time()
+                frame = Frame(
+                    sensor_id=sensor_id, frame_id=fid,
+                    timestamp_ns=int(time.time() * 1e9), width=w, height=h,
+                    depth=comp, color=color, depth_rvl=True,
+                    color_aligned=color_aligned, stride=fstride,
+                )
+                sock.sendall(frame.encode())
+                now = time.time()
+                state["n"] += 1
+                with acc_lock:
+                    acc["cap"] += t_cap; acc["depth"] += ms_d
+                    acc["color"] += ms_c; acc["send"] += now - t_send
+                    if state["n"] % 30 == 0:
+                        fps_meas = 30.0 / (now - state["win_t0"])
+                        kb = (len(comp) + len(color)) / 1024.0
+                        msg = ("sensor %d: %d frames | %.1f fps | %d pts | "
+                               "%.0f KB/f" % (sensor_id, state["n"], fps_meas,
+                                              pts, kb))
+                        win = now - state["win_t0"]
+                        if state["park_s"] > 0.05 and win > 0:
+                            # % of the window the capture thread sat parked =
+                            # how saturated the workers are (frames skipped).
+                            msg += " | sat %d%%" % min(
+                                100, int(100 * state["park_s"] / win))
+                        state["park_s"] = 0.0
+                        if profile:
+                            # NOTE: stages overlap now — their sum can exceed
+                            # the frame period while fps still holds 30.
+                            msg += ("  [cap %.0f depth %.0f color %.0f send "
+                                    "%.0f ms/f | %d workers]" % (
+                                        acc["cap"] / 30 * 1000,
+                                        acc["depth"] / 30 * 1000,
+                                        acc["color"] / 30 * 1000,
+                                        acc["send"] / 30 * 1000, workers))
+                        for k in acc:
+                            acc[k] = 0.0
+                        state["win_t0"] = now
+                        print(msg)
+        except Exception as exc:                  # dead socket / worker raised
+            state["exc"] = exc
+            while True:                           # keep draining so the capture
+                if outq.get() is None:            # thread never blocks on put()
+                    return
+
+    sender_t = threading.Thread(target=sender, daemon=True)
+    sender_t.start()
+
     try:
         while frames <= 0 or sent < frames:
+            if state["exc"] is not None:          # sender/worker died: stop
+                break
             # Apply any pending live camera reconfig before grabbing a frame, so
             # pyk4a start/stop happens only on this (capture) thread.
             with cfg_lock:
@@ -385,6 +530,15 @@ def run(host, port, sensor_id, frames,
                 print("sensor %d: camera reconfigured (restart=%s) -> %s"
                       % (sensor_id, do_restart, cur))
 
+            # Saturated? Park WITHOUT touching the SDK (sleep releases the GIL
+            # and does zero work). The camera keeps running; its internal queue
+            # discards stale frames, so the next capture after a park is fresh.
+            if outq.full():
+                time.sleep(0.004)
+                with acc_lock:
+                    state["park_s"] += 0.004
+                continue
+
             tc = time.time()
             cap = k4a.get_capture()
             # The streamed point grid is the depth image (color_to_depth) or the
@@ -396,13 +550,13 @@ def run(host, port, sensor_id, frames,
             if depth is None:
                 continue
             if not calib_sent:                      # full-res grid dims + intrinsics
-                sock.sendall(encode_calib(sensor_id, depth.shape[1],
-                                          depth.shape[0], ifx, ify, icx, icy,
-                                          idist))
+                outq.put(("raw", encode_calib(sensor_id, depth.shape[1],
+                                              depth.shape[0], ifx, ify, icx,
+                                              icy, idist)))
                 # grid->depth extrinsic so depth_to_color registers to the same
                 # frame as color_to_depth (no tilt/shift when switching align).
                 R, t = _grid_to_depth_extrinsic(k4a, align)
-                sock.sendall(encode_extrinsic(sensor_id, R, t))
+                outq.put(("raw", encode_extrinsic(sensor_id, R, t)))
                 # Initial orientation: a gravity (down) vector from the IMU, sent
                 # once per (re)connect/reconfig alongside the intrinsics so the
                 # relay/viewer can level the cloud to the floor. The raw accel is
@@ -410,7 +564,7 @@ def run(host, port, sensor_id, frames,
                 # --imu-axes) without guessing.
                 g, raw = _read_gravity_optical(k4a, imu_axes_fn, imu_extrinsic)
                 if g is not None:
-                    sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
+                    outq.put(("raw", encode_imu(sensor_id, g[0], g[1], g[2])))
                     print("sensor %d: accel raw=(%.2f, %.2f, %.2f) -> "
                           "gravity(optical)=(%.3f, %.3f, %.3f)"
                           % (sensor_id, raw[0], raw[1], raw[2], g[0], g[1], g[2]))
@@ -418,33 +572,11 @@ def run(host, port, sensor_id, frames,
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):
                     print("sensor %d: background captured" % sensor_id)
-            td = time.time()
 
-            # Keep all valid pixels, then (if a plate exists) keep only those
-            # closer than the background — floor/walls at any distance drop out,
-            # leaving just the subject. No near/far clip: the full range streams.
-            keep = depth > 0
-            fg = bg.foreground(depth)
-            if fg is not None:
-                keep &= fg
-            keep = denoise_mask(keep, rng["denoise"])   # drop isolated ToF specks
-            masked = np.where(keep, depth, 0).astype(np.uint16)
-            # Preview downsample: stride on the node so RVL+color+wire all shrink
-            # ~stride^2. The relay reverses it for metrically-correct unprojection
-            # (frame.stride). Recording (later) keeps full res from `depth`.
-            if s > 1:
-                masked = masked[::s, ::s]
-            h, w = masked.shape
-            comp = rvl.compress(masked.ravel())
-            tz = time.time()
-
-            # Aligned color: the color image already in the SAME geometry as the
-            # streamed depth grid (transformed_color for color_to_depth, the raw
-            # color image for depth_to_color). Keep RGB for the foreground pixels
-            # only, row-major, one triple per non-zero depth pixel (relay re-pairs
-            # 1:1).
-            color = b""
-            color_aligned = False
+            # Aligned color source: the color image already in the SAME geometry
+            # as the streamed depth grid (transformed_color for color_to_depth,
+            # the raw color image for depth_to_color). Grabbed HERE because it
+            # touches the SDK; the foreground pick happens in the worker.
             try:
                 if align == "depth_to_color":
                     csrc = cap.color                 # (Hc, Wc, 4) BGRA
@@ -452,25 +584,16 @@ def run(host, port, sensor_id, frames,
                     csrc = cap.transformed_color     # (Hd, Wd, 4) BGRA
             except Exception:
                 csrc = None
-            if csrc is not None:
-                if s > 1:
-                    csrc = csrc[::s, ::s]
-                rgb = csrc[..., 2::-1]                # BGRA -> RGB
-                color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
-                color_aligned = True
-            tcol = time.time()
+            td = time.time()
 
-            frame = Frame(
-                sensor_id=sensor_id, frame_id=sent,
-                timestamp_ns=int(time.time() * 1e9), width=w, height=h,
-                depth=comp, color=color, depth_rvl=True,
-                color_aligned=color_aligned, stride=s,
-            )
-            sock.sendall(frame.encode())
-            ts = time.time()
-
-            acc["cap"] += td - tc; acc["depth"] += tz - td
-            acc["color"] += tcol - tz; acc["send"] += ts - tcol
+            # Snapshot the live-tunable knobs (the control reader mutates them)
+            # and hand the heavy stage to a worker process; the sender emits
+            # results in this same submission order. The queue had room at the
+            # park check above and we are the only producer, so this can't
+            # block for long.
+            fut = pool.submit(_process_frame, depth, csrc,
+                              bg.plate, bg.margin, rng["denoise"], s)
+            outq.put(("frame", fut, sent, s, td - tc))
             sent += 1
 
             # Live orientation: while streaming is on, re-read the IMU (freshest
@@ -479,34 +602,32 @@ def run(host, port, sensor_id, frames,
             if imu["stream"] and sent % IMU_EVERY == 0:
                 g, raw = _read_gravity_optical(k4a, imu_axes_fn, imu_extrinsic)
                 if g is not None:
-                    sock.sendall(encode_imu(sensor_id, g[0], g[1], g[2]))
+                    outq.put(("raw", encode_imu(sensor_id, g[0], g[1], g[2])))
                     if sent % 60 == 0:
                         print("sensor %d: gravity(optical)=(%.3f, %.3f, %.3f) "
                               "[accel raw=(%.2f, %.2f, %.2f)]"
                               % (sensor_id, g[0], g[1], g[2],
                                  raw[0], raw[1], raw[2]))
-            if sent % 30 == 0:
-                now = time.time()
-                fps_meas = 30.0 / (now - win_t0)     # windowed, not cumulative
-                pts = int((masked != 0).sum())
-                kb = (len(comp) + len(color)) / 1024.0
-                msg = ("sensor %d: %d frames | %.1f fps | %d pts | %.0f KB/f"
-                       % (sensor_id, sent, fps_meas, pts, kb))
-                if profile:
-                    msg += "  [cap %.0f depth %.0f color %.0f send %.0f ms/f]" % (
-                        acc["cap"] / 30 * 1000, acc["depth"] / 30 * 1000,
-                        acc["color"] / 30 * 1000, acc["send"] / 30 * 1000)
-                print(msg)
-                win_t0 = now
-                for k in acc:
-                    acc[k] = 0.0
+            # (fps/pts stats + profile print now live in the sender thread.)
     finally:
+        outq.put(None)                        # sender exits after the backlog
+        sender_t.join(timeout=10.0)
+        if sender_t.is_alive():               # wedged mid-sendall (peer stopped
+            try:                              # reading): kill the socket under
+                sock.shutdown(socket.SHUT_RDWR)   # it so this process can't
+            except OSError:                   # hang forever holding the camera
+                pass
+            sender_t.join(timeout=2.0)
+        pool.shutdown()
         try:
             sock.shutdown(socket.SHUT_RDWR)   # wake the control reader + send FIN
         except OSError:
             pass
         sock.close()
         k4a.stop()
+    if state["exc"] is not None:
+        raise state["exc"]                    # dead socket / worker bug: exit
+                                              # nonzero so systemd relaunches
     print("sensor %d: streamed %d frames in %.1fs" % (sensor_id, sent, time.time() - t0))
     return sent
 
@@ -544,9 +665,14 @@ def main():
     ap.add_argument("--camera-fps", type=int, default=30,
                     choices=list(camera_modes.FPS_CHOICES),
                     help="initial fps (auto-clamped per mode)")
-    ap.add_argument("--align", default="depth_to_color",
+    ap.add_argument("--align", default="color_to_depth",
                     choices=list(camera_modes.ALIGN_MODES),
                     help="initial alignment direction (live-changeable)")
+    ap.add_argument("--workers", type=int, default=2,
+                    help="worker PROCESSES for the mask/RVL/color stage (the "
+                         "capture->workers->sender pipeline; processes, not "
+                         "threads — CPython's GIL convoys threaded NumPy). "
+                         "Raise toward 4 for full-room/unmasked streaming.")
     ap.add_argument("--imu-axes", default=None,
                     help="override the IMU->depth axis map, e.g. 'x,z,-y' (the "
                          "default) or '-y,-x,-z'; use the logged 'accel raw' to "
@@ -563,7 +689,7 @@ def main():
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
         fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes,
         imu_extrinsic=args.imu_extrinsic, rig_id=args.rig_id,
-        discovery_port=args.discovery_port)
+        discovery_port=args.discovery_port, workers=args.workers)
 
 
 if __name__ == "__main__":

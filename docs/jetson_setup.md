@@ -4,6 +4,10 @@ Goal: run one Azure Kinect on the 1st-gen Jetson Nano and stream a real take.
 The Nano is the *proven* combo (JetPack 4.x / Ubuntu 18.04). It's CPU-slow, so
 expect low fps with the pure-Python RVL — that's fine for validation.
 
+> **Migrating to a Jetson Orin Nano?** See **`jetson_orin_migration.md`** — the
+> Orin can't run this JetPack 4 / 18.04 combo (different SoC), so the OS, SD card,
+> and Kinect-SDK steps differ. This Nano doc stays the proven baseline / rollback.
+
 > Reference community guide (follow it if these steps drift):
 > https://github.com/valdivj/Azure-for-Kinect-Jetson-nano
 

@@ -48,9 +48,10 @@ DEFAULTS = {
     "depth_mode": "NFOV_UNBINNED",
     "color_resolution": "720P",
     "fps": 30,
-    # depth_to_color is the default: denser cloud / much more colour detail, and
-    # it now registers to the depth frame (CEXT) so there's no alignment penalty.
-    "align": "depth_to_color",
+    # color_to_depth is the default: native depth grid (~2.5x smaller than the
+    # colour grid) -> the node holds a sensor-limited 30 fps. depth_to_color
+    # (more colour detail; registers via CEXT) costs ~2.5x the masking/RVL work.
+    "align": "color_to_depth",
 }
 
 

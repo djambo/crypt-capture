@@ -84,6 +84,9 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
 | `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
 | `{"cmd":"set_imu","enabled":<bool>}` | **stream live IMU orientation.** When enabled, the node re-reads the accelerometer every ~10 frames and re-sends a fresh gravity (down) vector, so the cloud reorients live as the camera is physically turned. Off by default (one gravity vector is still sent at connect). The gravity rides in the `CPV1` gravity block (bit2). |
+| `{"cmd":"calibrate_fine","seconds":30,"ball_radius":0.05}` | **rig calibration, Tier-2 wand pass — handled AT THE RELAY** (not forwarded). Collects per-sensor ball centers off the raw clouds for `seconds`, solves the rig (Kabsch), writes `rig_calib.json` and starts registering all sensors on the wire. Optional gate overrides: `min_points`, `max_points`, `max_fit_rms`, `min_pairs`. Progress/results stream back as `calib_status` (below). See `docs/rig_calibration.md`. |
+| `{"cmd":"calibrate_rough","seconds":10}` | **rig calibration, Tier-1 rough — relay-handled.** Per-sensor IMU leveling + the operator's body-centroid track for yaw/XY (~5–10 cm, zero props; walk a small "L"). Optional `min_points`, `min_pairs`. Same file/flow as fine, `"tier":"rough"`. |
+| `{"cmd":"reload_rig_calib"}` | **relay-handled**: re-read `rig_calib.json` now (it is also mtime-watched, so this is rarely needed). |
 
 **`set_camera`** lets the UI choose the camera mode live; the stream adapts (the
 node restarts the sensor as needed, re-reads its intrinsics, and re-sends the
@@ -122,7 +125,22 @@ ws.send(JSON.stringify({ cmd: "capture_bg", frames: 60 }));
 
 Internally the server re-frames this as a `CTL1` message (magic + u32 len + JSON)
 on the node's TCP socket; see `protocol/control.py`. Viewers only speak the JSON
-over WebSocket.
+over WebSocket. The three `calibrate_*`/`reload_rig_calib` commands never reach
+a node — the relay is the endpoint.
+
+## Downstream: server → browser JSON (text messages)
+
+Alongside the binary `CPV1` frames, the server sends low-rate **text** messages
+containing a JSON object with a `"type"` field. Viewers must branch on the
+message type (string vs binary) and should ignore unknown `"type"`s (that is
+the additive-extension mechanism for this channel).
+
+| message | meaning |
+|---|---|
+| `{"type":"rig_poses","tier":"fine"\|"rough","ref":<id>,"sensors":{"<id>":{"R":[[…]×3],"t":[x,y,z],"rms":<m>,"pairs":<n>}}}` | **per-sensor camera poses** (view→world, the same transforms applied to the points; R row-major). Sent to each client on connect (if a calibration is active) and broadcast on every calib (re)load. Empty `sensors` = calibration cleared — reset gizmos to the origin. |
+| `{"type":"calib_status","state":"collecting","tier":…,"seconds_left":<s>,"centers":{"<id>":<n>}}` | live progress of a running `calibrate_*` session (~1 Hz). |
+| `{"type":"calib_status","state":"done","tier":…,"sensors":{"<id>":{"rms":<m>,"pairs":<n>}},"unsolved":[…]}` | the solve finished and was applied; per-sensor residuals (mm-scale rms = good wand pass). `unsolved` lists sensors that had tracks but too few matched pairs. |
+| `{"type":"calib_status","state":"failed","reason":…}` / `{"state":"busy"}` | nothing usable was collected / a session is already running. |
 
 ## Versioning
 

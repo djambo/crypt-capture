@@ -65,9 +65,16 @@ class BackgroundSubtractor:
     def foreground(self, depth):
         """Boolean (H,W) mask: True = keep (closer than background, or background
         unknown). None if no plate yet."""
-        if self.plate is None:
-            return None
-        return (self.plate == 0) | (depth.astype(np.float32) < self.plate - self.margin)
+        return foreground_mask(self.plate, depth, self.margin)
+
+
+def foreground_mask(plate, depth, margin):
+    """Foreground mask against a *snapshotted* plate (see foreground()). Module-
+    level so worker threads can pass a plate captured once per frame — a live
+    `self.plate` could be clear()ed between accesses mid-computation."""
+    if plate is None:
+        return None
+    return (plate == 0) | (depth.astype(np.float32) < plate - margin)
 
 
 def denoise_mask(mask, min_neighbors=2):

@@ -226,6 +226,63 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
+- ✅ **Multi-core node pipeline** (hardware-validated on the Orin: subject at
+  ~1.5 m in depth_to_color = a sensor-limited **30 fps**, was 25 serial; under
+  full-room saturation ~0.3 s of pipeline latency is *inherent* — ≥4 frames in
+  flight to keep the workers fed — and only affects the setup view, not the
+  subtracted subject path): the node's serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per
+  frame; measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores
+  idle) is now capture thread → worker **PROCESS** pool (`_process_frame`, pure
+  NumPy) → ordered sender. **Processes, not threads — hard-won:** the stage is
+  ~40 short NumPy calls, and on threads CPython's GIL convoys them (measured on
+  the Orin: all cores idle, clocks maxed, stage wall time 1143 ms for 443 pts —
+  ~30×). The pool is forked before the camera/socket/threads exist; children
+  only run `_process_frame`. pyk4a stays single-threaded on the capture thread;
+  the sender emits in submission order so the wire is unchanged; socket death
+  still raises out of `run()` (systemd restarts). **Freshness beats
+  completeness:** the queue is shallow (workers+1) and when it's full the
+  capture thread **parks in a sleep** (`| sat N%` in the stats line = % of the
+  window spent parked) — it must NOT spin through SDK calls (that GIL churn is
+  what starved the workers), and a deep queue turned overload into ~700 ms of
+  view lag (hand-wave played back after the wave); the Kinect's internal queue
+  discards stale frames while parked so the next capture is fresh. Live preview
+  must show *now*; recording (M3) is a separate node-local path.
+  `--workers` (default 2; raise toward 4 for full-room). Default `align` flipped
+  to **color_to_depth** (native depth grid holds a sensor-limited 30 fps; the
+  viewer default was flipped to match — it resync()s align on every connect).
+  Verified headless: stubbed-pyk4a integration test (order, payload integrity,
+  freshness-under-overload via parking, dead-central raise);
+  `tests/test_camera.py` updated for the new default.
+- ✅ **Rig extrinsic calibration wiring (M5 first half, 2026-07-02)** — the
+  marker-ball math core is now wired end-to-end (design + verification detail:
+  `docs/rig_calibration.md`):
+  **collect+solve** — `scripts/calibrate_rig.py` (headless WS client: gates
+  frames implausible for the ball via `central/calibration.BallTracker`
+  count/fit-rms gates, fits centers, `solve_rig`, writes `rig_calib.json`);
+  **apply at the relay** — `preview_server --rig-calib` (default
+  `rig_calib.json`, absent = exact no-op): `P_world = R_i·P + t_i` per sensor
+  after unprojection (gravity rotated too) → ONE canonical world frame on the
+  wire, no `CPV1` change; the file is mtime-watched (re-runs re-register
+  live) + a `reload_rig_calib` command;
+  **poses/status to the viewer** — JSON TEXT messages on the preview WS
+  (`rig_poses` on connect + every (re)load/clear; `calib_status` progress),
+  spec in `docs/preview_protocol.md`;
+  **viewer-driven sessions** — relay-handled `calibrate_fine {seconds,
+  ball_radius}` / `calibrate_rough {seconds}` commands (the crypt viewer's
+  Fine/Rough Align buttons + ball-radius field drive them; also
+  `scripts/send_command.py calibrate-fine/-rough/reload-rig-calib`). Sessions
+  collect off the RAW pre-transform clouds so re-runs are correct.
+  **Tier-1 rough solve** — `solve_rough` = per-sensor IMU leveling
+  (`level_rotation`) + yaw-only Kabsch (`solve_yaw_translation`) on
+  body-centroid tracks (yaw-only on purpose: the centroid's toward-camera bias
+  would corrupt a full 3D solve; roll/pitch come from the IMU); world = the
+  ref sensor's leveled frame (floor flat by construction).
+  **Headless proof** — `sim_node --ball 0.05 --pose "yaw,x,y,z"` ray-renders a
+  shared wall-clock-driven sphere from a known pose (pose-true IMU vector);
+  two posed sim nodes → calibrate_rig recovered 50°/1.2 m ground truth to
+  **0.16°/3 mm**, wire clouds register, viewer verified in headless Chromium.
+  `tests/test_rig.py` covers trackers/gates, rough solve, JSON round-trip and
+  the apply step. Remaining: the real-hardware wand pass, then TSDF fusion.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -283,6 +340,32 @@ Two repos:
   free validation but too weak for production matting. (If Jetson: Orin NX, not
   Orin Nano — Nano has no NVENC. Azure Kinect itself is discontinued; Orbbec
   Femto Bolt is the successor.)
+  **Orin Nano migration in progress** (the user bought the Nano despite the NVENC
+  caveat — fine, its color path is codec-less today so NVENC isn't on the critical
+  path; software/FFmpeg encode later if needed). Key facts: the Orin Nano *cannot*
+  run JetPack 4/Ubuntu 18.04 (different SoC). Flash **JetPack 6.2 / Ubuntu 22.04 /
+  Python 3.10** — the latest well-supported on the Orin Nano, and k4a is
+  community-confirmed on 22.04; 5.1.x/20.04 is now *harder* to flash (NVIDIA
+  defaults to JP6) with no real benefit, keep it only as a fallback, and avoid
+  JP7 (too new for the 18.04-era depth engine). The SD card can't be physically
+  moved from the Nano (reflash a new card; 128 GB is plenty since the node is a
+  bridge that offloads+clears — long-term recording buffer belongs on an NVMe SSD
+  via the devkit's M.2 slot, not the SD). The archived Azure Kinect SDK has no
+  native 20.04/22.04 ARM64 packages, so install the **18.04 arm64** ones (+
+  `libsoundio1`) + the `libdepthengine.so.2.0` binary; the depth engine still
+  needs a GL context. The Orbbec K4A wrapper does **not** support the original
+  Kinect DK (Femto only). Node code is already 3.6-safe so it runs unchanged on
+  3.10. **Migration DONE + verified on hardware** (JetPack 6.2, one Orin Nano
+  streaming live over Ethernet as a boot service): the clean per-node runbook is
+  **`docs/jetson_orin_node_setup.md`**; **`docs/jetson_orin_migration.md`** is the
+  why/gotchas companion. Key hard-won facts baked in: `libsoundio1` was dropped
+  from 22.04 (pull the 20.04 arm64 .deb first — the one make-or-break step); the
+  1.4.2 `libk4a` deb bundles the depth engine; udev rules are required (missing →
+  "libusb unavailable"); JetPack 6 defaults to Wayland so force Xorg+autologin and
+  give the service `DISPLAY=:0`+`XAUTHORITY=/run/user/1000/gdm/Xauthority` for the
+  depth-engine GL context (no error 204); the depth cam (`097c`) cold-boot
+  enumeration self-heals on a normal reboot (USB bus cycles), else power-cycle the
+  Kinect's 5 V adapter. Per node only `SENSOR_ID` differs.
 
 ## Repo layout
 
@@ -293,15 +376,20 @@ protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws rel
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
-central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
+central/    recorder.py (records synced takes), preview_server.py (live ws relay + control
+            fan-out + rig-calib apply/reload + viewer-driven calibration sessions),
+            calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch;
+            + trackers/gates, Tier-1 rough solve, rig_calib.json I/O)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
-            send_command.py (send control commands to the relay)
+            send_command.py (send control commands to the relay),
+            calibrate_rig.py (marker-ball wand pass: collect + solve + rig_calib.json)
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
-            test_extrinsic.py, test_discovery.py
+            test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
+            rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
 takes/      recordings (gitignored)
@@ -349,6 +437,19 @@ python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNE
 python3 -m tests.test_camera
 # IMU / gravity path tests (CIMU round-trip + optical->view + CPV1 block):
 python3 -m tests.test_imu
+
+# Rig extrinsic calibration (docs/rig_calibration.md). Headless dry-run: two
+# posed sim nodes share a synthetic ball, the solve must recover the pose:
+python3 -m central.preview_server                          # watches rig_calib.json
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --ball 0.05 --pose "0,0,0,0"
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 1 --frames 0 --ball 0.05 --pose "50,1.2,0.15,-0.6"
+python3 -m scripts.calibrate_rig --seconds 12 --ball-radius 0.05   # writes rig_calib.json; relay auto-reloads
+# Real pass: background captured on all sensors, ball the only foreground,
+# --seconds 30 and the REAL ball radius. Or drive it from the viewer's
+# Fine Align button / headless:
+python3 -m scripts.send_command --port 8080 calibrate-fine --seconds 30 --ball-radius 0.05
+python3 -m scripts.send_command --port 8080 calibrate-rough           # Tier-1, zero props
+python3 -m tests.test_rig      # trackers/gates, rough solve, file round-trip
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -442,11 +543,37 @@ trigger-record-download.
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.
-6. **Phase 2 (M5) — Aligned/fused.** Extrinsic calibration (marker + ICP) →
-   aligned multi-view cloud; **TSDF fusion** (Open3D) → watertight mesh →
-   glTF/meshopt export for the renderer.
-7. **Phase 3 — creative FX** (particles from capture geometry); SMPL-X template
-   tracking (approach C) for fixed-topology streamable compression.
+6. 🟡 **Phase 2 (M5) — Aligned/fused.** ✅ *calibration method decided + math
+   core built*: **marker-ball ("wand") calibration**, not ICP (inward-facing
+   circle = no shared surface) and not boards (face ≤2 cameras) — a sphere's
+   fitted center is the same 3D point for every camera, so waving a ball
+   through the volume gives dense 3D↔3D correspondences → closed-form
+   Kabsch per sensor. `central/calibration.py` (fit_sphere with known radius —
+   cap-centroid alone is ~r/2 biased toward each camera; pair_tracks;
+   solve_rigid; solve_rig) unit-tested synthetically to <0.01°/<1 mm
+   (`tests/test_calibration.py`); full procedure + wiring detail in
+   **`docs/rig_calibration.md`**. ✅ *wiring built + verified headless
+   (2026-07-02)*: `scripts/calibrate_rig.py`, relay `--rig-calib` apply
+   (one world frame on the wire, mtime-watched, no viewer change),
+   `rig_poses`/`calib_status` JSON → viewer gizmos + status line,
+   viewer-driven `calibrate_fine`/`calibrate_rough` sessions, Tier-1 rough
+   solve, sim ball/pose mode (ground-truth pose recovered to 0.16°/3 mm
+   end-to-end). **Two-tier design** (see the doc): Tier-1 rough = zero-prop
+   (IMU roll/pitch + body-centroid track for yaw/XY, ~5–10 cm, enough for
+   scene editing); Tier-2 fine = the wand pass (~2–5 mm expected on real
+   ToF). ChArUco was evaluated and rejected (board faces ≤2 cameras →
+   chaining; weak Z; wrong modality — calibrate in the depth space you
+   render). Retroreflective ball in IR = optional segmentation upgrade, same
+   math. ⏳ remaining: the real-hardware wand pass (2 Jetsons, real ball
+   radius); then **TSDF fusion** (Open3D) → watertight mesh → glTF/meshopt
+   export for the renderer.
+7. **Phase 3 — creative FX** (particles from capture geometry); **hands as
+   particle attractors** — no Kinect Body Tracking needed (x86-only): run
+   open-source 2D pose/hands (MediaPipe/RTMPose) on the node's color image
+   (Orin has headroom), look up the aligned depth at each keypoint → 3D hand
+   positions as a tiny metadata message (plan in `docs/rig_calibration.md`);
+   SMPL-X template tracking (approach C) for fixed-topology streamable
+   compression.
 
 Deferred (still wanted, off the MVP critical path): **colored mesh** (bake the
 now-aligned color into `mesh_take.py` per-vertex output); **efficient color

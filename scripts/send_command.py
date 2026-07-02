@@ -65,6 +65,22 @@ def main():
     sc.add_argument("--fps", type=int, choices=[5, 15, 30])
     sc.add_argument("--align", choices=["color_to_depth", "depth_to_color"])
 
+    cf = sub.add_parser("calibrate-fine", help="run the marker-ball wand pass "
+                        "AT THE RELAY (same flow as the viewer's Fine Align "
+                        "button); progress/results go to connected viewers")
+    cf.add_argument("--seconds", type=float, default=30.0)
+    cf.add_argument("--ball-radius", type=float, default=0.05)
+    cf.add_argument("--min-points", type=int, default=None)
+    cf.add_argument("--max-points", type=int, default=None)
+
+    cr = sub.add_parser("calibrate-rough", help="run the Tier-1 rough align "
+                        "at the relay (IMU leveling + body-centroid track)")
+    cr.add_argument("--seconds", type=float, default=10.0)
+    cr.add_argument("--min-points", type=int, default=None)
+
+    sub.add_parser("reload-rig-calib", help="make the relay re-read "
+                   "rig_calib.json now")
+
     args = ap.parse_args()
     if args.cmd == "capture-bg":
         send(args.host, args.port, {"cmd": "capture_bg", "frames": args.frames})
@@ -86,6 +102,21 @@ def main():
         if args.align is not None:
             command["align"] = args.align
         send(args.host, args.port, command)
+    elif args.cmd == "calibrate-fine":
+        command = {"cmd": "calibrate_fine", "seconds": args.seconds,
+                   "ball_radius": args.ball_radius}
+        if args.min_points is not None:
+            command["min_points"] = args.min_points
+        if args.max_points is not None:
+            command["max_points"] = args.max_points
+        send(args.host, args.port, command)
+    elif args.cmd == "calibrate-rough":
+        command = {"cmd": "calibrate_rough", "seconds": args.seconds}
+        if args.min_points is not None:
+            command["min_points"] = args.min_points
+        send(args.host, args.port, command)
+    elif args.cmd == "reload-rig-calib":
+        send(args.host, args.port, {"cmd": "reload_rig_calib"})
 
 
 if __name__ == "__main__":
