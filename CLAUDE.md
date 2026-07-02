@@ -226,6 +226,18 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
+- 🧪 **Multi-core node pipeline** (branch, awaiting hardware test): the node's
+  serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per frame;
+  measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores idle) is
+  now capture → worker pool (`_process_frame`, pure NumPy, GIL-releasing) →
+  ordered sender. pyk4a stays single-threaded on the capture thread; the sender
+  emits in submission order so the wire is unchanged; bounded queue = same
+  backpressure; socket death still raises out of `run()` (systemd restarts).
+  `--workers` (default 2). Default `align` flipped to **color_to_depth**
+  (native depth grid holds a sensor-limited 30 fps; the viewer default was
+  flipped to match — it resync()s align on every connect). Verified headless:
+  stubbed-pyk4a integration test (order, payload integrity, dead-central raise);
+  `tests/test_camera.py` updated for the new default.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
