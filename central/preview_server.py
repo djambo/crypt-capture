@@ -470,7 +470,12 @@ class PreviewServer:
                              rig[sid]["pairs"]))
         # Load-and-announce from the file we just wrote: viewers get the new
         # poses, and the mtime is consumed so the watcher doesn't double-fire.
-        self._load_rig_calib(announce=True, force=True)
+        # (With --rig-calib '' the loader is disabled, so apply in-memory.)
+        if self.rig_calib_path:
+            self._load_rig_calib(announce=True, force=True)
+        else:
+            self._rig, self._rig_meta = calibration.load_rig_calib(path)
+            self._broadcast_text(self._rig_poses_message())
         self._broadcast_text({
             "type": "calib_status", "state": "done", "tier": tier,
             "sensors": {str(sid): {"rms": s["rms"], "pairs": s["pairs"]}
