@@ -32,14 +32,22 @@ import struct
 import threading
 import time
 
+import os
+
 import numpy as np
 
+from central import calibration
 from protocol import control, discovery, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_camera", "set_imu")
+# Browser→RELAY commands, handled here (rig calibration; nothing goes to nodes).
+_RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "reload_rig_calib")
+
+RIG_CALIB_POLL_S = 1.0        # how often the rig_calib.json mtime is checked
+CALIB_STATUS_EVERY_S = 1.0    # progress broadcast cadence during collection
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
@@ -174,7 +182,8 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
 
 
 class PreviewServer:
-    def __init__(self, calib=None, stride=2, max_points=200000):
+    def __init__(self, calib=None, stride=2, max_points=200000,
+                 rig_calib="rig_calib.json"):
         self.calib = calib
         self.stride = stride
         self.max_points = max_points
@@ -187,6 +196,19 @@ class PreviewServer:
         self._sensor_gravity = {}           # sensor_id -> (gx,gy,gz) view-frame
         self._sensor_extrinsic = {}         # sensor_id -> (R 3x3, t 3) or None
         self.frames_relayed = 0
+        # Rig extrinsics (docs/rig_calibration.md): per-sensor (R,t) applied
+        # AFTER unprojection so ONE canonical world frame goes out on the wire
+        # (no CPV1 change). Loaded from rig_calib.json when present, watched
+        # for changes, and (re)written by the viewer-driven calibration
+        # sessions below. No file -> empty dict -> pure no-op (today's path).
+        self.rig_calib_path = rig_calib or None
+        self._rig = {}                      # sensor_id -> (R f32 3x3, t f32 3)
+        self._rig_meta = None               # tier/ref/per-sensor rms+pairs
+        self._rig_mtime = None
+        self._calib_lock = threading.Lock()
+        self._calib_session = None          # active wand/rough collection
+        if self.rig_calib_path:
+            self._load_rig_calib(announce=False)
 
     # --- browser (WebSocket) side ---------------------------------------
     def _ws_accept_loop(self, host, port):
@@ -205,6 +227,10 @@ class PreviewServer:
                 self._clients.append(conn)
             print("[preview] viewer connected %s (%d total)"
                   % (addr[0], len(self._clients)))
+            # A calibrated rig greets each viewer with the camera poses so its
+            # gizmos land at the sensors' true positions immediately.
+            if self._rig:
+                self._send_text(conn, self._rig_poses_message())
             threading.Thread(target=self._ws_reader, args=(conn,),
                              daemon=True).start()
 
@@ -227,7 +253,16 @@ class PreviewServer:
             self._drop(conn)
 
     def _on_browser_command(self, cmd):
-        if isinstance(cmd, dict) and cmd.get("cmd") in _FORWARDED_COMMANDS:
+        if not isinstance(cmd, dict):
+            return
+        name = cmd.get("cmd")
+        if name in _RELAY_COMMANDS:            # handled here, not forwarded
+            if name == "reload_rig_calib":
+                self._load_rig_calib(force=True)
+            else:
+                self._start_calibration(cmd)
+            return
+        if name in _FORWARDED_COMMANDS:
             n = self.send_to_nodes(cmd)
             print("[preview] forwarded %s to %d node(s)" % (cmd, n))
 
@@ -263,6 +298,184 @@ class PreviewServer:
                 conn.sendall(frame)
             except OSError:
                 self._drop(conn)
+
+    def _send_text(self, conn, obj):
+        data = json.dumps(obj).encode("utf-8")
+        try:
+            conn.sendall(websocket.encode_frame(data, opcode=websocket.OP_TEXT))
+        except OSError:
+            self._drop(conn)
+
+    def _broadcast_text(self, obj):
+        frame = websocket.encode_frame(json.dumps(obj).encode("utf-8"),
+                                       opcode=websocket.OP_TEXT)
+        with self._lock:
+            clients = list(self._clients)
+        for conn in clients:
+            try:
+                conn.sendall(frame)
+            except OSError:
+                self._drop(conn)
+
+    # --- rig extrinsics: one canonical world frame on the wire -----------
+    # (docs/rig_calibration.md; solved by scripts/calibrate_rig.py or the
+    # viewer-driven sessions below, stored in rig_calib.json.)
+
+    def _load_rig_calib(self, announce=True, force=False):
+        """(Re)load rig_calib.json if it appeared/changed; clear if it went
+        away. Broadcasts the new camera poses to viewers when announcing."""
+        path = self.rig_calib_path
+        if not path:
+            return
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            if self._rig:                     # file removed -> back to raw
+                self._rig, self._rig_meta, self._rig_mtime = {}, None, None
+                print("[preview] rig calib %s removed — raw sensor frames"
+                      % path)
+                if announce:
+                    self._broadcast_text(self._rig_poses_message())
+            return
+        if not force and mtime == self._rig_mtime:
+            return
+        try:
+            transforms, meta = calibration.load_rig_calib(path)
+        except (ValueError, KeyError, TypeError, OSError) as e:
+            print("[preview] rig calib %s unreadable (%s) — keeping previous"
+                  % (path, e))
+            self._rig_mtime = mtime
+            return
+        self._rig, self._rig_meta, self._rig_mtime = transforms, meta, mtime
+        print("[preview] rig calib %s: tier=%s ref=%s, %d sensor(s)" % (
+            path, meta.get("tier"), meta.get("ref"), len(transforms)))
+        for sid in sorted(transforms):
+            m = meta["sensors"].get(sid, {})
+            print("[preview]   sensor %d: rms %.1f mm over %d pairs"
+                  % (sid, m.get("rms", 0.0) * 1000, m.get("pairs", 0)))
+        if announce:
+            self._broadcast_text(self._rig_poses_message())
+
+    def _rig_watch_loop(self):
+        while True:
+            time.sleep(RIG_CALIB_POLL_S)
+            self._load_rig_calib()
+
+    def _rig_poses_message(self):
+        """The per-sensor [R|t] camera poses for the viewer's gizmos. Empty
+        sensors {} tells the viewer to reset poses to the origin."""
+        meta = self._rig_meta or {"sensors": {}}
+        sensors = {}
+        for sid, (R, t) in self._rig.items():
+            m = meta["sensors"].get(sid, {})
+            sensors[str(sid)] = {
+                "R": np.asarray(R, dtype=float).tolist(),
+                "t": np.asarray(t, dtype=float).tolist(),
+                "rms": m.get("rms"), "pairs": m.get("pairs"),
+            }
+        return {"type": "rig_poses", "tier": meta.get("tier"),
+                "ref": meta.get("ref"), "sensors": sensors}
+
+    # --- viewer-driven calibration sessions (Fine/Rough Align buttons) ---
+
+    def _start_calibration(self, cmd):
+        tier = "fine" if cmd.get("cmd") == "calibrate_fine" else "rough"
+        seconds = float(cmd.get("seconds", 30.0 if tier == "fine" else 10.0))
+        with self._calib_lock:
+            if self._calib_session is not None:
+                self._broadcast_text({
+                    "type": "calib_status", "state": "busy",
+                    "tier": self._calib_session["tier"]})
+                return
+            if tier == "fine":
+                radius = float(cmd.get("ball_radius", 0.05))
+                tracker = calibration.BallTracker(
+                    radius,
+                    min_points=int(cmd.get("min_points", 40)),
+                    max_points=int(cmd.get("max_points", 8000)),
+                    max_fit_rms=float(cmd.get("max_fit_rms", 0.012)))
+                min_pairs = int(cmd.get("min_pairs", 30))
+            else:
+                radius = None
+                tracker = calibration.CentroidTracker(
+                    min_points=int(cmd.get("min_points", 300)))
+                min_pairs = int(cmd.get("min_pairs", 15))
+            session = {"tier": tier, "tracker": tracker, "seconds": seconds,
+                       "deadline": time.time() + seconds,
+                       "ball_radius": radius, "min_pairs": min_pairs}
+            self._calib_session = session
+        print("[preview] %s calibration: collecting for %.0f s%s" % (
+            tier, seconds,
+            " (ball r=%.3f m)" % radius if radius else ""))
+        threading.Thread(target=self._calibration_loop, args=(session,),
+                         daemon=True).start()
+
+    def _calibration_loop(self, session):
+        """Broadcast collection progress ~1 Hz, then solve when time is up."""
+        while True:
+            left = session["deadline"] - time.time()
+            if left <= 0:
+                break
+            self._broadcast_text({
+                "type": "calib_status", "state": "collecting",
+                "tier": session["tier"], "seconds_left": round(left, 1),
+                "centers": {str(s): n
+                            for s, n in session["tracker"].counts().items()}})
+            time.sleep(min(CALIB_STATUS_EVERY_S, left))
+        self._finish_calibration(session)
+
+    def _feed_calibration(self, sensor_id, xyz):
+        """Called from the node frame path with the RAW (pre-rig-transform)
+        view-frame cloud. Each sensor's frames arrive on its own node thread
+        and land in that sensor's own track list, so no lock is needed."""
+        session = self._calib_session
+        if session is None or time.time() > session["deadline"]:
+            return
+        session["tracker"].add(sensor_id, time.time(), xyz)
+
+    def _finish_calibration(self, session):
+        with self._calib_lock:
+            if self._calib_session is not session:
+                return
+            self._calib_session = None
+        tracker = session["tracker"]
+        tier = session["tier"]
+        if tier == "fine":
+            rig = calibration.solve_rig(tracker.tracks,
+                                        min_pairs=session["min_pairs"])
+        else:
+            gravities = {sid: g for sid, g in self._sensor_gravity.items()
+                         if g is not None}
+            rig = calibration.solve_rough(tracker.tracks, gravities,
+                                          min_pairs=session["min_pairs"])
+        if not rig:
+            reason = ("no ball detections passed the gates — background "
+                      "captured on every sensor, ball (only) in frame?"
+                      if tier == "fine" else
+                      "no usable centroid tracks — is a subject in frame?")
+            print("[preview] %s calibration failed: %s" % (tier, reason))
+            self._broadcast_text({
+                "type": "calib_status", "state": "failed", "tier": tier,
+                "reason": reason,
+                "centers": {str(s): n
+                            for s, n in tracker.counts().items()}})
+            return
+        unsolved = sorted(set(tracker.tracks) - set(rig))
+        path = self.rig_calib_path or "rig_calib.json"
+        calibration.save_rig_calib(path, rig, tier=tier, ref=min(rig),
+                                   ball_radius=session["ball_radius"])
+        for sid in sorted(rig):
+            print("[preview] %s calibration sensor %d: rms %.1f mm over %d "
+                  "pairs" % (tier, sid, rig[sid]["rms"] * 1000,
+                             rig[sid]["pairs"]))
+        # Load-and-announce from the file we just wrote: viewers get the new
+        # poses, and the mtime is consumed so the watcher doesn't double-fire.
+        self._load_rig_calib(announce=True, force=True)
+        self._broadcast_text({
+            "type": "calib_status", "state": "done", "tier": tier,
+            "sensors": {str(sid): {"rms": s["rms"], "pairs": s["pairs"]}
+                        for sid, s in rig.items()},
+            "unsolved": [str(s) for s in unsolved]})
 
     # --- node (TCP Frame) side ------------------------------------------
     def _intrinsics(self, sensor_id, w, h):
@@ -354,7 +567,21 @@ class PreviewServer:
                     xyz = xyz[idx]
                     if rgb is not None:
                         rgb = rgb[idx]
+                # An active calibration session consumes the RAW view-frame
+                # cloud (a re-run must not solve on already-transformed points).
+                if self._calib_session is not None:
+                    self._feed_calibration(frame.sensor_id, xyz)
                 gravity = self._sensor_gravity.get(frame.sensor_id)
+                # Rig extrinsic: P_world = R·P + t per sensor, so one canonical
+                # world frame goes out on the wire. The gravity vector rides in
+                # the same frame as the positions, so it rotates too.
+                rig = self._rig.get(frame.sensor_id)
+                if rig is not None:
+                    R, t = rig
+                    xyz = xyz.dot(R.T) + t
+                    if gravity is not None:
+                        g = R.dot(np.asarray(gravity, dtype=np.float32))
+                        gravity = (float(g[0]), float(g[1]), float(g[2]))
                 out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb,
                                     gravity)
                 self._broadcast(out)
@@ -393,6 +620,10 @@ class PreviewServer:
     def run(self, node_host, node_port, ws_host, ws_port):
         threading.Thread(target=self._ws_accept_loop, args=(ws_host, ws_port),
                          daemon=True).start()
+        if self.rig_calib_path:
+            # Live reload: a re-run of scripts/calibrate_rig.py just writes the
+            # file; the relay notices and the clouds re-register in place.
+            threading.Thread(target=self._rig_watch_loop, daemon=True).start()
         self._node_accept_loop(node_host, node_port)   # blocks
 
 
@@ -407,6 +638,12 @@ def main():
                     help="ADDITIONAL relay-side downsample on top of the node's "
                          "--preview-stride (1 = none; total = node*relay)")
     ap.add_argument("--max-points", type=int, default=200000)
+    ap.add_argument("--rig-calib", default="rig_calib.json",
+                    help="per-sensor rig extrinsics (from scripts/"
+                         "calibrate_rig.py or the viewer's Align buttons); "
+                         "loaded if present, watched for changes, and the "
+                         "write target for viewer-driven calibration. "
+                         "'' disables. Absent file = raw frames (as before)")
     ap.add_argument("--rig-id", default=discovery.DEFAULT_RIG_ID,
                     help="discovery rig id nodes use to find this relay")
     ap.add_argument("--discovery-port", type=int, default=discovery.DISCOVERY_PORT)
@@ -414,7 +651,8 @@ def main():
                     help="don't answer LAN discovery broadcasts")
     args = ap.parse_args()
     server = PreviewServer(calib=args.calib, stride=args.stride,
-                           max_points=args.max_points)
+                           max_points=args.max_points,
+                           rig_calib=args.rig_calib)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.
