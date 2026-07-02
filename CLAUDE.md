@@ -346,15 +346,17 @@ protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws rel
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
-central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out)
+central/    recorder.py (records synced takes), preview_server.py (live ws relay + control fan-out),
+            calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay)
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
-            test_extrinsic.py, test_discovery.py
+            test_extrinsic.py, test_discovery.py, test_calibration.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
+            rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
 takes/      recordings (gitignored)
@@ -495,9 +497,20 @@ trigger-record-download.
 4. **M3 — Record + download.** Trigger → node records full-rate to **local
    disk** → HTTP file server → recordings browser + download in UI.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.
-6. **Phase 2 (M5) — Aligned/fused.** Extrinsic calibration (marker + ICP) →
-   aligned multi-view cloud; **TSDF fusion** (Open3D) → watertight mesh →
-   glTF/meshopt export for the renderer.
+6. 🟡 **Phase 2 (M5) — Aligned/fused.** ✅ *calibration method decided + math
+   core built*: **marker-ball ("wand") calibration**, not ICP (inward-facing
+   circle = no shared surface) and not boards (face ≤2 cameras) — a sphere's
+   fitted center is the same 3D point for every camera, so waving a ball
+   through the volume gives dense 3D↔3D correspondences → closed-form
+   Kabsch per sensor. `central/calibration.py` (fit_sphere with known radius —
+   cap-centroid alone is ~r/2 biased toward each camera; pair_tracks;
+   solve_rigid; solve_rig) unit-tested synthetically to <0.01°/<1 mm
+   (`tests/test_calibration.py`); full procedure + wiring plan in
+   **`docs/rig_calibration.md`**. ⏳ remaining: `scripts/calibrate_rig.py`
+   (collect + solve + write `rig_calib.json`), relay `--rig-calib` (apply
+   `P_world = R_i·P + t_i` per sensor → one world frame on the wire, no viewer
+   change), camera poses → viewer gizmos; then **TSDF fusion** (Open3D) →
+   watertight mesh → glTF/meshopt export for the renderer.
 7. **Phase 3 — creative FX** (particles from capture geometry); SMPL-X template
    tracking (approach C) for fixed-topology streamable compression.
 
