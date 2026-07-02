@@ -226,8 +226,11 @@ Two repos:
   path is testable headless; unit-tested (`tests/test_imu.py`) and verified
   end-to-end (sim→relay→browser).
 
-- 🧪 **Multi-core node pipeline** (branch, awaiting hardware re-test): the
-  node's serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per
+- ✅ **Multi-core node pipeline** (hardware-validated on the Orin: subject at
+  ~1.5 m in depth_to_color = a sensor-limited **30 fps**, was 25 serial; under
+  full-room saturation ~0.3 s of pipeline latency is *inherent* — ≥4 frames in
+  flight to keep the workers fed — and only affects the setup view, not the
+  subtracted subject path): the node's serial loop (cap+mask/RVL+color+send on ONE core = stage *sum* per
   frame; measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores
   idle) is now capture thread → worker **PROCESS** pool (`_process_frame`, pure
   NumPy) → ordered sender. **Processes, not threads — hard-won:** the stage is
