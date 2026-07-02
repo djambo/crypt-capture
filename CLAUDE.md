@@ -231,8 +231,12 @@ Two repos:
   measured 40 ms in depth_to_color close-up → 25 fps with 5 Orin cores idle) is
   now capture → worker pool (`_process_frame`, pure NumPy, GIL-releasing) →
   ordered sender. pyk4a stays single-threaded on the capture thread; the sender
-  emits in submission order so the wire is unchanged; bounded queue = same
-  backpressure; socket death still raises out of `run()` (systemd restarts).
+  emits in submission order so the wire is unchanged; socket death still raises
+  out of `run()` (systemd restarts). **Freshness beats completeness:** the queue
+  is shallow (workers+1) and a capture that finds it full is dropped pre-submit
+  (`| drop N` in the stats line) — a deep queue turned overload into ~700 ms of
+  view lag on hardware (hand-wave played back after the wave); live preview must
+  show *now*, and recording (M3) is a separate node-local path.
   `--workers` (default 2). Default `align` flipped to **color_to_depth**
   (native depth grid holds a sensor-limited 30 fps; the viewer default was
   flipped to match — it resync()s align on every connect). Verified headless:

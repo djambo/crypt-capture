@@ -421,12 +421,18 @@ def run(host, port, sensor_id, frames,
     # consecutive frames overlap across cores (the big array ops release the
     # GIL). A dedicated sender drains results IN SUBMISSION ORDER, so the wire
     # is identical to the serial loop's. Per-frame wall time becomes roughly
-    # max(stage)/workers, putting the 30 fps sensor cap back in charge. The
-    # bounded queue is backpressure: if processing falls behind, capture blocks
-    # (same as the old loop) instead of queueing unbounded latency.
-    outq = queue.Queue(maxsize=8)         # ("raw", bytes) | ("frame", fut, ...)
+    # max(stage)/workers, putting the 30 fps sensor cap back in charge.
+    # LIVE SEMANTICS: freshness beats completeness. When the workers can't keep
+    # up (e.g. full unmasked room), any queued backlog is pure *latency* — every
+    # frame waits behind it and the viewer plays the past (hand-wave lag,
+    # observed on hardware with a deep queue). So the queue is shallow
+    # (workers+1) and a capture that finds it full is DROPPED before submit (no
+    # wasted worker time): effective fps = worker throughput, but what's on
+    # screen is always ~now. Recording (M3) is a separate node-local full-rate
+    # path, so dropped preview frames cost nothing.
+    outq = queue.Queue(maxsize=max(1, workers) + 1)
     pool = ThreadPoolExecutor(max_workers=max(1, workers))
-    state = {"exc": None, "n": 0, "win_t0": t0}
+    state = {"exc": None, "n": 0, "win_t0": t0, "dropped": 0}
 
     def sender():
         try:
@@ -458,6 +464,10 @@ def run(host, port, sensor_id, frames,
                         msg = ("sensor %d: %d frames | %.1f fps | %d pts | "
                                "%.0f KB/f" % (sensor_id, state["n"], fps_meas,
                                               pts, kb))
+                        drops = state["dropped"]
+                        if drops:                 # capture ran ahead of workers
+                            state["dropped"] = 0
+                            msg += " | drop %d" % drops
                         if profile:
                             # NOTE: stages overlap now — their sum can exceed
                             # the frame period while fps still holds 30.
@@ -551,9 +561,15 @@ def run(host, port, sensor_id, frames,
                 csrc = None
             td = time.time()
 
+            # Freshness beats completeness (live preview): if the pipeline is
+            # saturated, drop THIS capture rather than queue it as latency. We
+            # are the only producer, so full() -> put() cannot race with itself.
+            if outq.full():
+                state["dropped"] += 1
+                continue
             # Snapshot the live-tunable knobs (the control reader mutates them)
             # and hand the heavy stage to the pool; the sender emits results in
-            # this same submission order. Blocks when the queue is full.
+            # this same submission order.
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s)
             outq.put(("frame", fut, sent, s, td - tc))
