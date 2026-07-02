@@ -234,10 +234,24 @@ Two repos:
   own link speed (verified: a fully stalled client while a fast one held full
   ingest fps). Reader-thread disconnect resets are swallowed. This is the
   relay-side prerequisite for publishing the stream to the internet —
-  topologies, bandwidth math (25k pts ≈ 369 KB/frame ≈ 3 Mbit → fps ≈
-  link_Mbps÷3) and realistic fps targets live in **`docs/remote_streaming.md`**
-  (viewer side: Vercel static deploy + Cloudflare Tunnel for `wss://`; done in
-  the `crypt` repo).
+  topologies, bandwidth math and realistic fps targets live in
+  **`docs/remote_streaming.md`** (viewer side: Vercel static deploy +
+  Cloudflare Tunnel for `wss://`; done in the `crypt` repo).
+- ✅ **`CPV2` wire + permessage-deflate** (the "wire diet"): preview positions
+  are now **bbox-quantized uint16, per-axis delta-encoded** (row 0 absolute,
+  wrap mod 2^16; 9 B/pt with color vs CPV1's 15, quantization error ≤~0.02 mm —
+  far below sensor noise), and `protocol/websocket.py` negotiates
+  **permessage-deflate** (RFC 7692, `no_context_takeover` both ways; browsers
+  offer it automatically, decode is native). The delta encoding is what makes
+  the payload compressible (~1.6× measured; raw float32 barely deflated at
+  1.18×). `_broadcast` encodes plain + deflated at most once per frame and each
+  outbox picks by its handshake. **Measured (sim, 24.6k pts): 369 → 221 KB raw
+  → ~134 KB wire ≈ 33 Mbps @30 fps (was 89)** — 30 fps now fits ordinary
+  broadband, lighter Wi-Fi/multi-viewer LAN too. Spec rewritten in
+  `docs/preview_protocol.md` (CPV1 documented as legacy); headless client
+  parses both + `--deflate`; unit tests `tests/test_websocket.py` +
+  quantization round-trip in `tests/test_imu.py`. Viewer side applied in the
+  same session (CPV2 parse + CPV1 fallback).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -338,7 +352,7 @@ scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless 
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
-            test_extrinsic.py, test_discovery.py
+            test_extrinsic.py, test_discovery.py, test_websocket.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
@@ -498,9 +512,6 @@ browser-side preview decode.
   control channel (`capture_bg`/`set_camera`…). Add a shared token (e.g.
   `?key=` at the WS handshake) before any semi-permanent public link — see
   `docs/remote_streaming.md`.
-- `CPV2` quantized wire (int16 mm + bbox, 9 B/pt, deflate-friendly) — the step
-  that makes 30 fps over ordinary broadband real (`docs/remote_streaming.md`
-  topology C).
 - Confirm whether any Brekel export retains structured per-sensor depth (its
   site blocks automated checks) before committing to a fully custom capture.
 - RVM GPL-3.0 licensing vs a permissive matting model (BGMv2/MediaPipe/SAM2).

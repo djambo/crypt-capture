@@ -80,16 +80,16 @@ the ~30 Mbps node stream **once** regardless of viewer count, and viewer
 fan-out rides datacenter bandwidth. Viewers still need ~90 Mbps *down* for
 30 fps at 25k pts (common on fiber/cable down, rare on mobile).
 
-### C. Wire diet — `CPV2` quantized (the real 30-fps-for-everyone step)
+### C. Wire diet — `CPV2` quantized + deflate ✅ DONE (measured)
 
-15 B/pt is float32-heavy. Quantize positions to **int16 millimetres**
-relative to a per-frame bbox (sub-mm precision over a ±32 m range — far
-below sensor noise): 6+3 = **9 B/pt** → 54 Mbps @30fps/25k. Quantized
-buffers also actually deflate (float32 mantissas don't), so
-permessage-deflate or a zlib pass gets ~1.5–2× more → **~25–35 Mbps for
-full 30 fps** — ordinary broadband. Additive protocol change (new magic or
-flag bit; viewer scales in the shader). This is the highest-leverage next
-implementation step.
+Implemented: positions are **bbox-quantized uint16, per-axis
+delta-encoded** (9 B/pt with color; error ≤~0.02 mm, far below sensor
+noise) and the relay negotiates **permessage-deflate** per connection
+(browsers get it automatically; the delta encoding is what makes the bytes
+compressible — raw float32 barely deflated). Measured on the sim stream at
+24.6k pts: **369 KB → 221 KB raw → ~134 KB wire ≈ 33 Mbps @30 fps** (was
+89). Spec: `docs/preview_protocol.md` (`CPV2`); the viewer parses CPV2
+with a CPV1 fallback. 30 fps now fits ordinary ~35 Mbps broadband.
 
 ### D. Endgame — browser-side decode / WebRTC
 
@@ -103,13 +103,14 @@ bites; overkill for spectating.
 
 ## Realistic frame-rate answer
 
+With `CPV2` + deflate now live (≈1.1 Mbit/frame at 25k pts instead of 3):
+**fps ≈ link_Mbps ÷ 1.1**, so:
+
 | setup | friend's fps |
 |---|---|
-| A, both ends fiber | **30** (sensor cap) |
-| A, typical cable uplink (20–40 Mbps) | 7–13, smooth, newest-frame |
-| B (VPS), friend on ≥100 Mbps down | **30** |
-| B, friend on ~45 Mbps down | ~15 |
-| C (quantize+deflate), any ~30 Mbps broadband | **30** |
+| Tunnel from laptop, ≥35 Mbps uplink | **30** (sensor cap) |
+| Tunnel from laptop, 20 Mbps uplink | ~18, smooth, newest-frame |
+| B (VPS), friend on ≥35 Mbps down | **30** |
 | D (RVL to browser), almost anywhere incl. good 4G/5G | **30** |
 
 Recording is untouched by all of this — it's local-on-node full fidelity,

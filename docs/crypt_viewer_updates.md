@@ -30,6 +30,49 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-02 — `CPV2`: quantized+delta positions (breaking) + permessage-deflate
+**Status: applied 2026-07-02** (same session implemented both sides).
+
+**Summary.** The preview wire format is now **`CPV2`** — built for streaming
+over the internet (Vercel-hosted viewer + tunnel/VPS relay), and it also
+lightens Wi-Fi/multi-viewer LAN loads. Positions go from float32 to
+**bbox-quantized uint16, per-axis delta-encoded**; the relay also negotiates
+**permessage-deflate** (browsers offer it automatically — the WebSocket API
+hands you decompressed bytes, nothing to do). Measured: 25k pts drops from
+369 KB/frame to 221 KB raw / ~134 KB on the wire → **~33 Mbps at 30 fps**
+(was 89). Quantization error ≤ ~0.02 mm — far below Kinect noise.
+
+**Protocol impact (breaking — new magic `CPV2`).** Header unchanged
+(magic/flags/sensor/frame/count; flags bits same). New layout after the header:
+- `bbox` @20 — 6×float32: origin xyz, then per-axis scale (`(max−min)/65535`,
+  0 on a degenerate axis).
+- `positions` @44 — count×3×uint16, quantized then delta-encoded per axis in
+  point order (row 0 absolute, wrap mod 2^16). Decode: accumulate per axis
+  (`a = (a + delta) & 0xffff`), then `p = origin + a * scale`.
+- `rgb` @44+count*6 (bit1), `gravity` right after (bit2, DataView as before).
+
+**Viewer action.** In `parseFrame`, branch on the magic: `CPV2` → read bbox,
+`Uint16Array(buffer, 44, count*3)`, one accumulate+dequantize loop into a
+`Float32Array` (keep returning floats — nothing downstream changes). Keep the
+old `CPV1` branch as a fallback for old relays:
+
+```js
+const o = [dv.getFloat32(20,true), dv.getFloat32(24,true), dv.getFloat32(28,true)]
+const s = [dv.getFloat32(32,true), dv.getFloat32(36,true), dv.getFloat32(40,true)]
+const q = new Uint16Array(buffer, 44, count*3)
+const positions = new Float32Array(count*3)
+let ax=0, ay=0, az=0
+for (let i=0; i<count; i++) {
+  ax=(ax+q[i*3])&0xffff; ay=(ay+q[i*3+1])&0xffff; az=(az+q[i*3+2])&0xffff
+  positions[i*3]=o[0]+ax*s[0]; positions[i*3+1]=o[1]+ay*s[1]; positions[i*3+2]=o[2]+az*s[2]
+}
+```
+
+Full spec: `crypt-capture/docs/preview_protocol.md`; WAN topology + fps
+assessment: `crypt-capture/docs/remote_streaming.md`.
+
+---
+
 ## 2026-06-28 — Removed the depth-mask `set_depth` command (cleanup)
 **Status: NEW — informational.** The near/far depth-mask is gone end-to-end: the
 node streams the **full depth range** and culls via background subtraction + the

@@ -41,8 +41,9 @@ from protocol.frame import read_message
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_camera", "set_imu")
 
-PREVIEW_MAGIC = b"CPV1"
+PREVIEW_MAGIC = b"CPV2"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
+_PREVIEW_BBOX = struct.Struct("<6f")         # bbox origin xyz + scale xyz
 FLAG_POSITIONS = 0x1
 FLAG_RGB = 0x2
 FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (down) vec
@@ -158,6 +159,16 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
 
 
 def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
+    """Pack one `CPV2` preview message. Positions are quantized to uint16
+    against the frame's own bounding box (`p = origin + q * scale`, per
+    axis): 9 B/pt with color instead of CPV1's 15. The quantized values are
+    then **delta-encoded** per axis in point order (first point absolute,
+    wrapping mod 2^16) — points arrive in row-major grid order so
+    neighbours correlate, and small deltas compress far better under the WS
+    permessage-deflate pass than raw float32 mantissas ever did (measured
+    1.6× vs 1.18× on the sim stream). Worst-case rounding error is
+    bbox/65535 per axis (~0.05 mm for a 3 m subject) — far below Kinect
+    depth noise, and the source depth is integer millimetres anyway."""
     count = int(xyz.shape[0])
     flags = (FLAG_POSITIONS
              | (FLAG_RGB if rgb is not None else 0)
@@ -165,7 +176,25 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
-    payload = header + np.ascontiguousarray(xyz, dtype="<f4").tobytes()
+    xyz = np.ascontiguousarray(xyz, dtype=np.float32)
+    if count:
+        origin = xyz.min(axis=0)
+        scale = (xyz.max(axis=0) - origin) / 65535.0
+    else:
+        origin = np.zeros(3, dtype=np.float32)
+        scale = np.zeros(3, dtype=np.float32)
+    # A degenerate axis (all points equal) gets scale 0; divide by 1 there —
+    # the numerator is 0 so q is 0 and dequantizing yields exactly `origin`.
+    safe = np.where(scale > 0.0, scale, 1.0)
+    quant = np.rint((xyz - origin) / safe).clip(0, 65535).astype("<u2")
+    # Delta-encode per axis (uint16 arithmetic wraps mod 2^16 by design;
+    # the decoder accumulates with the same wrap). Row 0 stays absolute.
+    if count > 1:
+        quant[1:] = quant[1:] - quant[:-1]
+    payload = (header
+               + _PREVIEW_BBOX.pack(*(list(origin.astype(float))
+                                      + list(scale.astype(float))))
+               + quant.tobytes())
     if rgb is not None:
         payload += np.ascontiguousarray(rgb, dtype=np.uint8).tobytes()
     if gravity is not None:                  # trailing 12-byte block (after rgb)
@@ -182,8 +211,9 @@ class _ViewerOutbox:
     to whatever frame rate its own link sustains, always showing the newest
     frame."""
 
-    def __init__(self, conn, on_dead):
+    def __init__(self, conn, on_dead, deflate=False):
         self.conn = conn
+        self.deflate = deflate              # permessage-deflate negotiated
         self._on_dead = on_dead             # called (once) when the send fails
         self._cv = threading.Condition()
         self._pending = None
@@ -247,13 +277,16 @@ class PreviewServer:
         while True:
             conn, addr = srv.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            if not websocket.server_handshake(conn):
+            hs = websocket.server_handshake(conn)
+            if not hs:
                 conn.close()
                 continue
             with self._lock:
-                self._clients[conn] = _ViewerOutbox(conn, self._drop)
-            print("[preview] viewer connected %s (%d total)"
-                  % (addr[0], len(self._clients)))
+                self._clients[conn] = _ViewerOutbox(conn, self._drop,
+                                                    deflate=hs["deflate"])
+            print("[preview] viewer connected %s (%d total, deflate %s)"
+                  % (addr[0], len(self._clients),
+                     "on" if hs["deflate"] else "off"))
             threading.Thread(target=self._ws_reader, args=(conn,),
                              daemon=True).start()
 
@@ -309,12 +342,24 @@ class PreviewServer:
     def _broadcast(self, payload):
         """Hand the frame to every viewer's outbox. Never blocks — each
         viewer has its own sender thread and drops stale frames itself, so
-        one slow WAN client can't stall the node loop or other viewers."""
-        frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
+        one slow WAN client can't stall the node loop or other viewers.
+        Encoded (and, where negotiated, deflated) at most once per frame,
+        lazily, and shared across viewers — no_context_takeover makes the
+        compressed bytes connection-independent."""
         with self._lock:
             outboxes = list(self._clients.values())
+        plain = deflated = None
         for outbox in outboxes:
-            outbox.offer(frame)
+            if outbox.deflate:
+                if deflated is None:
+                    deflated = websocket.encode_frame(
+                        payload, opcode=websocket.OP_BINARY, compress=True)
+                outbox.offer(deflated)
+            else:
+                if plain is None:
+                    plain = websocket.encode_frame(
+                        payload, opcode=websocket.OP_BINARY)
+                outbox.offer(plain)
 
     # --- node (TCP Frame) side ------------------------------------------
     def _intrinsics(self, sensor_id, w, h):

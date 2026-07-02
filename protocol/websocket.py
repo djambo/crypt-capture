@@ -4,15 +4,48 @@ Minimal WebSocket (RFC 6455) helpers — stdlib only, no dependencies.
 Just enough to relay binary point-cloud preview frames from the central server
 to browser clients (and to drive a headless test client). Server→client frames
 are unmasked; client→server frames are masked, per spec. This is intentionally
-small: it handles the handshake, binary/close/ping frames, and nothing fancy
-(no fragmentation, no permessage-deflate). The central machine is x86, so this
-is fine; the Jetson never runs it.
+small: it handles the handshake, binary/close/ping frames and (since the WAN
+streaming work) **permessage-deflate** (RFC 7692) — negotiated per connection
+with `no_context_takeover` both ways so every message is an independent raw
+deflate stream (browsers offer the extension by default, so a remote viewer
+gets compressed frames with zero client-side work). No fragmentation. The
+central machine is x86, so this is fine; the Jetson never runs it.
 """
 
 import base64
 import hashlib
 import os
 import struct
+import zlib
+
+# RFC 7692: a message is raw-deflated, SYNC-flushed, and the trailing
+# 00 00 ff ff of the flush is stripped on the wire (re-appended to inflate).
+_DEFLATE_TAIL = b"\x00\x00\xff\xff"
+_DEFLATE_EXT = ("permessage-deflate; server_no_context_takeover; "
+                "client_no_context_takeover")
+
+
+def _offers_deflate(headers):
+    """True if a Sec-WebSocket-Extensions header offers permessage-deflate."""
+    offers = headers.get("sec-websocket-extensions", "")
+    return any(part.split(";")[0].strip() == "permessage-deflate"
+               for part in offers.split(","))
+
+
+def deflate_payload(payload, level=1):
+    """Compress one message per RFC 7692 (no context takeover). Level 1 —
+    this runs per frame per viewer; speed over ratio."""
+    c = zlib.compressobj(level, zlib.DEFLATED, -15)
+    data = c.compress(payload) + c.flush(zlib.Z_SYNC_FLUSH)
+    if data.endswith(_DEFLATE_TAIL):
+        data = data[:-4]
+    return data
+
+
+def inflate_payload(payload):
+    """Decompress one RFC 7692 message (no context takeover)."""
+    d = zlib.decompressobj(-15)
+    return d.decompress(payload + _DEFLATE_TAIL) + d.flush()
 
 _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -62,27 +95,35 @@ def _read_http_headers(sock):
 
 
 def server_handshake(sock):
-    """Complete the server side of the WS upgrade. Returns True on success."""
+    """Complete the server side of the WS upgrade. Returns a dict
+    (`{"deflate": bool}` — whether permessage-deflate was negotiated) on
+    success, None on failure. Truthy/falsy like the old bool."""
     parsed = _read_http_headers(sock)
     if not parsed:
-        return False
+        return None
     _request, headers = parsed
     key = headers.get("sec-websocket-key")
     if not key or "websocket" not in headers.get("upgrade", "").lower():
         sock.sendall(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-        return False
+        return None
+    deflate = _offers_deflate(headers)
     resp = (
         "HTTP/1.1 101 Switching Protocols\r\n"
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
-        "Sec-WebSocket-Accept: %s\r\n\r\n" % accept_key(key)
+        "Sec-WebSocket-Accept: %s\r\n" % accept_key(key)
     )
+    if deflate:
+        resp += "Sec-WebSocket-Extensions: %s\r\n" % _DEFLATE_EXT
+    resp += "\r\n"
     sock.sendall(resp.encode("ascii"))
-    return True
+    return {"deflate": deflate}
 
 
-def client_handshake(sock, host, port, path="/"):
-    """Complete the client side of the WS upgrade. Returns True on success."""
+def client_handshake(sock, host, port, path="/", deflate=False):
+    """Complete the client side of the WS upgrade. Returns a dict
+    (`{"deflate": bool}` — whether the server accepted permessage-deflate)
+    on success, None on failure. Truthy/falsy like the old bool."""
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     req = (
         "GET %s HTTP/1.1\r\n"
@@ -90,21 +131,31 @@ def client_handshake(sock, host, port, path="/"):
         "Upgrade: websocket\r\n"
         "Connection: Upgrade\r\n"
         "Sec-WebSocket-Key: %s\r\n"
-        "Sec-WebSocket-Version: 13\r\n\r\n" % (path, host, port, key)
+        "Sec-WebSocket-Version: 13\r\n" % (path, host, port, key)
     )
+    if deflate:
+        req += "Sec-WebSocket-Extensions: %s\r\n" % _DEFLATE_EXT
+    req += "\r\n"
     sock.sendall(req.encode("ascii"))
     parsed = _read_http_headers(sock)
     if not parsed:
-        return False
+        return None
     status, headers = parsed
-    return "101" in status and headers.get("sec-websocket-accept") == accept_key(key)
+    if "101" not in status or \
+            headers.get("sec-websocket-accept") != accept_key(key):
+        return None
+    return {"deflate": deflate and _offers_deflate(headers)}
 
 
-def encode_frame(payload, opcode=OP_BINARY, mask=False):
-    """Encode one WS frame (FIN=1). Mask only for client→server frames."""
+def encode_frame(payload, opcode=OP_BINARY, mask=False, compress=False):
+    """Encode one WS frame (FIN=1). Mask only for client→server frames.
+    `compress=True` deflates the payload and sets RSV1 — only valid on a
+    connection that negotiated permessage-deflate."""
+    if compress:
+        payload = deflate_payload(payload)
     n = len(payload)
     out = bytearray()
-    out.append(0x80 | (opcode & 0x0F))
+    out.append(0x80 | (0x40 if compress else 0x00) | (opcode & 0x0F))
     mbit = 0x80 if mask else 0x00
     if n < 126:
         out.append(mbit | n)
@@ -130,6 +181,7 @@ def read_frame(sock):
         return None
     b0, b1 = head[0], head[1]
     opcode = b0 & 0x0F
+    rsv1 = b0 & 0x40                # permessage-deflate compressed message
     masked = b1 & 0x80
     length = b1 & 0x7F
     if length == 126:
@@ -152,4 +204,6 @@ def read_frame(sock):
         return None
     if masked and payload:
         payload = bytes(b ^ key[i & 3] for i, b in enumerate(payload))
+    if rsv1 and payload:
+        payload = inflate_payload(payload)
     return opcode, payload

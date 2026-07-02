@@ -2,7 +2,7 @@
 IMU / orientation path tests (headless; numpy required for the relay parts).
 
 Covers the CIMU node->central message round-trip, the optical->view gravity
-transform, and the CPV1 gravity block + flag in build_message.
+transform, and the CPV2 gravity block + flag in build_message.
 
 Run: python3 -m tests.test_imu
 """
@@ -76,21 +76,60 @@ def test_build_message_gravity_block():
         print("build_message gravity: skipped (%s)" % exc)
         return
 
+    # CPV2 layout: 20B header + 24B bbox (origin+scale) + count×3 uint16.
     xyz = np.zeros((4, 3), dtype="<f4")
+    pos_end = 20 + 24 + 4 * 6
     # No gravity -> no flag, no trailing block.
     plain = ps.build_message(0, 0, xyz)
     flags = struct.unpack_from("<I", plain, 4)[0]
     assert not (flags & ps.FLAG_GRAVITY)
-    assert len(plain) == 20 + 4 * 12
+    assert plain[:4] == b"CPV2"
+    assert len(plain) == pos_end
 
     # With gravity -> flag set + a trailing 3×float32 block after the positions.
     g = (0.0, -1.0, 0.0)
     msg = ps.build_message(0, 0, xyz, None, g)
     flags = struct.unpack_from("<I", msg, 4)[0]
     assert flags & ps.FLAG_GRAVITY
-    tail = struct.unpack_from("<3f", msg, 20 + 4 * 12)
+    tail = struct.unpack_from("<3f", msg, pos_end)
     assert tuple(round(c, 5) for c in tail) == g, tail
     print("build_message gravity block: OK")
+
+
+def test_build_message_quantization_roundtrip():
+    try:
+        import numpy as np
+        from central import preview_server as ps
+    except ImportError as exc:
+        print("quantization roundtrip: skipped (%s)" % exc)
+        return
+
+    rng = np.random.RandomState(42)
+    xyz = (rng.rand(1000, 3).astype(np.float32) * [2.0, 2.0, 3.0]
+           + [-1.0, -1.0, -3.5])
+    msg = ps.build_message(0, 0, xyz)
+    origin = np.frombuffer(msg, dtype="<f4", count=3, offset=20)
+    scale = np.frombuffer(msg, dtype="<f4", count=3, offset=32)
+    delta = np.frombuffer(msg, dtype="<u2", count=3000, offset=44).reshape(-1, 3)
+    # Positions are per-axis uint16 deltas (row 0 absolute); accumulate
+    # with the same mod-2^16 wrap the encoder relies on.
+    quant = np.cumsum(delta.astype(np.uint64), axis=0) % 65536
+    back = origin + quant.astype(np.float32) * scale
+    err = np.abs(back - xyz).max()
+    # Worst-case per-axis error is scale/2 = bbox/65535/2 (~0.023 mm for a 3 m
+    # bbox); allow a hair over for float32 arithmetic.
+    assert err <= float(scale.max()) * 0.51 + 1e-7, err
+    assert err < 5e-5, err                   # sub-0.05 mm in absolute terms
+
+    # Degenerate axis (all points share a value) must come back exactly.
+    flat = xyz.copy()
+    flat[:, 1] = 0.25
+    msg = ps.build_message(0, 0, flat)
+    scale = np.frombuffer(msg, dtype="<f4", count=3, offset=32)
+    assert scale[1] == 0.0
+    origin = np.frombuffer(msg, dtype="<f4", count=3, offset=20)
+    assert abs(origin[1] - 0.25) < 1e-7
+    print("quantization roundtrip: OK (max err %.6f mm)" % (err * 1000.0))
 
 
 if __name__ == "__main__":
@@ -98,4 +137,5 @@ if __name__ == "__main__":
     test_dispatch_still_reads_calib()
     test_gravity_to_view()
     test_build_message_gravity_block()
+    test_build_message_quantization_roundtrip()
     print("\nALL IMU TESTS PASSED")
