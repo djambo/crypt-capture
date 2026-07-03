@@ -312,6 +312,27 @@ def test_pose_worker_person_gate():
     print("PoseWorker person gate: OK (ghost frame suppressed)")
 
 
+def test_pose_worker_joint_subset():
+    """--pose-joints minimal: only the requested joints are emitted."""
+    from node.pose import MINIMAL_JOINTS
+    emitted = []
+    est = _FakeEstimator(torso_conf=0.8)
+    depth = np.full((576, 640), 1500, dtype=np.uint16)
+    color = np.zeros((576, 640, 4), dtype=np.uint8)
+    w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
+                   joints=MINIMAL_JOINTS, label="test subset")
+    w.submit(color, depth)
+    deadline = time.time() + 2.0
+    while not emitted and time.time() < deadline:
+        time.sleep(0.01)
+    w.stop()
+    assert emitted
+    ids = set(k[0] for k in emitted[0])
+    assert ids <= set(MINIMAL_JOINTS), ids
+    assert 0 in ids and 9 in ids            # head + wrist made it through
+    print("PoseWorker joint subset: OK (%s)" % sorted(ids))
+
+
 if __name__ == "__main__":
     test_cpos_roundtrip()
     test_joint_tracker()
@@ -323,4 +344,5 @@ if __name__ == "__main__":
     test_one_euro()
     test_pose_worker()
     test_pose_worker_person_gate()
+    test_pose_worker_joint_subset()
     print("\nALL POSE TESTS PASSED")

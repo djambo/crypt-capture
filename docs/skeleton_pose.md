@@ -163,13 +163,23 @@ estimator logs the detected input signature at startup.
   it the frame is suppressed and the viewer's stale timeout hides the
   skeleton. The `pose:` stats line prints the gated-frame %. Raise the gate
   if ghosts persist; lower it if your real skeleton drops out at range.
-- **Skeleton lags the cloud** → inherent: each skeleton is one inference old
-  and updates at pose fps, not cloud fps. Read the `pose: N fps
-  (M ms/infer)` line: at Thunder-on-CPU rates (~5-8 fps, 130-200 ms) the lag
-  is visible. Ladder: **Lightning** (192 px, ~3× faster) → more
-  `--pose-threads` → `onnxruntime-gpu` (NVIDIA's Jetson wheel) → the
-  RTMPose/TensorRT upgrade path. For alignment and hand-attractor use, ~10
-  fps is comfortable.
+- **Skeleton lags / low skeleton framerate** → fixed on three fronts
+  (2026-07-03 second pass): (1) pose emits no longer BLOCK on the frame
+  queue — under full-room load (workers saturated) each skeleton could wait
+  0.5 s, collapsing pose fps to a crawl; now they drop instead
+  (`put_nowait`). (2) the z (depth) One-Euro was too soft and trailed a
+  walking body by ~20 cm in depth — retuned snappy. (3) the VIEWER now
+  dead-reckons each joint along its velocity between samples (clamped
+  150 ms), so markers animate at render fps instead of stepping at pose fps.
+  Also: capture the background! Subject-only streaming unloads the workers
+  AND the wire. If raw inference is still slow, read the `pose: N fps
+  (M ms/infer)` line and climb: **Lightning** (192 px, ~3× faster than
+  Thunder) → `--pose-threads 4` → `onnxruntime-gpu` (NVIDIA's Jetson wheel)
+  → RTMPose/TensorRT.
+- **Minimal skeleton** → `--pose-joints` selects what's emitted: `minimal`
+  (default: head, shoulders, wrists, hips — reads as a person, tracks the
+  hands), `full` (all 17), or a comma list of COCO ids. Emit-side only (the
+  model always computes 17); calibration still gets plenty of joint pairs.
 
 ## Remaining
 

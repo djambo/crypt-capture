@@ -33,6 +33,10 @@ COCO_JOINTS = 17
 # confidence: below it, the whole frame emits nothing (the viewer's stale
 # timeout then hides the skeleton).
 CORE_JOINTS = (5, 6, 11, 12)
+# The "minimal" preset: head + shoulders + wrists + hips — reads as a person,
+# tracks the hands (the FX input), and keeps the skeleton uncluttered. The
+# model always computes all 17 (subsetting is emit-side, not a speedup).
+MINIMAL_JOINTS = (0, 5, 6, 9, 10, 11, 12)
 
 
 def letterbox(rgb, size):
@@ -116,8 +120,12 @@ class JointSmoother(object):
     def filter(self, jid, u, v, z, t):
         st = self._f.get(jid)
         if st is None or t - st[0] > self.RESET_S:
+            # z is deliberately snappier (min_cutoff 1.0, beta 2.0): metres
+            # move at ~1 m/s when walking, and a soft z filter trails the
+            # body in DEPTH — the most visible "skeleton chases the cloud"
+            # artifact on hardware.
             st = [t, OneEuro(0.5, 0.01, 1.0), OneEuro(0.5, 0.01, 1.0),
-                  OneEuro(0.5, 0.3, 1.0)]      # z in metres: speeds ~m/s
+                  OneEuro(1.0, 2.0, 1.0)]
             self._f[jid] = st
         st[0] = t
         u = st[1].filter(u, t)
@@ -207,11 +215,12 @@ class PoseWorker(object):
     REPORT_EVERY = 150
 
     def __init__(self, estimator, emit, min_conf=0.2, gate_conf=0.35,
-                 smooth=True, label="pose"):
+                 smooth=True, joints=None, label="pose"):
         self.estimator = estimator
         self.emit = emit
         self.min_conf = float(min_conf)
         self.gate_conf = float(gate_conf)   # mean CORE_JOINTS confidence gate
+        self.joints = frozenset(joints) if joints is not None else None
         self.smoother = JointSmoother() if smooth else None
         self.label = label
         self.inferences = 0
@@ -272,6 +281,8 @@ class PoseWorker(object):
                 out = []
                 for jid, u, v, conf in kps:
                     if conf < self.min_conf:
+                        continue
+                    if self.joints is not None and jid not in self.joints:
                         continue
                     z = sample_depth(depth, u, v)
                     if self.smoother is not None:
