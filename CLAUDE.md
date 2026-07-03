@@ -294,6 +294,11 @@ Two repos:
   serialised per connection: concurrent writers (per-sensor node threads +
   status broadcasts) interleaved bytes mid-frame on large sends and browsers
   dropped the socket ("Invalid frame header").
+  **Unknown-command NACK (2026-07-03)** — the relay replies
+  `{"type":"cmd_error", cmd}` to browser commands it doesn't recognise
+  instead of dropping them silently; the viewer turns that (plus a 4 s
+  no-reply watchdog) into "update the relay" guidance — version skew between
+  the repos kept masquerading as broken buttons.
   **Headless proof** — `sim_node --ball 0.05 --pose "yaw,x,y,z[,pitch]"
   [--floor Y]` ray-renders a shared wall-clock-driven sphere (+ optionally
   the world floor plane) from a known pose (pose-true IMU vector);

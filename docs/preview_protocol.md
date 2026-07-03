@@ -143,6 +143,7 @@ the additive-extension mechanism for this channel).
 | `{"type":"calib_status","state":"collecting","tier":…,"seconds_left":<s>,"centers":{"<id>":<n>}}` | live progress of a running `calibrate_*` session (~1 Hz). |
 | `{"type":"calib_status","state":"done","tier":…,"sensors":{"<id>":{"rms":<m>,"pairs":<n>}},"unsolved":[…]}` | the solve finished and was applied; per-sensor residuals (mm-scale rms = good wand pass). `unsolved` lists sensors that had tracks but too few matched pairs. |
 | `{"type":"calib_status","state":"failed","reason":…}` / `{"state":"busy"}` / `{"state":"cancelled"}` | nothing usable was collected / a session is already running / a running session was cancelled by `clear_rig_calib` (sent after the clear, so it supersedes any in-flight `collecting`). |
+| `{"type":"cmd_error","cmd":…,"error":"unknown command"}` | the relay received a browser command it doesn't recognise (sent only to that client). The usual cause is a **viewer newer than the relay** — the viewer should tell the operator to update/restart the relay instead of hanging on an optimistic status. |
 
 ## Versioning
 

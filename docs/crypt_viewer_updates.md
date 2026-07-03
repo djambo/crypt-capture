@@ -30,6 +30,20 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — Unknown-command NACK (`cmd_error`) — version-skew diagnosis
+**Status: applied 2026-07-03.**
+
+**Summary.** The relay now replies `{"type":"cmd_error","cmd":…,"error":
+"unknown command"}` (to the sending client only) instead of silently dropping
+a browser command it doesn't recognise. This turns the recurring
+"viewer-newer-than-relay" failure ("I click the button and nothing happens")
+into an explicit, actionable message. **Viewer action (done):** show "the
+relay doesn't know <cmd> — update crypt-capture + restart preview_server" on
+the relevant status line; additionally a 4 s client-side watchdog covers
+relays too old to even send the NACK.
+
+---
+
 ## 2026-07-03 — Per-sensor floor leveling (`calibrate_floor`) + relay write-lock fix
 **Status: applied 2026-07-03** (viewer wired the same day).
 

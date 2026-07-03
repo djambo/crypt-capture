@@ -256,11 +256,11 @@ class PreviewServer:
                         cmd = json.loads(payload.decode("utf-8"))
                     except ValueError:
                         continue
-                    self._on_browser_command(cmd)
+                    self._on_browser_command(cmd, conn)
         finally:
             self._drop(conn)
 
-    def _on_browser_command(self, cmd):
+    def _on_browser_command(self, cmd, conn=None):
         if not isinstance(cmd, dict):
             return
         name = cmd.get("cmd")
@@ -275,6 +275,15 @@ class PreviewServer:
         if name in _FORWARDED_COMMANDS:
             n = self.send_to_nodes(cmd)
             print("[preview] forwarded %s to %d node(s)" % (cmd, n))
+            return
+        # Unknown command: NACK the sender instead of dropping it silently —
+        # the usual cause is a viewer newer than this relay, and the viewer
+        # can then tell the operator to update instead of hanging.
+        print("[preview] unknown browser command %r (viewer newer than "
+              "relay?)" % (name,))
+        if conn is not None:
+            self._send_text(conn, {"type": "cmd_error", "cmd": name,
+                                   "error": "unknown command"})
 
     def send_to_nodes(self, cmd):
         """Send a control command to every connected node. Returns count sent."""
