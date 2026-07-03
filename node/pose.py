@@ -165,9 +165,16 @@ class MoveNetEstimator(object):
         import onnxruntime as ort              # deferred: only with a model
         so = ort.SessionOptions()
         so.intra_op_num_threads = int(threads)  # bound CPU next to RVL workers
+        if providers is None:
+            # Prefer CUDA over the TensorRT EP: TRT compiles an engine at
+            # session start (MINUTES, on every launch unless a cache is
+            # configured) — the CUDA EP starts instantly and is within a few
+            # ms of TRT for a model this small. CPU is the fallback.
+            avail = ort.get_available_providers()
+            providers = [p for p in ("CUDAExecutionProvider",
+                                     "CPUExecutionProvider") if p in avail]                 or avail
         self.sess = ort.InferenceSession(
-            model_path, sess_options=so,
-            providers=providers or ort.get_available_providers())
+            model_path, sess_options=so, providers=providers)
         # What is inference actually running on? CPUExecutionProvider-only =
         # ~10 fps on a Jetson; CUDA/TensorRT = 60+. Logged at node startup so
         # a CPU-only install is impossible to miss.
