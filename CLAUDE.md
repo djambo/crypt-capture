@@ -339,7 +339,15 @@ Two repos:
   inference; per-joint One-Euro smoothing (default on) + a torso-confidence
   person gate `--pose-gate` that suppresses whole frames so skeletons stop
   appearing on furniture — first-hardware findings 2026-07-03, tuning ladder
-  for lag in the doc). Estimator verified against a dummy ONNX with MoveNet's exact interface,
+  for lag in the doc). **Stability pass (2026-07-03 third):**
+  confidence-WEIGHTED smoothing (a low-conf sample — blurred hands — only
+  nudges the filtered joint; conf ≥ 0.6 passes through untouched) + person-
+  gate HYSTERESIS (acquire after 3 consecutive passing frames, release after
+  5 fails) so isolated chair flukes never emit and mid-track confidence dips
+  don't drop the skeleton; both unit-tested. Jitter/confidence also depends
+  on the model: prefer MoveNet **Thunder** (256 px) over Lightning on the
+  Orin — TRT headroom is huge; swap = re-download + clear models/trt_cache.
+  Estimator verified against a dummy ONNX with MoveNet's exact interface,
   then **validated on the Orin** (2026-07-03): bench (`python3 -m node.pose
   <model> [--trt|--cpu]`) measured CPU 25 ms / CUDA 7.3 ms / TensorRT 2.9 ms
   (254 fps sustained) — but in-node inference ran 60-70 ms until the worker

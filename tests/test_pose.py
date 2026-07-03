@@ -271,14 +271,17 @@ def test_pose_worker():
     color = RNG.randint(0, 255, size=(576, 640, 4)).astype(np.uint8)  # BGRA
     w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
                    label="test pose")
-    for _ in range(5):
-        w.submit(color, depth)
+    # Keep submitting until the gate hysteresis acquires (GATE_ON consecutive
+    # confident frames) and the worker emits.
+    submits = 0
     deadline = time.time() + 3.0
     while not emitted and time.time() < deadline:
+        w.submit(color, depth)
+        submits += 1
         time.sleep(0.01)
     w.stop()
     assert emitted, "worker emitted nothing"
-    assert est.calls <= 5                       # never more than submitted
+    assert est.calls <= submits                 # never more than submitted
     kps = emitted[0]
     assert [k[0] for k in kps] == [0, 9, 5, 6, 11, 12]  # low-conf dropped
     jid, u, v, z, conf = kps[0]
@@ -291,7 +294,8 @@ def test_pose_worker():
     kind, msg = read_message(b)
     b.close()
     assert kind == "pose" and len(msg["keypoints"]) == 6
-    print("PoseWorker: OK (%d inferences for 5 submits)" % est.calls)
+    print("PoseWorker: OK (%d inferences for %d submits)"
+          % (est.calls, submits))
 
 
 def test_pose_worker_person_gate():
@@ -310,6 +314,85 @@ def test_pose_worker_person_gate():
     w.stop()
     assert est.calls >= 1 and not emitted, (est.calls, emitted)
     print("PoseWorker person gate: OK (ghost frame suppressed)")
+
+
+class _ScriptedEstimator(object):
+    """Torso confidence follows a per-call script (chair flicker etc.)."""
+
+    def __init__(self, script):
+        self.calls = 0
+        self.script = script
+
+    def infer(self, rgb):
+        c = self.script[min(self.calls, len(self.script) - 1)]
+        self.calls += 1
+        return [(5, 120.0, 120.0, c), (6, 160.0, 120.0, c),
+                (11, 125.0, 200.0, c), (12, 155.0, 200.0, c)]
+
+
+def _step(w, est, color, depth):
+    """Feed the threaded worker exactly ONE frame and wait for its inference
+    (+ a beat for the emit), so scripted sequences are deterministic."""
+    target = est.calls + 1
+    w.submit(color, depth)
+    deadline = time.time() + 2.0
+    while est.calls < target and time.time() < deadline:
+        time.sleep(0.002)
+    assert est.calls == target, "worker never inferred"
+    time.sleep(0.02)
+
+
+def test_pose_worker_gate_hysteresis():
+    """Isolated confident frames (furniture flukes) never acquire; a person
+    needs GATE_ON consecutive passes; brief dips while tracked skip frames
+    without releasing; GATE_OFF consecutive fails release."""
+    emitted = []
+    hi, lo = 0.9, 0.05
+    #        flicker (never 3 in a row)   acquire    dip(4)          release(5)         fluke
+    script = [hi, lo, hi, hi, lo, hi, lo] + [hi] * 3 + [lo] * 4 + [hi] + [lo] * 5 + [hi]
+    est = _ScriptedEstimator(script)
+    depth = np.full((576, 640), 1500, dtype=np.uint16)
+    color = np.zeros((576, 640, 4), dtype=np.uint8)
+    w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
+                   gate_conf=0.35, label="test hysteresis")
+    for _ in range(7):                       # flicker: no 3 consecutive
+        _step(w, est, color, depth)
+    assert not emitted, "flicker frames acquired a person"
+    for _ in range(3):                       # 3 consecutive -> acquired
+        _step(w, est, color, depth)
+    assert len(emitted) == 1, emitted        # emits on the 3rd pass
+    for _ in range(4):                       # 4-frame dip: skip, stay present
+        _step(w, est, color, depth)
+    assert len(emitted) == 1
+    _step(w, est, color, depth)              # next pass emits immediately
+    assert len(emitted) == 2
+    for _ in range(5):                       # 5 fails -> released
+        _step(w, est, color, depth)
+    _step(w, est, color, depth)              # single pass after release
+    assert len(emitted) == 2, "released person emitted on one fluke frame"
+    w.stop()
+    print("PoseWorker gate hysteresis: OK (%d emits for %d frames)"
+          % (len(emitted), est.calls))
+
+
+def test_conf_weighted_smoothing():
+    """A low-confidence jump moves the filtered joint much less than the same
+    jump at high confidence — glitchy detections can't yank the skeleton."""
+    js = JointSmoother()
+    for jid in (1, 2):                       # settle both joints at (200,200)
+        for k in range(30):
+            js.filter(jid, 200.0, 200.0, 1.5, k / 30.0, 0.9)
+    t = 30 / 30.0
+    u_lo, _, _ = js.filter(1, 230.0, 200.0, 1.5, t, conf=0.25)  # shaky jump
+    u_hi, _, _ = js.filter(2, 230.0, 200.0, 1.5, t, conf=0.9)   # confident
+    d_lo, d_hi = u_lo - 200.0, u_hi - 200.0
+    assert d_hi > 0 and 0 < d_lo < 0.6 * d_hi, (d_lo, d_hi)
+    # Full-confidence behaviour is the plain One-Euro path (backwards compat).
+    js2 = JointSmoother()
+    a = js2.filter(3, 100.0, 100.0, 1.0, 0.0)          # default conf=1.0
+    assert a == (100.0, 100.0, 1.0)
+    print("conf-weighted smoothing: OK (jump response %.1f px low-conf vs "
+          "%.1f px high-conf)" % (d_lo, d_hi))
 
 
 def test_pose_process():
@@ -353,9 +436,9 @@ def test_pose_worker_joint_subset():
     color = np.zeros((576, 640, 4), dtype=np.uint8)
     w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
                    joints=MINIMAL_JOINTS, label="test subset")
-    w.submit(color, depth)
     deadline = time.time() + 2.0
     while not emitted and time.time() < deadline:
+        w.submit(color, depth)
         time.sleep(0.01)
     w.stop()
     assert emitted
@@ -376,6 +459,8 @@ if __name__ == "__main__":
     test_one_euro()
     test_pose_worker()
     test_pose_worker_person_gate()
+    test_pose_worker_gate_hysteresis()
+    test_conf_weighted_smoothing()
     test_pose_worker_joint_subset()
     test_pose_process()
     print("\nALL POSE TESTS PASSED")

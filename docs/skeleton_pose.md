@@ -194,13 +194,38 @@ the CPU handed back to the frame pipeline.
   (u, v and z; ~3× less jitter at rest, <10 px lag at fast motion; filter
   state resets when a joint vanishes for 0.5 s so re-appearing joints snap
   instead of sliding). `--pose-no-smooth` for raw output.
+  **Confidence-weighted (2026-07-03 third pass):** jitter correlates with low
+  per-joint confidence (motion-blurred hands are the worst case), so each
+  sample is pulled toward the previous filtered position by a weight
+  proportional to its confidence before the One-Euro pass — a joint at
+  conf ≥ 0.6 passes through untouched, a shaky conf-0.25 detection only
+  nudges it ~40%. Hands stay locked on the body instead of chasing glitches.
+- **Jittery / low-confidence overall** → check WHICH MoveNet you're running:
+  the node's startup line prints the input size — `192x192` = **Lightning**
+  (fastest, noisiest), `256x256` = **Thunder** (markedly more accurate and
+  confident). With TensorRT there is massive headroom (Lightning benches
+  2.9 ms), so **Thunder is the right choice on the Orin**:
+  ```bash
+  sudo systemctl stop kinect-node
+  curl -L -o models/movenet.onnx \
+    https://huggingface.co/Xenova/movenet-singlepose-thunder/resolve/main/onnx/model.onnx
+  rm -rf models/trt_cache        # engine was built for the old model
+  sudo systemctl start kinect-node   # first start recompiles TRT (~1-3 min)
+  ```
 - **Skeletons on furniture** → MoveNet always emits 17 keypoints, garbage
   included, and per-joint confidence alone lets flukes through. The **person
   gate** now requires mean TORSO confidence (shoulders+hips, joints
   5/6/11/12) ≥ `--pose-gate` (default 0.35) before emitting anything; below
   it the frame is suppressed and the viewer's stale timeout hides the
-  skeleton. The `pose:` stats line prints the gated-frame %. Raise the gate
-  if ghosts persist; lower it if your real skeleton drops out at range.
+  skeleton. The `pose:` stats line prints the gated-frame %.
+  **Hysteresis (2026-07-03 third pass):** a chair can fluke past the gate for
+  a frame or two, so acquiring a person now takes **3 consecutive** passing
+  frames (~0.1 s — isolated flukes never emit at all) and releasing takes 5
+  consecutive fails (brief confidence dips mid-track skip frames — the viewer
+  dead-reckons across them — without dropping the skeleton or resetting the
+  smoothing). If a ghost still persists (something that passes the gate
+  *continuously*), raise `--pose-gate` to ~0.5 on that node; lower it if your
+  real skeleton drops out at range.
 - **Skeleton lags / low skeleton framerate** → fixed on three fronts
   (2026-07-03 second pass): (1) pose emits no longer BLOCK on the frame
   queue — under full-room load (workers saturated) each skeleton could wait
@@ -221,10 +246,10 @@ the CPU handed back to the frame pipeline.
 
 ## Remaining
 
-1. Bench on the Orin (pose fps + confirm cloud fps unchanged via `--profile`);
-   optional `onnxruntime-gpu` (NVIDIA's Jetson wheel) or the RTMPose/TensorRT
-   upgrade if CPU inference is too slow or contends with the RVL workers.
-2. Decide the Nano: skip pose there, or central-side fallback (above).
+1. Decide the Nano: skip pose there (current profile default), or the
+   central-side fallback (above).
+2. Relay-side skeleton fusion across sensors (confidence-weighted per-joint
+   merge in the calibrated world frame).
 3. Creative hooks: hands (joints 9/10) → particle attractors in the viewer;
    gesture triggers later.
 

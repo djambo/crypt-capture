@@ -111,16 +111,29 @@ class OneEuro(object):
 class JointSmoother(object):
     """Per-joint One-Euro smoothing for (u, v) pixels + z metres. A joint
     unseen for `reset_s` drops its filter state, so a re-appearing joint
-    snaps to its new position instead of sliding across the frame."""
+    snaps to its new position instead of sliding across the frame.
+
+    Confidence-weighted: keypoint jitter correlates strongly with LOW model
+    confidence (motion-blurred hands are the worst case), so before the
+    One-Euro pass each sample is pulled toward the previous filtered position
+    by a weight proportional to its confidence. A confident joint
+    (>= CONF_FULL) passes through untouched; a shaky low-confidence one only
+    nudges the filtered position — the joint stays locked on the body instead
+    of chasing every glitchy detection. The blend also damps the derivative
+    One-Euro sees, so low-confidence "fast motion" can't kick the filter open.
+    """
 
     RESET_S = 0.5
+    CONF_FULL = 0.6      # confidence at/above which a sample is fully trusted
+    W_MIN = 0.3          # floor: even a barely-kept sample moves the joint some
 
     def __init__(self):
         self._f = {}                 # joint_id -> (t_last, fu, fv, fz)
 
-    def filter(self, jid, u, v, z, t):
+    def filter(self, jid, u, v, z, t, conf=1.0):
         st = self._f.get(jid)
-        if st is None or t - st[0] > self.RESET_S:
+        fresh = st is None or t - st[0] > self.RESET_S
+        if fresh:
             # z is deliberately snappier (min_cutoff 1.0, beta 2.0): metres
             # move at ~1 m/s when walking, and a soft z filter trails the
             # body in DEPTH — the most visible "skeleton chases the cloud"
@@ -129,6 +142,12 @@ class JointSmoother(object):
                   OneEuro(1.0, 2.0, 1.0)]
             self._f[jid] = st
         st[0] = t
+        if not fresh and conf < self.CONF_FULL:
+            w = max(self.W_MIN, conf / self.CONF_FULL)
+            u = st[1]._x + w * (u - st[1]._x)   # OneEuro._x = last filtered
+            v = st[2]._x + w * (v - st[2]._x)
+            if z > 0 and st[3]._t is not None:
+                z = st[3]._x + w * (z - st[3]._x)
         u = st[1].filter(u, t)
         v = st[2].filter(v, t)
         if z > 0:
@@ -257,6 +276,14 @@ class PoseWorker(object):
     """
 
     REPORT_EVERY = 150
+    # Person-gate HYSTERESIS: furniture flukes past the confidence gate for a
+    # frame or two, a real person passes it continuously. Acquiring the person
+    # takes GATE_ON consecutive passing frames (~0.1 s at camera rate — kills
+    # chair ghosts, imperceptible on entry); releasing takes GATE_OFF
+    # consecutive failing frames (brief confidence dips mid-track don't drop
+    # the skeleton or reset the smoothing).
+    GATE_ON = 3
+    GATE_OFF = 5
 
     def __init__(self, estimator, emit, min_conf=0.2, gate_conf=0.35,
                  smooth=True, joints=None, label="pose"):
@@ -269,6 +296,9 @@ class PoseWorker(object):
         self.label = label
         self.inferences = 0
         self.gated = 0                      # frames rejected by the gate
+        self._present = False               # hysteresis state
+        self._pass_streak = 0
+        self._fail_streak = 0
         self.last_ms = 0.0
         self._cond = threading.Condition()
         self._latest = None
@@ -312,14 +342,29 @@ class PoseWorker(object):
             now = time.time()
             self.last_ms = (now - t0) * 1000.0
             self.inferences += 1
-            # Person gate: no credible torso -> no person -> emit nothing
-            # (and reset smoothing so a returning person doesn't inherit
-            # filter state aimed at wherever the ghost was).
+            # Person gate with hysteresis: a frame both PASSES the torso-
+            # confidence gate and the person must be ACQUIRED (GATE_ON
+            # consecutive passes) before anything emits. Isolated confident
+            # frames on furniture never acquire; brief dips while tracked
+            # skip the frame (the viewer dead-reckons) without releasing.
             core = [c for j, _u, _v, c in kps if j in CORE_JOINTS]
-            if not core or sum(core) / len(core) < self.gate_conf:
+            passed = bool(core) and sum(core) / len(core) >= self.gate_conf
+            if passed:
+                self._pass_streak += 1
+                self._fail_streak = 0
+                if self._pass_streak >= self.GATE_ON:
+                    self._present = True
+            else:
+                self._fail_streak += 1
+                self._pass_streak = 0
+                if self._present and self._fail_streak >= self.GATE_OFF:
+                    # Person gone: reset smoothing so a returning person
+                    # doesn't inherit filter state aimed at the old spot.
+                    self._present = False
+                    if self.smoother is not None:
+                        self.smoother.reset()
+            if not (passed and self._present):
                 self.gated += 1
-                if self.smoother is not None:
-                    self.smoother.reset()
                 out = []
             else:
                 out = []
@@ -330,7 +375,8 @@ class PoseWorker(object):
                         continue
                     z = sample_depth(depth, u, v)
                     if self.smoother is not None:
-                        u, v, z = self.smoother.filter(jid, u, v, z, now)
+                        u, v, z = self.smoother.filter(jid, u, v, z, now,
+                                                       conf)
                     out.append((jid, u, v, z, conf))
             if out:
                 try:
