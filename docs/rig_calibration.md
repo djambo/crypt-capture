@@ -157,29 +157,47 @@ the detection math:
 3D-printing a hollow ~18 cm sphere in light PLA on a ~30 cm dowel is exactly
 right.
 
-## The fine (Tier-2) wand procedure — operator's view
+## The fine (Tier-2) wand procedure — operator's view (STOP & GO, default)
+
+The fine pass is now **stop-and-go**: move the ball to a spot, **hold it still**,
+it captures that position, move to the next. This is the default because it is
+*more accurate* on this rig, not just easier — see "Why stop-and-go" below.
 
 1. All nodes streaming. **Capture Background** on every sensor with the scene
-   empty — this is now **required** (the viewer refuses Fine Align without it):
-   the ball is segmented out of the *background-subtracted foreground*, so the
-   room/floor must be gone, leaving only you + the ball to cluster.
-2. Walk in holding the **calibration ball** (see above) out on its stick. The
-   ball + you are the only foreground; the relay finds the ball as the best
-   *spherical cluster* per frame (`segment_ball`), so **your body being in
-   frame is fine** — it's a separate, non-spherical cluster and is ignored.
-3. **Wave the ball slowly through the whole capture volume** for ~30 s —
-   cover left/right, up/down, near/far; slow beats fast (motion skew).
-   **Watch the viewer**: each camera that currently has the ball draws a
-   translucent **LOCK sphere** on it, and the status line shows a per-sensor
-   `● rms` (locked) / `○` (searching) indicator with a running detection count.
-   If a camera never locks, it can't see the ball there — move through its view.
-4. On "done" it reports per-sensor RMS residual — **millimetres = good;
-   centimetres = re-run** (ball waved too fast, a sensor barely saw it, or the
-   radius is wrong).
-5. Transforms are saved to `rig_calib.json` and applied by the relay from then
-   on. Re-run only when cameras physically move. A bad pass is undone with the
-   viewer's **Reset** button (`clear_rig_calib`) — it also cancels a
-   still-running collection.
+   empty — **required** (the viewer refuses Fine Align without it): the ball is
+   segmented out of the *background-subtracted foreground*, so the room/floor
+   must be gone, leaving only you + the ball to cluster.
+2. Walk in holding the **calibration ball** (see above) out on its stick. Press
+   **Fine Align**. The relay finds the ball as the best *spherical cluster* per
+   frame (`segment_ball`), so **your body in frame is fine**.
+3. **Move the ball to a position and HOLD it still.** When a camera's detection
+   settles (spread stays under ~1 cm for ~0.3 s) its **LOCK sphere turns green**;
+   when ≥2 cameras are settled at the same instant the relay **captures** that
+   position (one averaged sample per still camera) and the status line's capture
+   count ticks up. Then **move to a new spot** (≥ ~8 cm away) and hold again.
+4. **Cover the whole volume** — ~12+ spots, spread near/far, high/low, and
+   across every camera's view. It **auto-finishes** once the target number of
+   captures is reached (or the time cap); each camera must contribute to enough
+   shared holds (`min_pairs`, default 6) or it comes back unsolved.
+5. On "done" it reports per-sensor RMS residual — **millimetres = good**. A bad
+   pass is undone with the viewer's **Reset** button (`clear_rig_calib`), which
+   also cancels a running collection.
+
+**Why stop-and-go (and not continuous waving).** Without hardware frame-sync —
+and especially on a slow node (an old Nano at ~10–15 fps) — the cameras grab the
+ball at *different instants*. While the ball MOVES, each camera therefore sees it
+at a different physical position, so the paired 3D points don't correspond: the
+error is `speed × time-skew`, tens of millimetres, present in *every* pair, and
+no amount of averaging or RANSAC removes a bias that is in all of them. Holding
+the ball **still** eliminates it outright — a stationary ball is at the same
+place no matter when each camera sampled it — and averaging the still window also
+beats down ToF noise. (`central/calibration.StationaryBallSampler`; unit-tested:
+two cameras sampled at different instants recover the pose to 0.02°/0.4 mm.)
+
+**Continuous mode** (the old wave-continuously behaviour, `BallTracker`) remains
+available for **hardware-synced** rigs via `{cmd:"calibrate_fine",
+mode:"continuous"}` (or `send_command … --mode continuous`), where it's faster.
+The viewer's button uses `mode:"stationary"`.
 
 **Detection (`segment_ball`, `central/calibration.py`).** The old path fit a
 sphere to the *whole* per-sensor cloud, so it only worked when the ball was the

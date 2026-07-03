@@ -30,6 +30,49 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — Fine Align: stop-and-go (stationary) sampling + robust solve
+**Status: applied 2026-07-03** (viewer wired same session; design:
+crypt-capture `docs/rig_calibration.md`).
+
+**Summary.** Real-hardware fine passes were error-prone: continuous waving on an
+unsynced / slow rig pairs each camera's ball centre by nearest timestamp, but the
+cameras grab a MOVING ball at different instants → paired points are the ball at
+different physical places (error = speed × time-skew, tens of mm). Fine is now
+**stop-and-go**: move the ball, HOLD it still, the relay captures that position
+(one averaged sample per still camera), move to the next spot. A stationary ball
+is at the same place regardless of per-camera timing, so the skew error is gone.
+Also: the rigid solve is now RANSAC-robust (a few leg/ball mis-locks can't
+corrupt it) and the fine world is kept IMU-leveled (refines the rough frame).
+
+**Protocol impact (additive, TEXT + one command field):**
+- `calibrate_fine` accepts `"mode": "stationary"` (default) | `"continuous"`.
+  The viewer sends `"stationary"`. `"continuous"` = the old behaviour (for
+  hardware-synced rigs).
+- `calib_status` `collecting` messages for a stationary fine run now carry:
+  ```json
+  { "type":"calib_status", "state":"collecting", "tier":"fine",
+    "mode":"stationary", "captures": 7, "target_captures": 14,
+    "capturing": true,                      // a hold was just captured; move on
+    "seconds_left": 41.0,
+    "centers": { "0": 7, "1": 6 },          // committed samples per sensor
+    "balls": { "0": { "c":[x,y,z], "rms":0.0006, "n":740, "still": true } } }
+  ```
+  The new bits: top-level `mode`/`captures`/`target_captures`/`capturing`, and a
+  per-sensor **`still`** boolean inside `balls` (that camera has settled — a
+  capture is imminent). Feedback now streams ~4 Hz (was 1 Hz).
+
+**Viewer action (done):**
+- `CalibBallMarker`: the LOCK sphere turns **green + brighter** when `still` is
+  true (the "hold it right there" cue); tinted/dim while moving.
+- Status line (stop&go): `Fine (stop&go): 7/14 captured — move to a new spot ·
+  41s · s0 ✓still 7 · s1 ●moving 6` (✓ settled, ● detecting-but-moving, ○
+  searching). Continuous mode keeps the old `●rms/○` line.
+- `World.fineAlign` sends `mode:"stationary"`; `FINE_ALIGN_SECONDS` raised to 60
+  (backstop — it auto-finishes at the capture target). Tooltip rewritten for the
+  hold-still flow.
+
+---
+
 ## 2026-07-03 — Fine Align: ball segmentation + live LOCK feedback
 **Status: applied 2026-07-03** (viewer wired the same session; design:
 crypt-capture `docs/rig_calibration.md`).

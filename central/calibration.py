@@ -30,6 +30,8 @@ source-agnostic and can place each sensor's gizmo from the same transforms.
 """
 
 import json
+import threading
+from collections import deque
 
 import numpy as np
 
@@ -286,7 +288,7 @@ def solve_rig(tracks, ref=None, max_dt=0.02, min_pairs=30, gravities=None,
         if A.shape[0] < min_pairs:
             continue
         sol = solve_rigid_ransac(A, B, threshold=ransac_threshold,
-                                 min_inliers=max(12, min_pairs // 2))
+                                 min_inliers=max(4, min_pairs // 2))
         if sol is None:                            # no clean consensus -> unsolved
             continue
         R, t, rms, inliers = sol
@@ -357,6 +359,126 @@ class BallTracker:
 
     def counts(self):
         return {sid: len(track) for sid, track in self.tracks.items()}
+
+
+class StationaryBallSampler:
+    """Stop-and-go wand sampling for UNSYNCED / slow rigs.
+
+    Continuous waving pairs each camera's ball centre by nearest timestamp, but
+    with no hardware frame-sync (and a slow node) the cameras grab the ball at
+    different instants — while it MOVES — so the paired 3D points are the ball at
+    different physical positions (error = speed x time-skew, tens of mm on a
+    Nano). Holding the ball STILL removes that error entirely: a stationary ball
+    is in the same place no matter when each camera sampled it.
+
+    So this watches each camera's detection settle (a small rolling window whose
+    spread stays under `still_radius` for at least `min_still_time`), and when a
+    quorum of cameras is simultaneously still AND the ball has moved to a NEW
+    spot since the last capture (>= `move_dist`), it commits ONE averaged sample
+    per still camera under a shared capture id. Those ids act as exact
+    correspondence keys (solve_rig pairs by them, no max_dt guesswork), and the
+    per-window averaging also beats down ToF noise. The operator's loop is:
+    move the orb, hold, it captures, move again.
+    """
+
+    def __init__(self, radius, still_window=0.6, min_still_time=0.3,
+                 still_radius=0.010, move_dist=0.08, min_still_sensors=2,
+                 min_samples=3, min_points=40, max_points=8000,
+                 max_fit_rms=0.012, min_aspect=0.5):
+        self.radius = float(radius)
+        self.still_window = float(still_window)
+        self.min_still_time = float(min_still_time)
+        self.still_radius = float(still_radius)
+        self.move_dist = float(move_dist)
+        self.min_still_sensors = int(min_still_sensors)
+        self.min_samples = int(min_samples)
+        self.min_points = int(min_points)
+        self.max_points = int(max_points)
+        self.max_fit_rms = float(max_fit_rms)
+        self.min_aspect = float(min_aspect)
+        self._lock = threading.Lock()
+        self.tracks = {}            # sid -> [(capture_id, center)]
+        self.buffers = {}           # sid -> deque[(t, center)]
+        self.still = {}             # sid -> bool (latest)
+        self.last = {}              # sid -> (center, rms, n) latest detection
+        self.captured_centers = {}  # sid -> center at the last committed capture
+        self.captures = 0
+        self.state = "armed"        # "armed" (ready) | "captured" (await move)
+        self.rejected = {}
+
+    def _reject(self, sid, reason):
+        r = self.rejected.setdefault(sid, {"count": 0, "fit": 0})
+        r[reason] += 1
+        return reason
+
+    def add(self, sensor_id, t_seconds, points):
+        p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if p.shape[0] < self.min_points:
+            with self._lock:
+                self.still[sensor_id] = False
+            return self._reject(sensor_id, "count")
+        c, rms, n = segment_ball(p, self.radius, min_points=self.min_points,
+                                 max_points=self.max_points,
+                                 max_fit_rms=self.max_fit_rms,
+                                 min_aspect=self.min_aspect)
+        if c is None:
+            with self._lock:
+                self.still[sensor_id] = False
+            return self._reject(sensor_id, "fit")
+        with self._lock:
+            self.last[sensor_id] = (c, rms, n)
+            buf = self.buffers.setdefault(sensor_id, deque())
+            buf.append((float(t_seconds), c))
+            while buf and t_seconds - buf[0][0] > self.still_window:
+                buf.popleft()
+            self.still[sensor_id] = self._is_still(buf)
+            self._try_capture()
+            return "ok"
+
+    def _is_still(self, buf):
+        if len(buf) < self.min_samples:
+            return False
+        if buf[-1][0] - buf[0][0] < self.min_still_time:
+            return False
+        pts = np.array([c for _, c in buf])
+        spread = float(np.linalg.norm(pts - pts.mean(axis=0), axis=1).max())
+        return spread < self.still_radius
+
+    def _window_center(self, sid):
+        buf = self.buffers.get(sid)
+        if not buf:
+            return None
+        return np.array([c for _, c in buf]).mean(axis=0)
+
+    def _try_capture(self):
+        """Global state machine (called under the lock). One capture per hold:
+        commit when a quorum is still, then wait for the ball to move away
+        before arming the next one."""
+        still_sensors = [s for s, v in self.still.items() if v]
+        if self.state == "armed":
+            if len(still_sensors) >= self.min_still_sensors:
+                cid = float(self.captures + 1)
+                self.captured_centers = {}
+                for s in still_sensors:
+                    ctr = self._window_center(s)
+                    if ctr is None:
+                        continue
+                    self.tracks.setdefault(s, []).append((cid, ctr))
+                    self.captured_centers[s] = ctr
+                self.captures += 1
+                self.state = "captured"
+        else:                                  # captured: re-arm once moved away
+            for s, cap in self.captured_centers.items():
+                cur = self.last.get(s)
+                if cur is not None and \
+                        np.linalg.norm(cur[0] - cap) >= self.move_dist:
+                    self.state = "armed"
+                    self.captured_centers = {}
+                    break
+
+    def counts(self):
+        with self._lock:
+            return {sid: len(t) for sid, t in self.tracks.items()}
 
 
 class CentroidTracker:

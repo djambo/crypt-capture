@@ -9,7 +9,8 @@ Run: python3 -m tests.test_calibration
 import numpy as np
 
 from central.calibration import (fit_sphere, pair_tracks, solve_rigid,
-                                 solve_rig, segment_ball)
+                                 solve_rig, segment_ball,
+                                 StationaryBallSampler)
 
 RNG = np.random.RandomState(7)
 BALL_R = 0.05  # 10 cm ball
@@ -212,6 +213,52 @@ def test_solve_rig_robust_to_outliers():
           % (rot_err, t_err * 1000, rig[1]["pairs"], len(bad_track)))
 
 
+def test_stationary_sampler():
+    """Stop-and-go sampling: hold the ball at several spots (still), moving
+    between them. The sampler must commit ONE clean averaged sample per hold per
+    camera, and solve_rig on those must recover the pose — even though the two
+    cameras are sampled at DIFFERENT instants (the unsynced-rig case)."""
+    R1 = random_rotation()
+    t1 = np.array([1.2, -0.1, 0.5])
+    poses = {0: (np.eye(3), np.zeros(3)), 1: (R1, t1)}
+    holds = [np.array(h) for h in [
+        (-0.4, 0.9, 0.1), (0.3, 1.1, -0.2), (0.0, 0.7, 0.3),
+        (-0.2, 1.3, -0.1), (0.4, 0.8, 0.2), (-0.3, 1.0, -0.3)]]
+    s = StationaryBallSampler(BALL_R, still_radius=0.008, min_still_time=0.3,
+                              still_window=0.5, move_dist=0.06, min_samples=3)
+
+    def feed(center_w, t, jitter):
+        for sid, (R, tt) in poses.items():
+            cam = -R.T.dot(tt)
+            cap = sphere_cap(center_w, BALL_R, view_origin=cam, n=200)
+            cap = cap.dot(R.T) + tt + RNG.normal(scale=jitter, size=cap.shape)
+            # unsynced: the two cameras are fed at slightly different times
+            s.add(sid, t + 0.007 * sid, cap)
+
+    t = 0.0
+    for hi, h in enumerate(holds):
+        for _ in range(22):                     # hold ~0.73 s (> still_window)
+            feed(h, t, 0.0008)
+            t += 0.033
+        if hi + 1 < len(holds):                 # move to the next spot
+            for f in range(6):
+                feed(h + (holds[hi + 1] - h) * (f + 1) / 6.0, t, 0.001)
+                t += 0.033
+
+    assert s.captures >= 5, "only %d holds captured" % s.captures
+    rig = solve_rig(s.tracks, ref=0, min_pairs=4)
+    assert 1 in rig, "stationary solve dropped the sensor"
+    R_map, t_map = R1.T, -R1.T.dot(t1)          # sensor1 -> ref is the inverse
+    R_est, t_est = rig[1]["R"], rig[1]["t"]
+    rot_err = np.degrees(np.arccos(
+        np.clip((np.trace(R_est.T.dot(R_map)) - 1) / 2, -1, 1)))
+    t_err = np.linalg.norm(t_est - t_map)
+    assert rot_err < 1.0, "stationary rotation off %.2f deg" % rot_err
+    assert t_err < 0.02, "stationary translation off %.1f mm" % (t_err * 1000)
+    print("StationaryBallSampler: OK (%d holds, rot %.3f deg, t %.1f mm)"
+          % (s.captures, rot_err, t_err * 1000))
+
+
 if __name__ == "__main__":
     test_fit_sphere()
     test_segment_ball()
@@ -219,4 +266,5 @@ if __name__ == "__main__":
     test_pair_tracks()
     test_solve_rig_end_to_end()
     test_solve_rig_robust_to_outliers()
+    test_stationary_sampler()
     print("\nALL CALIBRATION TESTS PASSED")

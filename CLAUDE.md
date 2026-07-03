@@ -336,6 +336,22 @@ Two repos:
   **reference sensor's IMU** so a fine pass refines the rough frame instead of
   jumping to a tilted one. A bigger ball (~15–20 cm) further sharpens
   discrimination (wrong-curvature body bumps blow the known-radius fit).
+  **Stop-and-go fine pass (2026-07-03, now the default fine mode):** continuous
+  waving pairs each camera's ball centre by nearest timestamp, but on an
+  UNSYNCED / slow rig (old Nano ~10–15 fps) the cameras grab a MOVING ball at
+  different instants → paired points are the ball at different places (error =
+  speed × time-skew, tens of mm, in every pair — RANSAC can't remove a common
+  bias). `StationaryBallSampler` fixes it: watch each camera's detection settle
+  (rolling-window spread < ~1 cm for ~0.3 s), and when ≥2 cameras are still at
+  once AND the ball has moved to a new spot, commit ONE window-averaged sample
+  per still camera under a shared capture id (exact correspondence key — no
+  max_dt guess); auto-finish at a target capture count. A stationary ball is at
+  the same place regardless of per-camera timing, so the skew error is gone, and
+  window-averaging also cuts ToF noise (unit-tested: two cameras sampled at
+  different instants recover 0.02°/0.4 mm). Feedback carries per-sensor `still`
+  + a `captures` count at ~4 Hz (was 1 Hz, felt laggy); the viewer greens the
+  LOCK sphere when a camera settles. `mode:"continuous"` (old `BallTracker`)
+  stays for hardware-synced rigs; the viewer button sends `mode:"stationary"`.
 - ✅ **Skeleton pipeline wiring (2026-07-03, design: `docs/skeleton_pose.md`)**
   — 2D pose keypoints from the nodes, lifted to metric 3D at the relay.
   New `CPOS` node→central message (`frame.encode_pose`, 3.6-safe): COCO-17
@@ -506,8 +522,9 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
             fan-out + rig-calib apply/reload + viewer-driven calibration sessions
             + --pose-model central pose fallback for nodes without on-node inference),
             calibration.py (rig extrinsics from a tracked marker ball: segment_ball
-            [largest spherical cluster] + sphere fit + Kabsch;
-            + trackers/gates, Tier-1 rough solve, rig_calib.json I/O)
+            [largest spherical cluster] + sphere fit + robust Kabsch [RANSAC];
+            BallTracker [continuous] + StationaryBallSampler [stop-and-go, default];
+            + Tier-1 rough solve, rig_calib.json I/O)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay),

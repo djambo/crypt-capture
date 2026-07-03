@@ -444,9 +444,14 @@ class PreviewServer:
     def _start_calibration(self, cmd):
         tier = {"calibrate_fine": "fine", "calibrate_rough": "rough",
                 "calibrate_floor": "floor"}[cmd.get("cmd")]
-        seconds = float(cmd.get("seconds",
-                                {"fine": 30.0, "rough": 10.0,
-                                 "floor": 3.0}[tier]))
+        # Fine defaults to STATIONARY (stop-and-go) mode — robust on unsynced /
+        # slow rigs where a moving ball is sampled at different instants per
+        # camera. "continuous" (the old wave-continuously mode) stays available
+        # for hardware-synced rigs.
+        mode = cmd.get("mode", "stationary")
+        default_seconds = {"fine": 60.0 if mode == "stationary" else 30.0,
+                           "rough": 10.0, "floor": 3.0}[tier]
+        seconds = float(cmd.get("seconds", default_seconds))
         with self._calib_lock:
             if self._calib_session is not None:
                 self._broadcast_text({
@@ -455,15 +460,27 @@ class PreviewServer:
                 return
             radius = None
             min_pairs = 0
+            status_every = CALIB_STATUS_EVERY_S
             if tier == "fine":
                 radius = float(cmd.get("ball_radius", 0.05))
-                tracker = calibration.BallTracker(
-                    radius,
+                common = dict(
                     min_points=int(cmd.get("min_points", 40)),
                     max_points=int(cmd.get("max_points", 8000)),
                     max_fit_rms=float(cmd.get("max_fit_rms", 0.012)),
                     min_aspect=float(cmd.get("min_aspect", 0.5)))
-                min_pairs = int(cmd.get("min_pairs", 30))
+                if mode == "continuous":
+                    tracker = calibration.BallTracker(radius, **common)
+                    min_pairs = int(cmd.get("min_pairs", 30))
+                else:
+                    tracker = calibration.StationaryBallSampler(
+                        radius,
+                        still_radius=float(cmd.get("still_radius", 0.010)),
+                        move_dist=float(cmd.get("move_dist", 0.08)),
+                        **common)
+                    min_pairs = int(cmd.get("min_pairs", 6))
+                # Faster feedback so the still/lock indicator feels live (the
+                # 1 Hz default read as laggy while the operator holds the ball).
+                status_every = float(cmd.get("status_every", 0.25))
             elif tier == "rough":
                 tracker = calibration.CentroidTracker(
                     min_points=int(cmd.get("min_points", 300)))
@@ -472,7 +489,9 @@ class PreviewServer:
                 tracker = calibration.FloorSampler()
             session = {"tier": tier, "tracker": tracker, "seconds": seconds,
                        "deadline": time.time() + seconds,
-                       "ball_radius": radius, "min_pairs": min_pairs}
+                       "ball_radius": radius, "min_pairs": min_pairs,
+                       "mode": mode, "status_every": status_every,
+                       "target_captures": int(cmd.get("target_captures", 14))}
             if tier == "rough":
                 # Rough auto-upgrades to the skeleton solve when nodes stream
                 # pose keypoints (docs/skeleton_pose.md): named joints beat
@@ -489,32 +508,49 @@ class PreviewServer:
                          daemon=True).start()
 
     def _calibration_loop(self, session):
-        """Broadcast collection progress ~1 Hz, then solve when time is up."""
+        """Broadcast collection progress, then solve when time is up (or, for a
+        stationary fine pass, once enough holds have been captured)."""
+        tracker = session["tracker"]
+        every = session.get("status_every", CALIB_STATUS_EVERY_S)
         while True:
             if session.get("cancelled"):       # Reset pressed mid-collection
                 return
             left = session["deadline"] - time.time()
-            if left <= 0:
+            # Stationary fine: finish early once the target number of distinct
+            # held positions has been captured (the operator is done sooner than
+            # the time cap). Needs enough samples to actually solve.
+            captures = getattr(tracker, "captures", None)
+            if left <= 0 or (captures is not None and
+                             captures >= session.get("target_captures", 14)):
                 break
             msg = {
                 "type": "calib_status", "state": "collecting",
                 "tier": session["tier"], "seconds_left": round(left, 1),
                 "centers": {str(s): n
-                            for s, n in session["tracker"].counts().items()}}
+                            for s, n in tracker.counts().items()}}
+            if session.get("mode"):
+                msg["mode"] = session["mode"]
+            if captures is not None:
+                msg["captures"] = captures
+                msg["target_captures"] = session.get("target_captures", 14)
+                msg["capturing"] = getattr(tracker, "state", None) == "captured"
             if session.get("joints") is not None:
                 msg["joints"] = {str(s): n for s, n
                                  in session["joints"].counts().items()}
-            # Latest detected ball centre per sensor (wand pass), pruned of
-            # stale entries so a camera that has lost the ball fades its marker.
+            # Latest detected ball centre + still flag per sensor (wand pass),
+            # pruned of stale entries so a camera that lost the ball fades its
+            # marker. `still` drives the LOCK colour so the operator sees WHEN a
+            # camera has settled and a capture is imminent.
             balls = session.get("balls")
             if balls:
                 now = time.time()
-                fresh = {str(s): {"c": v["c"], "rms": v["rms"], "n": v["n"]}
+                fresh = {str(s): {"c": v["c"], "rms": v["rms"], "n": v["n"],
+                                  "still": v.get("still", False)}
                          for s, v in balls.items() if now - v["t"] < 1.5}
                 if fresh:
                     msg["balls"] = fresh
             self._broadcast_text(msg)
-            time.sleep(min(CALIB_STATUS_EVERY_S, left))
+            time.sleep(min(every, max(left, 0.02)))
         self._finish_calibration(session)
 
     def _feed_calibration(self, sensor_id, xyz):
@@ -539,9 +575,12 @@ class PreviewServer:
                 c = np.asarray(c, dtype=np.float64).dot(
                     np.asarray(R, dtype=np.float64).T) + \
                     np.asarray(t, dtype=np.float64)
+            still = bool(getattr(session["tracker"], "still", {}).get(
+                sensor_id, False))
             session.setdefault("balls", {})[sensor_id] = {
                 "c": [float(c[0]), float(c[1]), float(c[2])],
-                "rms": float(rms), "n": int(n), "t": time.time()}
+                "rms": float(rms), "n": int(n), "still": still,
+                "t": time.time()}
 
     def _finish_calibration(self, session):
         with self._calib_lock:
@@ -610,9 +649,14 @@ class PreviewServer:
                 samples, hints, rig=prev,
                 ref=(self._rig_meta or {}).get("ref"))
         if not rig:
+            fine_reason = (
+                "too few held positions — hold the ball STILL at several spots "
+                "(each seen by >=2 cameras) so captures accumulate"
+                if session.get("mode") == "stationary" else
+                "no ball detections passed the gates — background captured on "
+                "every sensor, ball (only) in frame?")
             reason = {
-                "fine": "no ball detections passed the gates — background "
-                        "captured on every sensor, ball (only) in frame?",
+                "fine": fine_reason,
                 "rough": "no usable centroid tracks — is a subject in frame?",
                 "floor": "no credible floor plane on any sensor — is the "
                          "floor in view (clear the background subtraction)?",
