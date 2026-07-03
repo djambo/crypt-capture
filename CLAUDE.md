@@ -347,17 +347,18 @@ Two repos:
   pose thread was convoying on the capture loop's GIL, the same lesson as
   the frame worker pool). Production config: `--pose-model models/movenet.onnx
   --pose-trt` (engine cached in models/trt_cache) → skeletons at camera rate.
-  **Full-res streaming is the default now** (2026-07-03, user call):
-  point-count-bound throughput means stride 1 holds 30 fps with background
-  subtraction on the Orin; `--preview-stride 2` stays only on the weak Nano.
-  `models/` is gitignored (survives the service's auto-update hard reset).
+  **Full-res streaming is the default EVERYWHERE** (2026-07-03, user call —
+  max res on every node, the old Nano included): point-count-bound throughput
+  means stride 1 holds 30 fps with background subtraction; `--preview-stride 2`
+  survives only as a per-device EXTRA_ARGS opt-in if a specific device's CPU
+  can't keep up. `models/` is gitignored (survives the auto-update hard reset).
   **Device-class profiles in the repo (2026-07-03):** the service now launches
   via `deploy/run-node.sh`, which auto-detects the device class from
   `/etc/nv_tegra_release` (L4T R34+ → `orin`, R32/R28 → `nano`, unknown →
   `default`; force with `NODE_PROFILE=` in `/etc/default/kinect-node`) and
   sources `deploy/profiles/<class>.env` — orin = `--pose-model
   models/movenet.onnx --pose-trt` (safe pre-setup: missing model/runtime →
-  "pose disabled", streaming unaffected), nano = `--preview-stride 2`. The
+  "pose disabled", streaming unaffected), nano = full res, no pose. The
   env file's `EXTRA_ARGS` is appended AFTER the profile (argparse last-wins)
   so it's per-device overrides only. Profiles being in-repo means new default
   flags roll out via the auto-update; the unit change itself needs ONE

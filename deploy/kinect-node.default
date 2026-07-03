@@ -54,8 +54,10 @@ UPDATE_BRANCH=main
 # defaults live in the repo (deploy/profiles/): orin = full res + skeleton
 # pose (--pose-model models/movenet.onnx --pose-trt; needs the one-time
 # onnxruntime-gpu + model download from docs/skeleton_pose.md — until then the
-# node just logs "pose disabled" and streams normally), nano = --preview-stride
-# 2 (CPU-bound). Use this ONLY for true per-device tweaks. Examples:
+# node just logs "pose disabled" and streams normally), nano = full res, no
+# pose. Use this ONLY for true per-device tweaks. Examples:
+#   --preview-stride 2          downsample if THIS device's CPU can't hold the
+#                               frame rate at full res (not a class default)
 #   --align color_to_depth      fewer / cleaner points
 #   --depth-mode WFOV_UNBINNED  wide FOV
 #   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
