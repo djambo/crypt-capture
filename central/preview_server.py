@@ -461,7 +461,8 @@ class PreviewServer:
                     radius,
                     min_points=int(cmd.get("min_points", 40)),
                     max_points=int(cmd.get("max_points", 8000)),
-                    max_fit_rms=float(cmd.get("max_fit_rms", 0.012)))
+                    max_fit_rms=float(cmd.get("max_fit_rms", 0.012)),
+                    min_aspect=float(cmd.get("min_aspect", 0.5)))
                 min_pairs = int(cmd.get("min_pairs", 30))
             elif tier == "rough":
                 tracker = calibration.CentroidTracker(
@@ -551,8 +552,14 @@ class PreviewServer:
         tier = session["tier"]
         tracked_sensors = None                 # for the unsolved report
         if tier == "fine":
+            # Robust solve + keep the world gravity-leveled (like rough) by
+            # handing the ref sensor's IMU in — a fine pass then REFINES the
+            # rough frame instead of snapping to a tilted one.
+            gravities = {sid: g for sid, g in
+                         self._sensor_gravity.items() if g is not None}
             rig = calibration.solve_rig(tracker.tracks,
-                                        min_pairs=session["min_pairs"])
+                                        min_pairs=session["min_pairs"],
+                                        gravities=gravities or None)
         elif tier == "rough":
             # Prefer the skeleton solve when the nodes streamed pose
             # keypoints — named joints are true cross-view correspondences

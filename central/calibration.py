@@ -71,7 +71,8 @@ def fit_sphere(points, radius, iters=10):
 
 
 def segment_ball(points, radius, min_points=40, max_points=8000,
-                 max_fit_rms=0.012, max_extent_factor=2.6):
+                 max_fit_rms=0.012, max_extent_factor=2.6,
+                 min_extent_factor=0.5, min_aspect=0.5):
     """Find the marker ball as the best spherical CLUSTER in a foreground cloud.
 
     The old approach fit a sphere to the whole per-sensor cloud, so it only
@@ -134,7 +135,20 @@ def segment_ball(points, radius, min_points=40, max_points=8000,
             continue
         cluster = p[idx]
         extent = float(np.max(cluster.max(axis=0) - cluster.min(axis=0)))
-        if extent > max_extent_factor * radius:   # too big to be a ball cap
+        # A ball cap spans ~2r at most and isn't a tiny nub; reject merged
+        # blobs (too big) and specks (too small).
+        if extent > max_extent_factor * radius or \
+                extent < min_extent_factor * radius:
+            continue
+        # SPHERICITY gate — this is what stops the lock jumping onto legs/arms.
+        # A ball cap is roughly isotropic in its tangent plane (its two largest
+        # PCA eigenvalues are comparable); an elongated body part (leg, arm,
+        # torso strip) has one dominant axis, so sqrt(lambda2/lambda1) is small.
+        d = cluster - cluster.mean(axis=0)
+        ev = np.linalg.eigvalsh(d.T.dot(d) / cluster.shape[0])   # ascending
+        l1 = float(max(ev[2], 0.0))
+        l2 = float(max(ev[1], 0.0))
+        if l1 > 1e-12 and np.sqrt(l2 / l1) < min_aspect:
             continue
         c, rms = fit_sphere(cluster, radius)
         if c is None or rms > max_fit_rms:
@@ -168,6 +182,52 @@ def solve_rigid(A, B):
     return R, t, rms
 
 
+def solve_rigid_ransac(A, B, threshold=0.03, iters=300, min_inliers=12,
+                       seed=0):
+    """Outlier-robust rigid solve (RANSAC around solve_rigid).
+
+    The wand pass WILL feed a few bad correspondences — a frame where one
+    camera locked the real ball while another briefly locked a leg/arm — and a
+    plain least-squares Kabsch is wrecked by even a handful of them (this is why
+    a fine pass could land on wildly wrong poses). RANSAC samples minimal
+    3-point rigid fits, scores each by how many pairs register within
+    `threshold` (metres), keeps the largest consensus set and refits on it.
+
+    A, B: (N,3) corresponding points. Returns (R, t, rms, inlier_idx) or None
+    if no consensus of at least min_inliers is found.
+    """
+    A = np.asarray(A, dtype=np.float64).reshape(-1, 3)
+    B = np.asarray(B, dtype=np.float64).reshape(-1, 3)
+    n = A.shape[0]
+    if n < 3:
+        return None
+    if n <= max(4, min_inliers // 2):             # too few to bother — plain fit
+        R, t, rms = solve_rigid(A, B)
+        return R, t, rms, np.arange(n)
+    rng = np.random.RandomState(seed)
+    best = None                                    # (inlier_idx,)
+    for _ in range(iters):
+        idx = rng.choice(n, 3, replace=False)
+        try:
+            R, t, _ = solve_rigid(A[idx], B[idx])
+        except np.linalg.LinAlgError:
+            continue
+        res = np.linalg.norm(A.dot(R.T) + t - B, axis=1)
+        inl = np.nonzero(res < threshold)[0]
+        if best is None or inl.shape[0] > best.shape[0]:
+            best = inl
+    if best is None or best.shape[0] < min_inliers:
+        return None
+    R, t, rms = solve_rigid(A[best], B[best])
+    # One refit-and-reselect pass tightens the consensus set.
+    res = np.linalg.norm(A.dot(R.T) + t - B, axis=1)
+    inl = np.nonzero(res < threshold)[0]
+    if inl.shape[0] >= 3:
+        R, t, rms = solve_rigid(A[inl], B[inl])
+        best = inl
+    return R, t, rms, best
+
+
 def pair_tracks(track_a, track_b, max_dt=0.02):
     """Pair two (time, point) tracks by nearest timestamp.
 
@@ -197,14 +257,21 @@ def pair_tracks(track_a, track_b, max_dt=0.02):
     return np.asarray(A, dtype=np.float64), np.asarray(B, dtype=np.float64)
 
 
-def solve_rig(tracks, ref=None, max_dt=0.02, min_pairs=30):
+def solve_rig(tracks, ref=None, max_dt=0.02, min_pairs=30, gravities=None,
+              ransac_threshold=0.03):
     """Solve every sensor's rigid transform into a reference sensor's frame.
 
     tracks: {sensor_id: [(t_seconds, center (3,)), ...]} — the wand pass.
     ref: reference sensor id (default: lowest id present).
+    gravities: optional {sensor_id: view-frame gravity (down)}. When given, the
+        whole solution is post-rotated by the REFERENCE sensor's leveling so the
+        fine world comes out gravity-aligned (floor ~flat), matching the rough
+        tier's frame — so a fine calib refines the rough one instead of snapping
+        to a differently-oriented frame. Detect Floor then perfects the level.
     Returns {sensor_id: {"R": (3,3), "t": (3,), "rms": float, "pairs": int}},
-    with the reference mapping to identity. Sensors with fewer than min_pairs
-    matched samples are omitted (not enough shared trajectory).
+    with the reference mapping to identity (or its leveling). Correspondences are
+    solved OUTLIER-ROBUSTLY (solve_rigid_ransac): a few ball/leg mis-locks can't
+    corrupt the rigid fit. Sensors with too few inliers are omitted.
     """
     if not tracks:
         return {}
@@ -218,8 +285,17 @@ def solve_rig(tracks, ref=None, max_dt=0.02, min_pairs=30):
         A, B = pair_tracks(track, tracks[ref], max_dt=max_dt)
         if A.shape[0] < min_pairs:
             continue
-        R, t, rms = solve_rigid(A, B)
-        out[sid] = {"R": R, "t": t, "rms": rms, "pairs": int(A.shape[0])}
+        sol = solve_rigid_ransac(A, B, threshold=ransac_threshold,
+                                 min_inliers=max(12, min_pairs // 2))
+        if sol is None:                            # no clean consensus -> unsolved
+            continue
+        R, t, rms, inliers = sol
+        out[sid] = {"R": R, "t": t, "rms": rms, "pairs": int(inliers.shape[0])}
+    if gravities is not None:
+        L = level_rotation(gravities.get(ref, (0.0, -1.0, 0.0)))
+        for s in out.values():
+            s["R"] = L.dot(np.asarray(s["R"], dtype=np.float64))
+            s["t"] = L.dot(np.asarray(s["t"], dtype=np.float64))
     return out
 
 
@@ -245,11 +321,12 @@ class BallTracker:
     """
 
     def __init__(self, radius, min_points=40, max_points=8000,
-                 max_fit_rms=0.012):
+                 max_fit_rms=0.012, min_aspect=0.5):
         self.radius = float(radius)
         self.min_points = int(min_points)
         self.max_points = int(max_points)
         self.max_fit_rms = float(max_fit_rms)
+        self.min_aspect = float(min_aspect)
         self.tracks = {}            # sensor_id -> [(t_seconds, center (3,))]
         self.rejected = {}          # sensor_id -> {"count": n, "fit": n}
         self.last = {}              # sensor_id -> (center (3,), rms, n) latest ok
@@ -270,7 +347,8 @@ class BallTracker:
             return self._reject(sensor_id, "count")
         c, rms, n = segment_ball(p, self.radius, min_points=self.min_points,
                                  max_points=self.max_points,
-                                 max_fit_rms=self.max_fit_rms)
+                                 max_fit_rms=self.max_fit_rms,
+                                 min_aspect=self.min_aspect)
         if c is None:
             return self._reject(sensor_id, "fit")
         self.tracks.setdefault(sensor_id, []).append((float(t_seconds), c))

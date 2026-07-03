@@ -324,6 +324,18 @@ Two repos:
   (`test_calibration.segment_ball`, `test_rig` gates) + headless E2E (two posed
   sim balls → `balls` feedback flows, solve lands 2.4 mm). Optional future
   upgrade: retroreflective ball in active IR for even more robust detection.
+  **Robustness pass (2026-07-03, first real-hardware run):** first wand test
+  showed two failures — the lock sometimes jumped onto legs/non-spherical
+  features, and the completed fine solve snapped to *completely wrong* poses,
+  worse than rough. Fixes: (a) `segment_ball` gained a **sphericity gate**
+  (PCA `√(λ2/λ1) ≥ 0.5` rejects elongated leg/arm clusters) + an extent lower
+  bound; (b) `solve_rig` now solves via **`solve_rigid_ransac`** (3-point
+  minimal fits, 3 cm consensus, refit on inliers) so the inevitable few
+  ball/leg mis-locks can't corrupt the rigid solve — recovers pose to mm with
+  20–30 % outliers (unit-tested); (c) the fine world is post-leveled by the
+  **reference sensor's IMU** so a fine pass refines the rough frame instead of
+  jumping to a tilted one. A bigger ball (~15–20 cm) further sharpens
+  discrimination (wrong-curvature body bumps blow the known-radius fit).
 - ✅ **Skeleton pipeline wiring (2026-07-03, design: `docs/skeleton_pose.md`)**
   — 2D pose keypoints from the nodes, lifted to metric 3D at the relay.
   New `CPOS` node→central message (`frame.encode_pose`, 3.6-safe): COCO-17

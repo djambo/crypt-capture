@@ -188,10 +188,32 @@ visible to some camera (the point-count gate then dropped every such frame, and
 nothing told the operator). Now the cloud is voxel-clustered (one cell per
 radius, 26-neighbour connected components) and `fit_sphere` runs only on the
 compact, ball-sized clusters; the one whose fit best matches the known radius
-(low rms, extent ≤ ~2.6·r) wins. The body is a separate, too-large / non-
-spherical cluster and is rejected; a cluster that merges ball+arm fails the
-extent/rms gate. Capturing the background first is what keeps this cheap and
-unambiguous — only two clusters to score (you and the ball).
+wins. Each candidate cluster must pass three gates: **extent** ~[0.5·r, 2.6·r]
+(reject specks and merged blobs), a **sphericity** gate (the two largest PCA
+eigenvalues must be comparable — `√(λ2/λ1) ≥ 0.5` — which rejects *elongated*
+body parts: legs, arms, torso strips, the reported "the lock jumped onto my
+leg" false positives), and the **sphere-fit rms** (`< 12 mm`). Capturing the
+background first keeps this cheap and unambiguous — only you and the ball to
+score. A **bigger ball helps discrimination**: forcing the known (larger)
+radius onto a smaller-curvature body bump (fist, knee) blows the fit rms, so
+the ball stands out.
+
+**Robust solve (`solve_rigid_ransac`).** No detector is perfect — a frame where
+one camera locks the real ball while another briefly locks a leg produces a
+garbage correspondence, and a plain least-squares Kabsch is destroyed by even a
+handful of them (this is why a fine pass could snap to *completely wrong* poses,
+worse than the rough one). `solve_rig` now solves each sensor with **RANSAC**:
+minimal 3-point rigid fits, scored by how many pairs register within 3 cm, keep
+the largest consensus set, refit on it. It shrugs off ~20–30 % outliers and
+recovers the pose to millimetres (unit-tested). Sensors with no clean consensus
+are reported unsolved rather than shipped wrong.
+
+**Leveled world (continuity with rough).** The fine solve registers everything
+into the reference sensor's frame; it is now post-rotated by the **reference
+sensor's IMU leveling** (`gravities` → `level_rotation`), so the fine world comes
+out gravity-aligned like the rough tier's — a fine pass *refines* the rough
+frame instead of snapping to a differently-tilted one. Detect Floor then
+perfects the level.
 
 **Live feedback wire (relay → viewer).** During a fine pass the relay stashes
 each sensor's latest detected centre (transformed into the same frame as its
@@ -208,13 +230,21 @@ formats the per-sensor lock indicator into the status line.
   The visible cap's centroid alone is biased toward each camera by ~r/2
   (measured in the test: 30 mm bias for a 10 cm ball vs 0.3 mm fitted), which
   would poison the solve with per-camera offsets — that's why we fit.
+- `segment_ball(points, radius)` — pull the ball out of a body-in-frame cloud:
+  voxel connected-components → per-cluster `fit_sphere`, gated on extent +
+  **sphericity** (PCA `√(λ2/λ1)`) + fit rms; best radius match wins.
 - `pair_tracks(a, b, max_dt)` — nearest-timestamp correspondence pairing.
   Hardware sync (3.5 mm cables) makes this exact; free-running works if the
   ball moves slowly (0.5 m/s × 16 ms skew = 8 mm, folded into the residual).
 - `solve_rigid(A, B)` — Kabsch/Umeyama closed-form `R, t` + RMS.
-- `solve_rig(tracks, ref)` — everything per sensor into the reference frame.
-  Synthetic end-to-end (3 sensors on a circle, noisy caps, dropped frames,
-  clock skew): rotation recovered to <0.01°, translation to <1 mm.
+- `solve_rigid_ransac(A, B, threshold)` — outlier-robust wrapper (3-point
+  consensus + refit); the fine solve uses this so a few ball/leg mis-locks
+  can't corrupt the pose.
+- `solve_rig(tracks, ref, gravities)` — everything per sensor into the reference
+  frame (RANSAC per sensor; optional ref-IMU leveling so the world stays
+  gravity-aligned). Synthetic end-to-end (3 sensors on a circle, noisy caps,
+  dropped frames, clock skew): rotation <0.01°, translation <1 mm; with 20 %
+  outlier mis-locks it still recovers to 0.02°/0.3 mm.
 
 ## Wiring (BUILT 2026-07-02 — how it actually works)
 

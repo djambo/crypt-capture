@@ -91,7 +91,17 @@ def test_segment_ball():
     assert n >= 200 and n <= 900, "picked the wrong cluster (%d pts)" % n
     # A cloud that is ONLY the body has no ball -> honest miss, not a false lock.
     assert segment_ball(body, BALL_R)[0] is None
-    print("segment_ball: OK (err %.1f mm, %d ball pts of %d)"
+    # An elongated, ball-SIZED leg/arm fragment (a short cylinder shell) must be
+    # rejected by the sphericity gate — this is the "lock jumps onto my leg" bug.
+    axis = np.linspace(-0.18, 0.18, 600)              # ~36 cm long
+    ang = RNG.uniform(0, 2 * np.pi, 600)
+    leg = np.column_stack([
+        BALL_R * np.cos(ang) + 0.9,
+        axis + 1.0,                                    # long axis = vertical
+        BALL_R * np.sin(ang) + 2.0,
+    ]) + RNG.normal(scale=0.002, size=(600, 3))
+    assert segment_ball(leg, BALL_R)[0] is None, "elongated leg passed as a ball"
+    print("segment_ball: OK (err %.1f mm, %d ball pts of %d; leg rejected)"
           % (err * 1000, n, cloud.shape[0]))
 
 
@@ -168,10 +178,45 @@ def test_solve_rig_end_to_end():
                              rig[sid]["rms"] * 1000, rig[sid]["pairs"]))
 
 
+def test_solve_rig_robust_to_outliers():
+    """A fine pass WILL mis-lock occasionally (a leg instead of the ball). The
+    plain Kabsch is wrecked by a handful of such pairs; the RANSAC solve must
+    shrug them off and still recover the pose to millimetres."""
+    world_path = trajectory(150)
+    times = np.arange(150) / 30.0
+    R_true = random_rotation()
+    t_true = np.array([1.4, -0.1, 0.7])
+    ref_track, bad_track = [], []
+    for k in range(150):
+        c_ref = world_path[k]
+        c_bad = R_true.dot(c_ref) + t_true
+        # 20% of sensor-1 frames are outliers: the lock was on a leg ~0.4-0.9 m
+        # away from the true ball centre.
+        if k % 5 == 0:
+            c_bad = c_bad + RNG.uniform(-1, 1, 3) * 0.6
+        ref_track.append((times[k], c_ref + RNG.normal(scale=0.001, size=3)))
+        bad_track.append((times[k], c_bad + RNG.normal(scale=0.001, size=3)))
+    rig = solve_rig({0: ref_track, 1: bad_track}, ref=0)
+    assert 1 in rig, "robust solve dropped the sensor entirely"
+    R_est, t_est = rig[1]["R"], rig[1]["t"]
+    # solve_rig maps sensor1 -> ref(0). bad = R_true·ref + t_true, so the
+    # sensor1->ref map is the INVERSE: (R_true^T, -R_true^T·t_true).
+    R_map = R_true.T
+    t_map = -R_true.T.dot(t_true)
+    rot_err = np.degrees(np.arccos(
+        np.clip((np.trace(R_est.T.dot(R_map)) - 1) / 2, -1, 1)))
+    t_err = np.linalg.norm(t_est - t_map)
+    assert rot_err < 0.6, "outliers corrupted rotation (%.2f deg)" % rot_err
+    assert t_err < 0.012, "outliers corrupted translation (%.1f mm)" % (t_err * 1000)
+    print("solve_rig robustness: OK (rot %.3f deg, t %.1f mm, %d/%d inliers)"
+          % (rot_err, t_err * 1000, rig[1]["pairs"], len(bad_track)))
+
+
 if __name__ == "__main__":
     test_fit_sphere()
     test_segment_ball()
     test_solve_rigid()
     test_pair_tracks()
     test_solve_rig_end_to_end()
+    test_solve_rig_robust_to_outliers()
     print("\nALL CALIBRATION TESTS PASSED")
