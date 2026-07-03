@@ -113,7 +113,7 @@ def compute_ray_table(w, h, fx, fy, cx, cy, dist, iters=8):
 
 
 def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
-              color_grid=None, extrinsic=None):
+              color_grid=None, extrinsic=None, max_points=None):
     """Depth grid -> (xyz, rgb, grid) for the valid (non-zero) pixels, using the
     distortion-aware full-res ray table. The grid may be node-downsampled
     (`node_stride`): grid pixel (u,v) maps to ray_table[v*node_stride, u*node_stride].
@@ -125,6 +125,14 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     flat point list otherwise throws away — the viewer re-meshes neighbouring
     grid pixels into triangles from it (the CPV1 grid block, FLAG_GRID).
 
+    `max_points` caps the output by GROWING the stride (per axis, denser axis
+    first) until the valid count fits — the emitted sub-grid stays coherent,
+    so grid neighbours stay neighbours and the viewer's mesh stays watertight,
+    just coarser. (The old point-wise linspace trim punched a periodic hole
+    every N points: a visible gap pattern in the point render and a lattice of
+    missing faces — or, decimating >2x, NO surviving adjacency at all — in the
+    mesh render.)
+
     `extrinsic` (R 3x3, t 3) optionally rigid-transforms the points from the
     streamed grid's camera frame into the canonical DEPTH frame (P_depth = R·P+t),
     applied in optical space BEFORE the optical->view flip. This registers
@@ -132,10 +140,21 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     alignment doesn't tilt/shift the cloud. None = no transform (identity).
     """
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
-    us = np.arange(0, w, stride)
-    vs = np.arange(0, h, stride)
-    sub = d[vs][:, us]
-    m = sub != 0
+    su = sv = stride
+    while True:
+        us = np.arange(0, w, su)
+        vs = np.arange(0, h, sv)
+        sub = d[vs][:, us]
+        m = sub != 0
+        if not max_points or int(np.count_nonzero(m)) <= max_points:
+            break
+        # Over budget: coarsen the denser axis so decimation stays roughly
+        # isotropic. Each pass shrinks the grid, so this terminates (a 1x1
+        # grid is always <= max_points for any positive cap).
+        if len(us) >= len(vs):
+            su += 1
+        else:
+            sv += 1
     grid_w, grid_h = len(us), len(vs)
     if not m.any():
         return (np.empty((0, 3), dtype=np.float32),
@@ -821,17 +840,15 @@ class PreviewServer:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
                 extrinsic = self._sensor_extrinsic.get(frame.sensor_id)
+                # max_points is enforced INSIDE unproject by coarsening the
+                # sampling stride (grid stays coherent). The old point-wise
+                # linspace trim here punched a periodic hole every N points —
+                # visible gap stripes in the point render, a hole lattice (or
+                # an empty mesh in depth_to_color) in the mesh render.
                 xyz, rgb, grid = unproject(depth, frame.width, frame.height,
                                            ray_x, ray_y, self.stride, ns,
-                                           cgrid, extrinsic)
-                if xyz.shape[0] > self.max_points:
-                    idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
-                    xyz = xyz[idx]
-                    if rgb is not None:
-                        rgb = rgb[idx]
-                    # Keep the grid indices paired with the surviving points —
-                    # the mesh just gets sparser where points were dropped.
-                    grid = (grid[0], grid[1], grid[2][idx])
+                                           cgrid, extrinsic,
+                                           max_points=self.max_points)
                 # An active calibration session consumes the RAW view-frame
                 # cloud (a re-run must not solve on already-transformed points).
                 if self._calib_session is not None:

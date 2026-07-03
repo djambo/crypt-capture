@@ -437,11 +437,18 @@ Two repos:
   (its new `MeshCloud` + panel `render` selector; much better facial detail),
   swappable live with the classic point render. `unproject` returns
   `(xyz, rgb, grid)` now (`np.flatnonzero` of the valid mask — zero extra
-  compute); the `max_points` subsample keeps indices paired. On by default
-  (+4 B/pt ≈ +27% frame size); `preview_server --no-grid` drops it. Spec in
+  compute). **`--max-points` is enforced grid-aware** (same day, first
+  hardware test): the old point-wise linspace trim punched a periodic hole
+  every N points — gap stripes in the point render, a hole lattice in the
+  mesh, and an EMPTY mesh in depth_to_color (921k candidates ≫ cap → no
+  surviving adjacency); `unproject(max_points=…)` now coarsens the sampling
+  stride (denser axis first) until the count fits, so a capped frame is a
+  coarser but fully-connected grid. On by default (+4 B/pt ≈ +27% frame
+  size); `preview_server --no-grid` drops it. Spec in
   `docs/preview_protocol.md`; verified headless (`scripts/preview_client`
   asserts ascending in-range indices; sim → relay → viewer mesh rendered in
-  Chromium, incl. the old-relay fallback to points). `tests/test_grid.py`.
+  Chromium, incl. the old-relay fallback to points and a forced
+  `--max-points 5000` run meshing hole-free). `tests/test_grid.py`.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

@@ -61,7 +61,11 @@ Then the payload blocks, in order:
    copy the bytes before viewing as `Uint32Array`.
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
-so `count` varies per frame. The viewer must read `count` from the header, not
+so `count` varies per frame. The `--max-points` cap is also enforced by
+**growing the stride** (never by dropping individual points, which would punch
+periodic holes into the grid and break the mesh triangulation) — so a capped
+frame arrives as a coarser but still fully-connected grid, with `grid_w`/
+`grid_h` reflecting the effective stride. The viewer must read `count` from the header, not
 assume a fixed size. The `rgb` block, when present, starts at byte `20 +
 count*12`; the `gravity` block starts right after it (`20 + count*12`, plus
 `count*3` when rgb is present); the `grid` block is last (add 12 more when

@@ -72,6 +72,19 @@ fed every frame (hidden = no GPU upload) so particles/floor fits keep working
 and the swap is instant. With a relay that doesn't send the block, mesh mode
 falls back to points and the status line says to update crypt-capture.
 
+**Fix (same day, first hardware test): `--max-points` decimation is now
+grid-aware.** The relay's cap used to drop every Nth point (point-wise
+linspace) once a frame exceeded `--max-points` (default 200k) — that punched a
+*periodic hole* into the grid: visible horizontal gap stripes in the point
+render, a lattice of missing faces in the mesh render, and in `depth_to_color`
+(1280×720 ≈ 921k candidate points ≫ cap) NO adjacent grid pairs survived at
+all, so the mesh was empty. The cap is now enforced inside `unproject` by
+**coarsening the sampling stride** (per axis, denser axis first) until the
+count fits — the emitted sub-grid stays coherent, neighbours stay neighbours,
+the mesh stays closed, just coarser. Viewer safety net (done): a grid frame
+that triangulates to zero faces (pre-fix relay) falls back to points with an
+"update the relay" status instead of rendering nothing.
+
 ---
 
 ## 2026-07-03 — Fine Align: stop-and-go (stationary) sampling + robust solve

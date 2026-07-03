@@ -59,6 +59,43 @@ def test_unproject_grid_indices():
     print("unproject grid indices: OK")
 
 
+def test_unproject_max_points_keeps_grid_coherent():
+    try:
+        import numpy as np
+        from central import preview_server as ps
+    except ImportError as exc:
+        print("unproject max_points: skipped (%s)" % exc)
+        return
+
+    # A fully-valid 100x80 grid (8000 pts) capped at 2500: the cap must be
+    # enforced by coarsening the stride — NOT by point-wise trimming, which
+    # punches periodic holes (gap stripes in points, a hole lattice / an empty
+    # mesh in the viewer's triangulation).
+    w, h = 100, 80
+    depth = np.full((h, w), 1500, dtype=np.uint16)
+    ray = np.zeros((h, w), dtype=np.float32)
+    xyz, _, (gw, gh, idx) = ps.unproject(
+        depth.tobytes(), w, h, ray, ray, 1, max_points=2500)
+    assert xyz.shape[0] <= 2500, xyz.shape
+    assert len(idx) == xyz.shape[0]
+    assert gw * gh == xyz.shape[0]           # fully-valid grid: every cell kept
+    assert idx[-1] < gw * gh
+    # Connectivity survives: on a fully-valid sub-grid EVERY interior point has
+    # its right neighbour at idx+1 (the property the mesh triangulation needs).
+    idx_set = set(int(i) for i in idx)
+    interior = [i for i in idx_set if (i % gw) + 1 < gw]
+    assert interior and all(i + 1 in idx_set for i in interior)
+
+    # Depth pairing still holds after the stride bump.
+    assert np.allclose(-xyz[:, 2], 1.5), xyz[:5]
+
+    # No cap (or already under it) -> untouched full grid.
+    xyz2, _, (gw2, gh2, idx2) = ps.unproject(
+        depth.tobytes(), w, h, ray, ray, 1, max_points=10000)
+    assert (gw2, gh2) == (w, h) and len(idx2) == w * h
+    print("unproject max_points grid-coherent: OK")
+
+
 def test_build_message_grid_block():
     try:
         import numpy as np
@@ -99,5 +136,6 @@ def test_build_message_grid_block():
 
 if __name__ == "__main__":
     test_unproject_grid_indices()
+    test_unproject_max_points_keeps_grid_coherent()
     test_build_message_grid_block()
     print("\nALL GRID TESTS PASSED")
