@@ -29,9 +29,12 @@ ExecStartPre=+/bin/sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory
 # the on-disk code. Toggle with AUTO_UPDATE / pick a branch with UPDATE_BRANCH in
 # /etc/default/kinect-node.
 ExecStartPre=-__WORKDIR__/deploy/update-node.sh
-# -u = unbuffered stdout so logs reach journald live. --frames 0 = stream until
-# killed. $EXTRA_ARGS is unbraced on purpose so multiple flags word-split.
-ExecStart=/usr/bin/python3 -u -m node.kinect_node --host ${CENTRAL_HOST} --port ${CENTRAL_PORT} --sensor ${SENSOR_ID} --frames 0 $EXTRA_ARGS
+# The launcher resolves the device-class profile (deploy/profiles/, picked by
+# NODE_PROFILE or auto-detected from the L4T release) and appends the env
+# file's EXTRA_ARGS after it, then execs python3 -u -m node.kinect_node.
+# Repo-stored profiles mean new default flags arrive via the auto-update —
+# no per-device /etc edits, no unit reinstall.
+ExecStart=__WORKDIR__/deploy/run-node.sh
 # If central drops or the node errors, exit and let systemd relaunch it. This IS
 # the "if the connection fails, quit and rerun it" behaviour the project wants.
 Restart=always

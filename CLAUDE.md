@@ -347,14 +347,23 @@ Two repos:
   pose thread was convoying on the capture loop's GIL, the same lesson as
   the frame worker pool). Production config: `--pose-model models/movenet.onnx
   --pose-trt` (engine cached in models/trt_cache) → skeletons at camera rate.
-  **Full-res streaming is the default now** (deploy EXTRA_ARGS emptied,
-  2026-07-03, user call): point-count-bound throughput means stride 1 holds
-  30 fps with background subtraction on the Orin; keep `--preview-stride 2`
-  only on the weak Nano / laggy full-room views.
-  `models/` is gitignored (survives the service's auto-update hard reset);
-  the deploy env sample shows the pose EXTRA_ARGS line (Orin-class nodes
-  only — not the Nano). ⏳ remaining: hands→particle attractors in the
-  viewer; relay-side skeleton fusion across sensors.
+  **Full-res streaming is the default now** (2026-07-03, user call):
+  point-count-bound throughput means stride 1 holds 30 fps with background
+  subtraction on the Orin; `--preview-stride 2` stays only on the weak Nano.
+  `models/` is gitignored (survives the service's auto-update hard reset).
+  **Device-class profiles in the repo (2026-07-03):** the service now launches
+  via `deploy/run-node.sh`, which auto-detects the device class from
+  `/etc/nv_tegra_release` (L4T R34+ → `orin`, R32/R28 → `nano`, unknown →
+  `default`; force with `NODE_PROFILE=` in `/etc/default/kinect-node`) and
+  sources `deploy/profiles/<class>.env` — orin = `--pose-model
+  models/movenet.onnx --pose-trt` (safe pre-setup: missing model/runtime →
+  "pose disabled", streaming unaffected), nano = `--preview-stride 2`. The
+  env file's `EXTRA_ARGS` is appended AFTER the profile (argparse last-wins)
+  so it's per-device overrides only. Profiles being in-repo means new default
+  flags roll out via the auto-update; the unit change itself needs ONE
+  `sudo deploy/install-node-service.sh` re-run per device. ⏳ remaining:
+  hands→particle attractors in the viewer; relay-side skeleton fusion across
+  sensors.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -458,7 +467,9 @@ scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless 
             send_command.py (send control commands to the relay),
             calibrate_rig.py (marker-ball wand pass: collect + solve + rig_calib.json)
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
-            run the Jetson node as a boot-time, auto-restarting systemd service
+            run the Jetson node as a boot-time, auto-restarting systemd service;
+            run-node.sh + profiles/{orin,nano,default}.env: repo-stored
+            device-class default flags, auto-detected from the L4T release
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
             test_pose.py
@@ -575,7 +586,9 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   **fetches + hard-resets the code to `origin/$UPDATE_BRANCH` on every start**
   (toggle `AUTO_UPDATE`), so the headless workflow is push → reboot → runs latest;
   offline just runs the on-disk code. Updates code only — unit/env changes still
-  need a re-run of the installer. `--headless`
+  need a re-run of the installer (but the **device-class default flags** live
+  in-repo in `deploy/profiles/` and are resolved at launch by
+  `deploy/run-node.sh`, so THOSE roll out with the auto-update). `--headless`
   drops the desktop GUI (`multi-user.target`) for more capture headroom: the node
   draws no windows and the Nano is CPU-bound, so the desktop + any connected VNC
   session just steal cycles from RVL/color. **Caveat (confirmed on hardware): the

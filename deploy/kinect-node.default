@@ -15,6 +15,15 @@ CENTRAL_PORT=9000
 # This node's sensor id (0..N-1; one per Kinect/Jetson):
 SENSOR_ID=0
 
+# Device-class profile (deploy/profiles/<name>.env, stored IN THE REPO so its
+# defaults roll out via the auto-update — e.g. the Orin's skeleton-pose flags).
+#   auto = detect from the L4T release: JetPack 5/6+ (Orin) -> orin,
+#          JetPack 4 (1st-gen Nano) -> nano, unknown -> default (no flags).
+#   orin | nano | default = force a class.
+# Flags in EXTRA_ARGS below are appended AFTER the profile's, so a repeated
+# flag here overrides the profile (argparse last-wins).
+NODE_PROFILE=auto
+
 # Self-update: on every (re)start, fetch + hard-reset the code to the remote so a
 # reboot runs the latest pushed code. Non-fatal — offline just runs on-disk code.
 #   AUTO_UPDATE   1 = update on start (default), 0 = never touch the code
@@ -40,26 +49,17 @@ UPDATE_BRANCH=main
 #DISPLAY=:0
 #XAUTHORITY=/run/user/1000/gdm/Xauthority
 
-# Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
-#   --preview-stride 2          downsample the live cloud. NOT needed on
-#                               Orin-class nodes: throughput is point-count-
-#                               bound, so FULL RES holds 30 fps whenever
-#                               background subtraction keeps the subject in
-#                               the ~20-30k point budget. Keep stride 2 on
-#                               the weak 1st-gen Nano, or if the full-room
-#                               (background-cleared) view lags the wire.
+# Extra kinect_node flags, whitespace-separated, appended AFTER the profile's
+# flags (so a flag repeated here overrides the profile). The device-class
+# defaults live in the repo (deploy/profiles/): orin = full res + skeleton
+# pose (--pose-model models/movenet.onnx --pose-trt; needs the one-time
+# onnxruntime-gpu + model download from docs/skeleton_pose.md — until then the
+# node just logs "pose disabled" and streams normally), nano = --preview-stride
+# 2 (CPU-bound). Use this ONLY for true per-device tweaks. Examples:
 #   --align color_to_depth      fewer / cleaner points
 #   --depth-mode WFOV_UNBINNED  wide FOV
 #   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
 #   --rig-id studioB            only needed if >1 rig shares the LAN (must match
 #                               the relay's --rig-id; default is "crypt")
-#
-# Skeleton / pose (docs/skeleton_pose.md) — GPU-capable nodes (Orin) only.
-# One-time setup per node: pip3 install onnxruntime-gpu "numpy<2" (Jetson
-# index) + download models/movenet.onnx (models/ is gitignored, so the
-# self-update never touches it). --pose-trt caches its TensorRT engine in
-# models/trt_cache (first ever start compiles ~1-2 min; later starts are
-# instant). Validated on the Orin: 2.9 ms/infer, skeletons at camera rate.
-#   EXTRA_ARGS=--pose-model models/movenet.onnx --pose-trt
-# Default: no extra flags = full-resolution cloud.
+#   --pose-gate 0.5             stricter person gate on THIS node
 EXTRA_ARGS=

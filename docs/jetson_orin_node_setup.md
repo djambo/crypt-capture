@@ -151,7 +151,9 @@ DISPLAY=:0
 XAUTHORITY=/run/user/1000/gdm/Xauthority           # from the ps command above
 AUTO_UPDATE=1
 UPDATE_BRANCH=main
-EXTRA_ARGS=--preview-stride 1                       # full res; Orin has the headroom
+NODE_PROFILE=auto      # device-class defaults from deploy/profiles/ (Orin ->
+                       # full res + skeleton pose); auto-detected, leave as-is
+EXTRA_ARGS=            # per-device tweaks only; appended AFTER the profile
 ```
 ```bash
 sudo systemctl restart kinect-node

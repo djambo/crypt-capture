@@ -149,8 +149,12 @@ python3 -m node.kinect_node --host auto --sensor 0 --frames 0 \
 # browser the moment you step in. Watch the frame fps line: it must hold the
 # same rate as without --pose-model (that's the decoupling contract).
 
-# make it permanent: add the flags to EXTRA_ARGS in /etc/default/kinect-node
-#   EXTRA_ARGS=--pose-model models/movenet.onnx --pose-trt
+# make it permanent: nothing to edit — the service's Orin device-class profile
+# (deploy/profiles/orin.env, auto-detected by deploy/run-node.sh) already
+# passes --pose-model models/movenet.onnx --pose-trt by default. Until the
+# runtime + model are installed it just logs "pose disabled" and streams
+# normally. Per-device tweaks (e.g. a stricter --pose-gate) go in EXTRA_ARGS
+# in /etc/default/kinect-node — appended after the profile, so they win.
 sudo systemctl start kinect-node
 ```
 
