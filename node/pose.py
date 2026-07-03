@@ -162,18 +162,43 @@ class MoveNetEstimator(object):
     dtype (all fed 0..255 — the graph does its own normalization), any output
     list containing one 17x3 tensor."""
 
-    def __init__(self, model_path, threads=2, providers=None):
+    def __init__(self, model_path, threads=2, providers=None, trt=False):
         import onnxruntime as ort              # deferred: only with a model
         so = ort.SessionOptions()
         so.intra_op_num_threads = int(threads)  # bound CPU next to RVL workers
         if providers is None:
-            # Prefer CUDA over the TensorRT EP: TRT compiles an engine at
-            # session start (MINUTES, on every launch unless a cache is
-            # configured) — the CUDA EP starts instantly and is within a few
-            # ms of TRT for a model this small. CPU is the fallback.
             avail = ort.get_available_providers()
-            providers = [p for p in ("CUDAExecutionProvider",
-                                     "CPUExecutionProvider") if p in avail]                 or avail
+            if trt and "TensorrtExecutionProvider" in avail:
+                # TensorRT EP with a persistent ENGINE CACHE: the first start
+                # compiles the model (~1-3 min); every later start loads the
+                # cached engine instantly. Use when the CUDA EP underperforms
+                # (e.g. graph partitions falling back to CPU per frame).
+                cache = os.path.join(
+                    os.path.dirname(os.path.abspath(model_path)), "trt_cache")
+                try:
+                    os.makedirs(cache)
+                except OSError:
+                    pass
+                if not os.listdir(cache):
+                    print("pose: building the TensorRT engine (first run "
+                          "only, ~1-3 min — cached in %s afterwards)…"
+                          % cache)
+                providers = [("TensorrtExecutionProvider",
+                              {"trt_engine_cache_enable": True,
+                               "trt_engine_cache_path": cache,
+                               "trt_timing_cache_enable": True}),
+                             "CUDAExecutionProvider", "CPUExecutionProvider"]
+                providers = [pv for pv in providers
+                             if (pv[0] if isinstance(pv, tuple) else pv)
+                             in avail]
+            else:
+                # Prefer CUDA over the TensorRT EP by default: without the
+                # cache TRT recompiles at EVERY session start (minutes),
+                # while the CUDA EP starts instantly and is within a few ms
+                # for a model this small. CPU is the fallback.
+                providers = [p for p in ("CUDAExecutionProvider",
+                                         "CPUExecutionProvider")
+                             if p in avail] or avail
         self.sess = ort.InferenceSession(
             model_path, sess_options=so, providers=providers)
         # What is inference actually running on? CPUExecutionProvider-only =
