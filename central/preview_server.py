@@ -460,6 +460,14 @@ class PreviewServer:
             session = {"tier": tier, "tracker": tracker, "seconds": seconds,
                        "deadline": time.time() + seconds,
                        "ball_radius": radius, "min_pairs": min_pairs}
+            if tier == "rough":
+                # Rough auto-upgrades to the skeleton solve when nodes stream
+                # pose keypoints (docs/skeleton_pose.md): named joints beat
+                # the body centroid, so collect both and prefer joints.
+                session["joints"] = calibration.JointTracker(
+                    min_conf=float(cmd.get("min_conf", 0.35)))
+                session["min_joint_pairs"] = int(
+                    cmd.get("min_joint_pairs", 60))
             self._calib_session = session
         print("[preview] %s calibration: collecting for %.0f s%s" % (
             tier, seconds,
@@ -475,11 +483,15 @@ class PreviewServer:
             left = session["deadline"] - time.time()
             if left <= 0:
                 break
-            self._broadcast_text({
+            msg = {
                 "type": "calib_status", "state": "collecting",
                 "tier": session["tier"], "seconds_left": round(left, 1),
                 "centers": {str(s): n
-                            for s, n in session["tracker"].counts().items()}})
+                            for s, n in session["tracker"].counts().items()}}
+            if session.get("joints") is not None:
+                msg["joints"] = {str(s): n for s, n
+                                 in session["joints"].counts().items()}
+            self._broadcast_text(msg)
             time.sleep(min(CALIB_STATUS_EVERY_S, left))
         self._finish_calibration(session)
 
@@ -499,14 +511,31 @@ class PreviewServer:
             self._calib_session = None
         tracker = session["tracker"]
         tier = session["tier"]
+        tracked_sensors = None                 # for the unsolved report
         if tier == "fine":
             rig = calibration.solve_rig(tracker.tracks,
                                         min_pairs=session["min_pairs"])
         elif tier == "rough":
-            gravities = {sid: g for sid, g in self._sensor_gravity.items()
-                         if g is not None}
-            rig = calibration.solve_rough(tracker.tracks, gravities,
-                                          min_pairs=session["min_pairs"])
+            # Prefer the skeleton solve when the nodes streamed pose
+            # keypoints — named joints are true cross-view correspondences
+            # (full 3D Kabsch); the centroid track is the zero-dependency
+            # fallback.
+            rig = {}
+            joint_tracker = session.get("joints")
+            if joint_tracker is not None and joint_tracker.tracks:
+                rig = calibration.solve_skeleton(
+                    joint_tracker.tracks,
+                    min_pairs=session["min_joint_pairs"])
+                if len(rig) > 1 or (rig and len(joint_tracker.tracks) == 1):
+                    tier = "skeleton"
+                    tracked_sensors = set(joint_tracker.tracks)
+                else:
+                    rig = {}                   # not enough joint pairs
+            if not rig:
+                gravities = {sid: g for sid, g in
+                             self._sensor_gravity.items() if g is not None}
+                rig = calibration.solve_rough(tracker.tracks, gravities,
+                                              min_pairs=session["min_pairs"])
         else:                                  # floor: level each sensor
             samples = tracker.stacked()
             # World-frame up hint per sensor: its IMU gravity rotated by its
@@ -550,7 +579,8 @@ class PreviewServer:
             unsolved = sorted(sid for sid in samples
                               if rig.get(sid) is prev.get(sid))
         else:
-            unsolved = sorted(set(tracker.tracks) - set(rig))
+            unsolved = sorted((tracked_sensors or set(tracker.tracks))
+                              - set(rig))
         path = self.rig_calib_path or "rig_calib.json"
         ref = (self._rig_meta or {}).get("ref")
         if ref is None or ref not in rig:
@@ -628,6 +658,9 @@ class PreviewServer:
                         sid, None if g is None else
                         "(%.3f, %.3f, %.3f)" % g))
                     continue
+                if kind == "pose":
+                    self._on_pose(payload)
+                    continue
                 if kind == "extrinsic":
                     sid = payload["sensor_id"]
                     R = np.asarray(payload["R"], dtype=np.float32).reshape(3, 3)
@@ -702,6 +735,57 @@ class PreviewServer:
                     self._nodes.remove(conn)
             conn.close()
             print("[preview] node disconnected %s" % (addr[0],))
+
+    def _on_pose(self, payload):
+        """A node's 2D pose keypoints (CPOS, docs/skeleton_pose.md): unproject
+        each (u, v, z) through the sensor's ray table into a metric 3D joint
+        in the sensor's view frame, feed any active skeleton-capable
+        calibration session (RAW, pre-rig), then apply the rig transform and
+        broadcast the world-frame skeleton to viewers as JSON."""
+        sid = payload["sensor_id"]
+        cached = self._ray.get(sid)
+        if cached is None:
+            return                              # no intrinsics yet
+        full_w, full_h, rx, ry = cached
+        extrinsic = self._sensor_extrinsic.get(sid)
+        joints = []                             # (jid, view-frame p, conf)
+        for jid, u, v, z, conf in payload["keypoints"]:
+            if z <= 0:
+                continue                        # no depth at that pixel
+            ui = min(max(int(round(u)), 0), full_w - 1)
+            vi = min(max(int(round(v)), 0), full_h - 1)
+            xo, yo, zo = float(rx[vi, ui]) * z, float(ry[vi, ui]) * z, z
+            if extrinsic is not None:           # grid -> canonical depth frame
+                R, t = extrinsic
+                xo, yo, zo = (float(R[0, 0]) * xo + float(R[0, 1]) * yo
+                              + float(R[0, 2]) * zo + float(t[0]),
+                              float(R[1, 0]) * xo + float(R[1, 1]) * yo
+                              + float(R[1, 2]) * zo + float(t[1]),
+                              float(R[2, 0]) * xo + float(R[2, 1]) * yo
+                              + float(R[2, 2]) * zo + float(t[2]))
+            joints.append((int(jid), (xo, -yo, -zo), float(conf)))
+        if not joints:
+            return
+        now = time.time()
+        session = self._calib_session
+        if session is not None and session.get("joints") is not None \
+                and now <= session["deadline"]:
+            session["joints"].add(sid, now, joints)
+        rig = self._rig.get(sid)
+        out = {}
+        for jid, p, conf in joints:
+            if rig is not None:
+                R, t = rig
+                p = (float(R[0, 0] * p[0] + R[0, 1] * p[1] + R[0, 2] * p[2]
+                           + t[0]),
+                     float(R[1, 0] * p[0] + R[1, 1] * p[1] + R[1, 2] * p[2]
+                           + t[1]),
+                     float(R[2, 0] * p[0] + R[2, 1] * p[1] + R[2, 2] * p[2]
+                           + t[2]))
+            out[str(jid)] = [round(p[0], 4), round(p[1], 4), round(p[2], 4),
+                             round(conf, 2)]
+        self._broadcast_text({"type": "skeleton", "sensor": sid,
+                              "joints": out})
 
     def _node_accept_loop(self, host, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

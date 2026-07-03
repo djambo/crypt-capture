@@ -123,6 +123,24 @@ _REST = struct.Struct("<BBHQQHHII")    # frame header after the 4s magic
 IMU_MAGIC = b"CIMU"
 _IMU = struct.Struct("<4sIfff")        # magic, sensor_id, gx, gy, gz (unit vec)
 
+# --- 2D pose keypoints (skeleton) -----------------------------------------
+# Nodes that run a pose model on the color image (see docs/skeleton_pose.md)
+# ship the detected keypoints as a tiny per-frame message. Each keypoint is
+# (joint_id, u, v, z_m, conf): COCO-17 joint id, FULL-RESOLUTION pixel coords
+# on the current grid (the color image is pixel-aligned with depth in both
+# alignment modes, so (u,v) indexes the depth grid directly), the depth the
+# node read at that pixel in METRES (0 = no depth there — consumer may skip),
+# and the model's confidence 0..1. Central unprojects each keypoint through
+# the sensor's ray table into a metric 3D joint. Low-rate (<=1 per frame,
+# ~400 bytes), so it rides the same TCP stream as the frames.
+POSE_MAGIC = b"CPOS"
+_POSE_HEAD = struct.Struct("<4sIQB")     # magic, sensor_id, timestamp_ns, count
+_POSE_KP = struct.Struct("<Bffff")       # joint_id, u, v, z_m, conf
+
+# COCO-17 joint ids (what the standard 2D pose models emit), for reference:
+# 0 nose, 1/2 eyes, 3/4 ears, 5/6 shoulders, 7/8 elbows, 9/10 wrists,
+# 11/12 hips, 13/14 knees, 15/16 ankles.
+
 # --- grid -> depth extrinsic ---------------------------------------------
 # Which camera frame the streamed point grid lives in depends on alignment
 # (depth-optical for color_to_depth, color-optical for depth_to_color). To keep
@@ -150,6 +168,18 @@ def encode_extrinsic(sensor_id, R, t):
     t: 3 floats (metres). P_depth = R·P_grid + t."""
     vals = list(R)[:9] + list(t)[:3]
     return _EXTRINSIC.pack(EXTRINSIC_MAGIC, sensor_id, *vals)
+
+
+def encode_pose(sensor_id, timestamp_ns, keypoints):
+    """Encode one frame's 2D pose keypoints.
+
+    keypoints: iterable of (joint_id, u, v, z_m, conf) — see the CPOS comment
+    above for units/frames. Up to 255 keypoints."""
+    kps = list(keypoints)[:255]
+    out = _POSE_HEAD.pack(POSE_MAGIC, sensor_id, timestamp_ns, len(kps))
+    for jid, u, v, z, conf in kps:
+        out += _POSE_KP.pack(int(jid) & 0xFF, u, v, z, conf)
+    return out
 
 
 def read_message(sock):
@@ -182,6 +212,18 @@ def read_message(sock):
         vals = struct.unpack("<I" + "f" * 12, rest)
         return ("extrinsic", {"sensor_id": vals[0],
                               "R": vals[1:10], "t": vals[10:13]})
+    if magic == POSE_MAGIC:
+        rest = _recv_exactly(sock, _POSE_HEAD.size - 4)
+        if not rest:
+            return None
+        sid, ts, count = struct.unpack("<IQB", rest)
+        body = _recv_exactly(sock, count * _POSE_KP.size) if count else b""
+        if count and not body:
+            return None
+        kps = [_POSE_KP.unpack_from(body, i * _POSE_KP.size)
+               for i in range(count)]
+        return ("pose", {"sensor_id": sid, "timestamp_ns": ts,
+                         "keypoints": kps})
     if magic != MAGIC:
         raise ValueError("bad magic %r — stream desynced" % (magic,))
     head = _recv_exactly(sock, _REST.size)

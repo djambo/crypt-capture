@@ -308,6 +308,30 @@ Two repos:
   floors flat on the grid to 0.006°). `tests/test_rig.py` covers
   trackers/gates, rough solve, floor fit/level, JSON round-trip and the apply
   step. Remaining: the real-hardware wand pass, then TSDF fusion.
+- ✅ **Skeleton pipeline wiring (2026-07-03, design: `docs/skeleton_pose.md`)**
+  — 2D pose keypoints from the nodes, lifted to metric 3D at the relay.
+  New `CPOS` node→central message (`frame.encode_pose`, 3.6-safe): COCO-17
+  `(joint_id, u, v, z_m, conf)` in full-res grid coords (color is
+  depth-aligned in both modes, so the node ships 2D+depth and central owns
+  the 3D lift via its ray tables). Relay `_on_pose`: unproject → feed any
+  active skeleton-capable calibration session (raw) → apply rig → broadcast
+  `{"type":"skeleton"}` TEXT to viewers (same frame as that sensor's cloud).
+  **Rough Align auto-upgrades**: `calibrate_rough` collects a `JointTracker`
+  alongside the centroid track and prefers `solve_skeleton` (per-joint
+  `pair_tracks` stacked into a full 3D Kabsch, tier `"skeleton"`, ~2–5 cm —
+  a named joint is the same physical point from every view, unlike the
+  centroid) with the centroid+IMU solve as fallback. Decisions: RTMPose
+  (Apache-2.0) via TensorRT ON THE NODE (GPU idle, capture is CPU-bound;
+  inference decoupled latest-frame-only so the cloud stream can never wait
+  on it); DeepStream rejected (video-pipeline framework, wrong shape);
+  central-side inference = supported fallback for the weak Nano (relay
+  already rebuilds the aligned color grid — no protocol change needed).
+  Headless: `sim_node --skeleton` (synthetic wall-clock person projected
+  through `--pose`), `tests/test_pose.py`; two posed sims → Rough Align
+  auto-upgraded and recovered ground truth to 0.24°/6 mm; viewer markers +
+  toggle verified in Chromium. ⏳ remaining (hardware): the node inference
+  worker (`node/pose.py`, RTMPose→TensorRT, `--pose-model`, bench on Orin);
+  hands→particle attractors in the viewer.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -412,9 +436,11 @@ scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless 
 deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             run the Jetson node as a boot-time, auto-restarting systemd service
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
-            test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py
+            test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
+            test_pose.py
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
+            skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
             crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
 takes/      recordings (gitignored)
@@ -476,6 +502,13 @@ python3 -m scripts.send_command --port 8080 calibrate-fine --seconds 30 --ball-r
 python3 -m scripts.send_command --port 8080 calibrate-rough           # Tier-1, zero props
 python3 -m scripts.send_command --port 8080 calibrate-floor           # level each camera to its floor
 python3 -m tests.test_rig      # trackers/gates, rough+floor solves, file round-trip
+
+# Skeleton pipeline (docs/skeleton_pose.md) headless: posed sims emit synthetic
+# pose keypoints; Rough Align auto-upgrades to the skeleton solve:
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --ball 0.06 --pose "0,0,1.0,0.6,-5" --skeleton
+python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 1 --frames 0 --ball 0.06 --pose "50,1.2,1.1,-0.6,-8" --skeleton
+python3 -m scripts.send_command --port 8080 calibrate-rough      # -> tier "skeleton"
+python3 -m tests.test_pose     # CPOS round-trip, JointTracker, solve_skeleton
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

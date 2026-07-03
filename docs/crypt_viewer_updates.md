@@ -30,6 +30,34 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — Skeleton pipeline: live 3D joints + Rough Align auto-upgrade
+**Status: applied 2026-07-03** (viewer wired the same day; design:
+crypt-capture `docs/skeleton_pose.md`).
+
+**Summary.** Nodes can now ship 2D pose keypoints (new `CPOS` node→relay
+message; a TensorRT pose model on the node's color image — model integration
+lands with hardware, `sim_node --skeleton` emits synthetic pose-true joints
+today). The relay lifts them to metric 3D through each sensor's ray table and
+(a) broadcasts a live **skeleton stream** to viewers, (b) **auto-upgrades
+Rough Align**: with joints available, `calibrate_rough` solves a full 3D
+Kabsch on per-joint correspondences (`"tier":"skeleton"`, ~2–5 cm — named
+joints are true cross-view landmarks, unlike the body centroid) and falls
+back to the centroid+IMU solve otherwise.
+
+**Protocol impact (additive):** new downstream TEXT message
+`{"type":"skeleton","sensor":<id>,"joints":{"<coco_id>":[x,y,z,conf]}}` — in
+the SAME frame as that sensor's `CPV1` points. `calib_status` for rough runs
+may now report `"tier":"skeleton"` and includes a `"joints"` per-sensor count
+while collecting.
+
+**Viewer action (done):** `SkeletonMarkers` per sensor (tinted, in the
+sensor's group so they sit on its cloud, auto-hide when stale), a
+"skeletons" layer toggle, "Skeleton align" status formatting, and Detect
+Floor treats the skeleton tier like rough (per-sensor floor leveling still
+applies). Future: hands (joints 9/10) as particle attractors.
+
+---
+
 ## 2026-07-03 — Unknown-command NACK (`cmd_error`) — version-skew diagnosis
 **Status: applied 2026-07-03.**
 

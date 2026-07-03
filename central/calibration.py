@@ -305,6 +305,86 @@ def solve_rough(tracks, gravities, ref=None, max_dt=0.05, min_pairs=15):
 
 
 # --------------------------------------------------------------------------
+# Skeleton-based alignment ("skeleton" tier, docs/skeleton_pose.md). A pose
+# model on each node turns the operator into ~17 named 3D landmarks per frame
+# — unlike the body CENTROID (biased toward each camera by half the body
+# depth), a named joint is semantically the SAME physical point from every
+# viewpoint, so joints give dense true 3D<->3D correspondences and support a
+# full 3D Kabsch solve (no yaw-only restriction, no IMU dependency).
+# Expected accuracy ~2-5 cm (2D keypoint jitter + surface-vs-joint-center
+# depth), i.e. a better ROUGH tier; the wand pass remains the ~mm answer.
+# --------------------------------------------------------------------------
+
+class JointTracker:
+    """Accumulates per-sensor, PER-JOINT (time, 3D point) tracks from pose
+    keypoints already unprojected into each sensor's view frame."""
+
+    def __init__(self, min_conf=0.35):
+        self.min_conf = float(min_conf)
+        self.tracks = {}      # sensor_id -> {joint_id: [(t, p (3,))]}
+
+    def add(self, sensor_id, t_seconds, joints):
+        """joints: iterable of (joint_id, p (3,), conf). Low-confidence or
+        depth-less (all-zero) joints are skipped. Returns kept count."""
+        per = self.tracks.setdefault(sensor_id, {})
+        kept = 0
+        for jid, p, conf in joints:
+            if conf < self.min_conf:
+                continue
+            p = np.asarray(p, dtype=np.float64).reshape(3)
+            if not np.any(p):
+                continue
+            per.setdefault(int(jid), []).append((float(t_seconds), p))
+            kept += 1
+        return kept
+
+    def counts(self):
+        """Total joint samples per sensor (for progress display)."""
+        return {sid: sum(len(tr) for tr in per.values())
+                for sid, per in self.tracks.items()}
+
+
+def solve_skeleton(tracks, ref=None, max_dt=0.05, min_pairs=60):
+    """Solve every sensor's rigid transform into the reference sensor's frame
+    from matched per-joint tracks.
+
+    tracks: {sensor_id: {joint_id: [(t, p), ...]}} (JointTracker.tracks).
+    Correspondences are paired per joint by nearest timestamp, then stacked
+    across all joints into one closed-form solve_rigid per sensor. Returns the
+    solve_rig()-shaped dict; sensors with < min_pairs total matched joint
+    samples are omitted.
+    """
+    if not tracks:
+        return {}
+    if ref is None:
+        ref = min(tracks)
+    ref_joints = tracks[ref]
+    out = {ref: {"R": np.eye(3), "t": np.zeros(3), "rms": 0.0,
+                 "pairs": sum(len(tr) for tr in ref_joints.values())}}
+    for sid, per in tracks.items():
+        if sid == ref:
+            continue
+        A_all, B_all = [], []
+        for jid, track in per.items():
+            ref_track = ref_joints.get(jid)
+            if not ref_track:
+                continue
+            A, B = pair_tracks(track, ref_track, max_dt=max_dt)
+            if A.shape[0]:
+                A_all.append(A)
+                B_all.append(B)
+        if not A_all:
+            continue
+        A = np.vstack(A_all)
+        B = np.vstack(B_all)
+        if A.shape[0] < min_pairs:
+            continue
+        R, t, rms = solve_rigid(A, B)
+        out[sid] = {"R": R, "t": t, "rms": rms, "pairs": int(A.shape[0])}
+    return out
+
+
+# --------------------------------------------------------------------------
 # Per-sensor floor leveling ("floor" tier). One rigid transform can only
 # flatten ONE plane — with several uncalibrated (or IMU-rough-aligned)
 # cameras, each cloud carries its own floor tilt, so making every cloud sit

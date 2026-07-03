@@ -25,7 +25,8 @@ import time
 from array import array
 
 from protocol import control, discovery, rvl
-from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
+from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
+                            encode_pose)
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
@@ -118,6 +119,57 @@ def ball_world_pos(now):
             -1.3 + 0.40 * math.sin(2 * math.pi * now / 9.1))
 
 
+# COCO joint ids used by the synthetic skeleton (a subset is plenty).
+_SKEL_NOSE, _SKEL_LSHO, _SKEL_RSHO = 0, 5, 6
+_SKEL_LWRI, _SKEL_RWRI, _SKEL_LHIP, _SKEL_RHIP = 9, 10, 11, 12
+_SKEL_LANK, _SKEL_RANK = 15, 16
+
+
+def skeleton_world_joints(now):
+    """A synthetic person (world frame, metres): pelvis wanders slowly through
+    the volume while one arm waves — enough articulation that per-joint tracks
+    are non-degenerate. Wall-clock-driven so all sim sensors agree.
+    Returns {joint_id: (x, y, z)}."""
+    cx = 0.45 * math.sin(2 * math.pi * now / 13.0)
+    cz = -1.3 + 0.35 * math.sin(2 * math.pi * now / 17.0)
+    cy = 0.95                                  # pelvis height over floor-ish
+    wave = 0.25 * math.sin(2 * math.pi * now / 2.6)
+    return {
+        _SKEL_NOSE: (cx, cy + 0.65, cz),
+        _SKEL_LSHO: (cx - 0.20, cy + 0.45, cz),
+        _SKEL_RSHO: (cx + 0.20, cy + 0.45, cz),
+        _SKEL_LWRI: (cx - 0.38, cy + 0.10 + wave, cz + 0.10),
+        _SKEL_RWRI: (cx + 0.38, cy + 0.05, cz + 0.05),
+        _SKEL_LHIP: (cx - 0.12, cy, cz),
+        _SKEL_RHIP: (cx + 0.12, cy, cz),
+        _SKEL_LANK: (cx - 0.15, cy - 0.90, cz),
+        _SKEL_RANK: (cx + 0.15, cy - 0.90, cz),
+    }
+
+
+def project_keypoints(joints_world, pose, width, height):
+    """World-frame joints -> CPOS keypoints for a sensor at `pose` (view->world
+    R rows, t): (joint_id, u, v, z_m, conf), u/v in FULL-RES pixel coords on
+    the synthetic pinhole grid, z the true optical depth in metres — exactly
+    what a real node ships after 2D pose + a depth lookup. Off-frame joints
+    are dropped (a real model wouldn't see them either)."""
+    R, t = pose
+    fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
+    cx, cy = width / 2.0, height / 2.0
+    out = []
+    for jid, pw in joints_world.items():
+        vx, vy, vz = world_to_view(R, t, pw)
+        xo, yo, zo = vx, -vy, -vz              # view -> optical
+        if zo <= 0.2:
+            continue
+        u = cx + fx * xo / zo
+        v = cy + fx * yo / zo
+        if not (0 <= u < width and 0 <= v < height):
+            continue
+        out.append((jid, u, v, zo, 0.9))
+    return out
+
+
 def synth_ball_frame(width, height, frame_id, ball_view, radius, stride=1,
                      pose=None, floor=None):
     """Ray-render a sphere (center `ball_view` in the VIEW frame: x right,
@@ -187,7 +239,7 @@ def synth_ball_frame(width, height, frame_id, ball_view, radius, stride=1,
 def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         preview_stride=1, rig_id=discovery.DEFAULT_RIG_ID,
         discovery_port=discovery.DISCOVERY_PORT, ball=0.0, pose=None,
-        floor=None):
+        floor=None, skeleton=False):
     if host == "auto":                          # find central by rig id (see discovery.py)
         found = discovery.discover_central(rig_id, port=discovery_port)
         if found is None:
@@ -288,6 +340,16 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             sock.sendall(frame.encode())
             sent += 1
 
+            # Synthetic pose keypoints (docs/skeleton_pose.md): the shared
+            # wall-clock skeleton projected through THIS sensor's pose —
+            # exactly what a real node's pose model + depth lookup would ship.
+            if skeleton:
+                kps = project_keypoints(skeleton_world_joints(time.time()),
+                                        (pose_R, pose_t), width, height)
+                if kps:
+                    sock.sendall(encode_pose(
+                        sensor_id, int(time.time() * 1e9), kps))
+
             # Live orientation: wobble the synthetic down vector while streaming,
             # so the viewer's floor/gizmo visibly reorient (no real IMU). In
             # ball/pose mode the vector stays pose-true (a wobble would corrupt
@@ -334,11 +396,15 @@ def main():
                     help="ball mode: also render the world floor plane at "
                          "this world-frame height (m), e.g. -1.2 — exercises "
                          "per-sensor floor leveling headlessly")
+    ap.add_argument("--skeleton", action="store_true",
+                    help="emit synthetic CPOS pose keypoints (a shared "
+                         "wall-clock skeleton seen from --pose) — exercises "
+                         "the skeleton pipeline headlessly")
     args = ap.parse_args()
     n = run(args.host, args.port, args.sensor, args.frames, args.fps,
             preview_stride=args.preview_stride, rig_id=args.rig_id,
             discovery_port=args.discovery_port, ball=args.ball,
-            pose=args.pose, floor=args.floor)
+            pose=args.pose, floor=args.floor, skeleton=args.skeleton)
     print("sensor %d: streamed %d frames" % (args.sensor, n))
 
 
