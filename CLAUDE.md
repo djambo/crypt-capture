@@ -270,8 +270,12 @@ Two repos:
   **viewer-driven sessions** — relay-handled `calibrate_fine {seconds,
   ball_radius}` / `calibrate_rough {seconds}` commands (the crypt viewer's
   Fine/Rough Align buttons + ball-radius field drive them; also
-  `scripts/send_command.py calibrate-fine/-rough/reload-rig-calib`). Sessions
-  collect off the RAW pre-transform clouds so re-runs are correct.
+  `scripts/send_command.py calibrate-fine/-rough/reload-rig-calib/
+  clear-rig-calib`). Sessions collect off the RAW pre-transform clouds so
+  re-runs are correct; `clear_rig_calib` (the viewer's **Reset** button)
+  cancels a running session, deletes the file and returns to raw frames.
+  Rough needs no IMU toggle (uses the connect-time gravity); per-tier operator
+  steps ("walk a slow L…", "wave the ball slowly…") are in the doc + panel.
   **Tier-1 rough solve** — `solve_rough` = per-sensor IMU leveling
   (`level_rotation`) + yaw-only Kabsch (`solve_yaw_translation`) on
   body-centroid tracks (yaw-only on purpose: the centroid's toward-camera bias

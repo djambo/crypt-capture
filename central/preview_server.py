@@ -44,7 +44,8 @@ from protocol.frame import read_message
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_camera", "set_imu")
 # Browser→RELAY commands, handled here (rig calibration; nothing goes to nodes).
-_RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "reload_rig_calib")
+_RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "reload_rig_calib",
+                   "clear_rig_calib")
 
 RIG_CALIB_POLL_S = 1.0        # how often the rig_calib.json mtime is checked
 CALIB_STATUS_EVERY_S = 1.0    # progress broadcast cadence during collection
@@ -259,6 +260,8 @@ class PreviewServer:
         if name in _RELAY_COMMANDS:            # handled here, not forwarded
             if name == "reload_rig_calib":
                 self._load_rig_calib(force=True)
+            elif name == "clear_rig_calib":
+                self._clear_rig_calib()
             else:
                 self._start_calibration(cmd)
             return
@@ -376,6 +379,33 @@ class PreviewServer:
         return {"type": "rig_poses", "tier": meta.get("tier"),
                 "ref": meta.get("ref"), "sensors": sensors}
 
+    def _clear_rig_calib(self):
+        """Reset alignment: cancel any running calibration session, delete
+        rig_calib.json, and go back to raw per-camera frames (the viewer's
+        Reset button / `clear_rig_calib`). Broadcasts empty poses so gizmos
+        return to the origin."""
+        with self._calib_lock:
+            session = self._calib_session
+            if session is not None:
+                session["cancelled"] = True
+                self._calib_session = None
+        path = self.rig_calib_path or "rig_calib.json"
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        self._rig, self._rig_meta, self._rig_mtime = {}, None, None
+        print("[preview] rig calib cleared — raw sensor frames")
+        self._broadcast_text(self._rig_poses_message())
+        if session is not None:
+            print("[preview] %s calibration cancelled" % session["tier"])
+            # Sent AFTER the clear so it outruns any in-flight "collecting"
+            # broadcast (per-connection ordering) — the viewer's status line
+            # must not be left saying "collecting…" for a dead session.
+            self._broadcast_text({"type": "calib_status",
+                                  "state": "cancelled",
+                                  "tier": session["tier"]})
+
     # --- viewer-driven calibration sessions (Fine/Rough Align buttons) ---
 
     def _start_calibration(self, cmd):
@@ -413,6 +443,8 @@ class PreviewServer:
     def _calibration_loop(self, session):
         """Broadcast collection progress ~1 Hz, then solve when time is up."""
         while True:
+            if session.get("cancelled"):       # Reset pressed mid-collection
+                return
             left = session["deadline"] - time.time()
             if left <= 0:
                 break

@@ -73,7 +73,37 @@ matched modality (residuals measured in exactly the space we render).
   form (Kabsch/Umeyama), no initial guess, no chaining, all cameras at once —
   and it reuses the existing depth/foreground pipeline end to end.
 
-## The procedure (operator's view)
+## The rough (Tier-1) procedure — operator's view
+
+Zero props, ~10 s, good to ~5–10 cm. The landmark is **your own body's
+foreground centroid**, so what matters is that every camera sees the same
+person tracing a path with real spatial extent:
+
+1. All nodes streaming. **Capture background** on every sensor with the scene
+   empty. (The IMU orientation toggle is NOT needed — each node already sent
+   its gravity vector at connect, and the solve uses that for roll/pitch.)
+2. **ONE person** walks in — you must be the only foreground on every camera.
+3. Press **Rough Align** (or `send_command calibrate-rough`), then for the
+   ~10 s window:
+   - **walk a slow "L"** — roughly 2 m in one direction, turn, 2 m
+     perpendicular — through the **middle** of the capture volume. Two legs in
+     different directions are what pin down yaw + XY; a straight line or
+     standing still leaves the solve degenerate.
+   - **raise an arm** for part of it (vertical variation helps the height
+     match), and move at a normal walking pace or slower.
+   - stay **fully visible to every camera** the whole time — if you leave one
+     camera's view its track has holes and it may come back "unsolved."
+4. Watch the status line: the per-camera sample counters should all climb at
+   roughly the same rate. On "done" the clouds snap to within ~5–10 cm —
+   enough for scene editing; run the wand pass (below) before recording.
+5. Not right? Press **Reset** (clears the calibration, cancels a running pass,
+   back to raw camera frames) and go again.
+
+Accuracy honesty: the centroid each camera sees is biased toward that camera
+by ~half your body depth, which is exactly why this tier stops at centimetres
+and why the solver only takes yaw/XY from it (roll/pitch come from the IMU).
+
+## The fine (Tier-2) wand procedure — operator's view
 
 1. All nodes streaming, empty scene. **Capture background** on every sensor.
 2. Walk in holding the **calibration ball** (a plain rigid sphere, ~10–20 cm —
@@ -88,7 +118,9 @@ matched modality (residuals measured in exactly the space we render).
    **millimetres = good; centimetres = re-run** (ball too fast, or a sensor
    barely saw it).
 5. Transforms are saved to `rig_calib.json` and applied by the relay from then
-   on. Re-run only when cameras physically move.
+   on. Re-run only when cameras physically move. A bad pass is undone with the
+   viewer's **Reset** button (`clear_rig_calib`) — it also cancels a
+   still-running collection.
 
 ## The math (implemented + unit-tested)
 
