@@ -281,12 +281,28 @@ Two repos:
   body-centroid tracks (yaw-only on purpose: the centroid's toward-camera bias
   would corrupt a full 3D solve; roll/pitch come from the IMU); world = the
   ref sensor's leveled frame (floor flat by construction).
-  **Headless proof** — `sim_node --ball 0.05 --pose "yaw,x,y,z"` ray-renders a
-  shared wall-clock-driven sphere from a known pose (pose-true IMU vector);
+  **Per-sensor floor leveling ("floor" tier, 2026-07-03)** — one rigid
+  correction can only flatten ONE plane, so `calibrate_floor {seconds:3}`
+  fits each camera's floor in its OWN raw cloud (`fit_floor`: lowest dense
+  band along the IMU up hint + LS refine; floor must be in view → background
+  subtraction off) and composes per-sensor corrections onto the current rig
+  (`solve_floor_level`: normal→+Y about the floor centroid, common height) —
+  all floors flat + coplanar on the wire; yaw/XY untouched. For
+  uncalibrated/rough rigs only (a fine wand calib is already mm-coplanar; the
+  viewer's Detect Floor routes accordingly and chains its local grid snap).
+  **Relay write-lock fix (2026-07-03)** — WS frames to a client are now
+  serialised per connection: concurrent writers (per-sensor node threads +
+  status broadcasts) interleaved bytes mid-frame on large sends and browsers
+  dropped the socket ("Invalid frame header").
+  **Headless proof** — `sim_node --ball 0.05 --pose "yaw,x,y,z[,pitch]"
+  [--floor Y]` ray-renders a shared wall-clock-driven sphere (+ optionally
+  the world floor plane) from a known pose (pose-true IMU vector);
   two posed sim nodes → calibrate_rig recovered 50°/1.2 m ground truth to
-  **0.16°/3 mm**, wire clouds register, viewer verified in headless Chromium.
-  `tests/test_rig.py` covers trackers/gates, rough solve, JSON round-trip and
-  the apply step. Remaining: the real-hardware wand pass, then TSDF fusion.
+  **0.16°/3 mm**, wire clouds register, viewer verified in headless Chromium
+  (incl. two differently-pitched cameras → one Detect Floor click → both
+  floors flat on the grid to 0.006°). `tests/test_rig.py` covers
+  trackers/gates, rough solve, floor fit/level, JSON round-trip and the apply
+  step. Remaining: the real-hardware wand pass, then TSDF fusion.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -453,7 +469,8 @@ python3 -m scripts.calibrate_rig --seconds 12 --ball-radius 0.05   # writes rig_
 # Fine Align button / headless:
 python3 -m scripts.send_command --port 8080 calibrate-fine --seconds 30 --ball-radius 0.05
 python3 -m scripts.send_command --port 8080 calibrate-rough           # Tier-1, zero props
-python3 -m tests.test_rig      # trackers/gates, rough solve, file round-trip
+python3 -m scripts.send_command --port 8080 calibrate-floor           # level each camera to its floor
+python3 -m tests.test_rig      # trackers/gates, rough+floor solves, file round-trip
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

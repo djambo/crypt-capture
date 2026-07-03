@@ -44,8 +44,8 @@ from protocol.frame import read_message
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_camera", "set_imu")
 # Browser→RELAY commands, handled here (rig calibration; nothing goes to nodes).
-_RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "reload_rig_calib",
-                   "clear_rig_calib")
+_RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "calibrate_floor",
+                   "reload_rig_calib", "clear_rig_calib")
 
 RIG_CALIB_POLL_S = 1.0        # how often the rig_calib.json mtime is checked
 CALIB_STATUS_EVERY_S = 1.0    # progress broadcast cadence during collection
@@ -189,6 +189,12 @@ class PreviewServer:
         self.stride = stride
         self.max_points = max_points
         self._clients = []                  # browser WebSocket sockets
+        # Per-client WRITE lock: node threads (one per sensor) and the calib
+        # status/pose broadcasts all write to the same client sockets. sendall
+        # of a large frame spans multiple send() syscalls, so concurrent
+        # writers would interleave bytes MID-FRAME and the browser drops the
+        # socket with "Invalid frame header".
+        self._client_locks = {}             # conn -> threading.Lock
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
@@ -226,6 +232,7 @@ class PreviewServer:
                 continue
             with self._lock:
                 self._clients.append(conn)
+                self._client_locks[conn] = threading.Lock()
             print("[preview] viewer connected %s (%d total)"
                   % (addr[0], len(self._clients)))
             # A calibrated rig greets each viewer with the camera poses so its
@@ -287,27 +294,35 @@ class PreviewServer:
         with self._lock:
             if conn in self._clients:
                 self._clients.remove(conn)
+            self._client_locks.pop(conn, None)
         try:
             conn.close()
         except OSError:
             pass
+
+    def _send_frame(self, conn, frame):
+        """Write one encoded WS frame to a client, serialised per client so
+        concurrent writers never interleave bytes mid-frame."""
+        lock = self._client_locks.get(conn)
+        if lock is None:
+            return
+        try:
+            with lock:
+                conn.sendall(frame)
+        except OSError:
+            self._drop(conn)
 
     def _broadcast(self, payload):
         frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
         with self._lock:
             clients = list(self._clients)
         for conn in clients:
-            try:
-                conn.sendall(frame)
-            except OSError:
-                self._drop(conn)
+            self._send_frame(conn, frame)
 
     def _send_text(self, conn, obj):
         data = json.dumps(obj).encode("utf-8")
-        try:
-            conn.sendall(websocket.encode_frame(data, opcode=websocket.OP_TEXT))
-        except OSError:
-            self._drop(conn)
+        self._send_frame(conn, websocket.encode_frame(
+            data, opcode=websocket.OP_TEXT))
 
     def _broadcast_text(self, obj):
         frame = websocket.encode_frame(json.dumps(obj).encode("utf-8"),
@@ -315,10 +330,7 @@ class PreviewServer:
         with self._lock:
             clients = list(self._clients)
         for conn in clients:
-            try:
-                conn.sendall(frame)
-            except OSError:
-                self._drop(conn)
+            self._send_frame(conn, frame)
 
     # --- rig extrinsics: one canonical world frame on the wire -----------
     # (docs/rig_calibration.md; solved by scripts/calibrate_rig.py or the
@@ -409,14 +421,19 @@ class PreviewServer:
     # --- viewer-driven calibration sessions (Fine/Rough Align buttons) ---
 
     def _start_calibration(self, cmd):
-        tier = "fine" if cmd.get("cmd") == "calibrate_fine" else "rough"
-        seconds = float(cmd.get("seconds", 30.0 if tier == "fine" else 10.0))
+        tier = {"calibrate_fine": "fine", "calibrate_rough": "rough",
+                "calibrate_floor": "floor"}[cmd.get("cmd")]
+        seconds = float(cmd.get("seconds",
+                                {"fine": 30.0, "rough": 10.0,
+                                 "floor": 3.0}[tier]))
         with self._calib_lock:
             if self._calib_session is not None:
                 self._broadcast_text({
                     "type": "calib_status", "state": "busy",
                     "tier": self._calib_session["tier"]})
                 return
+            radius = None
+            min_pairs = 0
             if tier == "fine":
                 radius = float(cmd.get("ball_radius", 0.05))
                 tracker = calibration.BallTracker(
@@ -425,11 +442,12 @@ class PreviewServer:
                     max_points=int(cmd.get("max_points", 8000)),
                     max_fit_rms=float(cmd.get("max_fit_rms", 0.012)))
                 min_pairs = int(cmd.get("min_pairs", 30))
-            else:
-                radius = None
+            elif tier == "rough":
                 tracker = calibration.CentroidTracker(
                     min_points=int(cmd.get("min_points", 300)))
                 min_pairs = int(cmd.get("min_pairs", 15))
+            else:                              # floor: raw point samples
+                tracker = calibration.FloorSampler()
             session = {"tier": tier, "tracker": tracker, "seconds": seconds,
                        "deadline": time.time() + seconds,
                        "ball_radius": radius, "min_pairs": min_pairs}
@@ -475,16 +493,41 @@ class PreviewServer:
         if tier == "fine":
             rig = calibration.solve_rig(tracker.tracks,
                                         min_pairs=session["min_pairs"])
-        else:
+        elif tier == "rough":
             gravities = {sid: g for sid, g in self._sensor_gravity.items()
                          if g is not None}
             rig = calibration.solve_rough(tracker.tracks, gravities,
                                           min_pairs=session["min_pairs"])
+        else:                                  # floor: level each sensor
+            samples = tracker.stacked()
+            # World-frame up hint per sensor: its IMU gravity rotated by its
+            # current rig transform (identity if uncalibrated).
+            hints = {}
+            for sid in samples:
+                g = self._sensor_gravity.get(sid) or (0.0, -1.0, 0.0)
+                rig_i = self._rig.get(sid)
+                up = -np.asarray(g, dtype=np.float64)
+                if rig_i is not None:
+                    up = np.asarray(rig_i[0], dtype=np.float64).dot(up)
+                hints[sid] = up
+            # Existing entries (with their reported quality) are kept for
+            # sensors the floor fit can't solve.
+            meta_sensors = (self._rig_meta or {}).get("sensors", {})
+            prev = {sid: {"R": R, "t": t,
+                          "rms": meta_sensors.get(sid, {}).get("rms", 0.0),
+                          "pairs": meta_sensors.get(sid, {}).get("pairs", 0)}
+                    for sid, (R, t) in self._rig.items()}
+            rig = calibration.solve_floor_level(
+                samples, hints, rig=prev,
+                ref=(self._rig_meta or {}).get("ref"))
         if not rig:
-            reason = ("no ball detections passed the gates — background "
-                      "captured on every sensor, ball (only) in frame?"
-                      if tier == "fine" else
-                      "no usable centroid tracks — is a subject in frame?")
+            reason = {
+                "fine": "no ball detections passed the gates — background "
+                        "captured on every sensor, ball (only) in frame?",
+                "rough": "no usable centroid tracks — is a subject in frame?",
+                "floor": "no credible floor plane on any sensor — is the "
+                         "floor in view (clear the background subtraction)?",
+            }[tier]
             print("[preview] %s calibration failed: %s" % (tier, reason))
             self._broadcast_text({
                 "type": "calib_status", "state": "failed", "tier": tier,
@@ -492,9 +535,18 @@ class PreviewServer:
                 "centers": {str(s): n
                             for s, n in tracker.counts().items()}})
             return
-        unsolved = sorted(set(tracker.tracks) - set(rig))
+        if tier == "floor":
+            # A sensor is unsolved if its entry is still the pre-existing one
+            # (or absent): the floor fit found no credible plane for it.
+            unsolved = sorted(sid for sid in samples
+                              if rig.get(sid) is prev.get(sid))
+        else:
+            unsolved = sorted(set(tracker.tracks) - set(rig))
         path = self.rig_calib_path or "rig_calib.json"
-        calibration.save_rig_calib(path, rig, tier=tier, ref=min(rig),
+        ref = (self._rig_meta or {}).get("ref")
+        if ref is None or ref not in rig:
+            ref = min(rig)
+        calibration.save_rig_calib(path, rig, tier=tier, ref=ref,
                                    ball_radius=session["ball_radius"])
         for sid in sorted(rig):
             print("[preview] %s calibration sensor %d: rms %.1f mm over %d "

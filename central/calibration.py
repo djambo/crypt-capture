@@ -305,6 +305,146 @@ def solve_rough(tracks, gravities, ref=None, max_dt=0.05, min_pairs=15):
 
 
 # --------------------------------------------------------------------------
+# Per-sensor floor leveling ("floor" tier). One rigid transform can only
+# flatten ONE plane — with several uncalibrated (or IMU-rough-aligned)
+# cameras, each cloud carries its own floor tilt, so making every cloud sit
+# flush on the world floor requires a per-sensor correction folded into the
+# rig calibration. Each sensor's floor plane is fitted in its own cloud and a
+# correction (rotate its floor normal onto +Y about the floor centroid, then
+# shift to one common height) is composed onto that sensor's existing rig
+# transform (identity if uncalibrated). This levels roll/pitch/height per
+# camera; yaw/XY still come from the rough/fine solves.
+# NOTE: on a FINE (wand) calibrated rig the floors are already coplanar to
+# ~mm — re-leveling per sensor there can only degrade the mm registration, so
+# it's meant for uncalibrated/rough rigs (the viewer gates accordingly).
+# --------------------------------------------------------------------------
+
+class FloorSampler:
+    """Accumulates a bounded per-sensor sample of RAW view-frame points for
+    the floor fit (per-frame subsample, hard cap per sensor)."""
+
+    def __init__(self, per_frame=4000, cap=80000):
+        self.per_frame = int(per_frame)
+        self.cap = int(cap)
+        self.samples = {}           # sensor_id -> [np (n,3), ...]
+        self._totals = {}
+
+    def add(self, sensor_id, t_seconds, points):
+        p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+        if p.shape[0] == 0:
+            return "count"
+        if self._totals.get(sensor_id, 0) >= self.cap:
+            return "full"
+        if p.shape[0] > self.per_frame:
+            idx = np.linspace(0, p.shape[0] - 1, self.per_frame).astype(int)
+            p = p[idx]
+        self.samples.setdefault(sensor_id, []).append(p)
+        self._totals[sensor_id] = self._totals.get(sensor_id, 0) + p.shape[0]
+        return "ok"
+
+    def counts(self):
+        return dict(self._totals)
+
+    def stacked(self):
+        return {sid: np.vstack(chunks) for sid, chunks in self.samples.items()}
+
+
+def fit_floor(points, up_hint, band=0.10, refine_tol=0.02, min_inliers=300,
+              max_tilt_deg=30.0):
+    """Fit the floor plane in a cloud: the lowest dense band of points along
+    the up hint, refined by least squares. Returns (normal (3,), centroid (3,),
+    rms, inliers) with the normal oriented along up, or (None, None, None, 0)
+    if there is no credible floor (too few points in the band, or the fitted
+    plane tilts more than max_tilt_deg from the hint — probably a wall)."""
+    W = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    u = np.asarray(up_hint, dtype=np.float64).reshape(3)
+    n_u = np.linalg.norm(u)
+    u = np.array([0.0, 1.0, 0.0]) if n_u < 1e-9 else u / n_u
+    if W.shape[0] < min_inliers:
+        return None, None, None, 0
+    proj = W.dot(u)
+    lvl = np.percentile(proj, 2.0)          # the lowest points = the floor
+    m = proj <= lvl + band
+    n = u
+    c = None
+    for _ in range(3):
+        P = W[m]
+        if P.shape[0] < min_inliers:
+            return None, None, None, 0
+        c = P.mean(axis=0)
+        d = P - c
+        _w, V = np.linalg.eigh(d.T.dot(d))
+        n = V[:, 0]                          # smallest-variance direction
+        if n.dot(u) < 0:
+            n = -n
+        m = np.abs((W - c).dot(n)) < refine_tol
+    P = W[m]
+    if P.shape[0] < min_inliers:
+        return None, None, None, 0
+    rms = float(np.sqrt(np.mean(((P - c).dot(n)) ** 2)))
+    tilt = np.degrees(np.arccos(np.clip(n.dot(u), -1.0, 1.0)))
+    if tilt > max_tilt_deg:
+        return None, None, None, 0
+    return n, c, rms, int(P.shape[0])
+
+
+def solve_floor_level(samples, up_hints, rig=None, ref=None):
+    """Per-sensor floor leveling composed onto an existing rig solution.
+
+    samples:  {sensor_id: (N,3) RAW view-frame points} (floor in view!).
+    up_hints: {sensor_id: world-frame up unit vector} (e.g. -R_i·gravity_i;
+              missing -> (0,1,0)).
+    rig:      existing {sensor_id: {"R","t",...}} or None (uncalibrated).
+
+    For each sensor with a credible floor fit: map its sample into the current
+    world frame, fit the floor there, and compose a correction that rotates
+    that floor's normal onto +Y about the floor centroid and shifts it to the
+    REFERENCE sensor's floor height — every fitted floor ends up flat and
+    coplanar. Sensors without a fit keep their existing entry (if any).
+    Returns the merged solution dict; "rms" is the plane-fit rms and "pairs"
+    the inlier count for floor-levelled sensors.
+    """
+    rig = rig or {}
+    fits = {}
+    for sid, pts in samples.items():
+        prev = rig.get(sid)
+        if prev is not None:
+            R0 = np.asarray(prev["R"], dtype=np.float64)
+            t0 = np.asarray(prev["t"], dtype=np.float64)
+        else:
+            R0, t0 = np.eye(3), np.zeros(3)
+        W = np.asarray(pts, dtype=np.float64).dot(R0.T) + t0
+        n, c, rms, inliers = fit_floor(W, up_hints.get(sid, (0.0, 1.0, 0.0)))
+        if n is None:
+            continue
+        fits[sid] = (R0, t0, n, c, rms, inliers)
+    if not fits:
+        return {}
+    if ref is None or ref not in fits:
+        ref = min(fits)
+    # Common floor height: the reference sensor's floor centroid stays put.
+    h = float(fits[ref][3][1])
+    up = np.array([0.0, 1.0, 0.0])
+    out = dict(rig)                          # unsolved sensors keep old entries
+    for sid, (R0, t0, n, c, rms, inliers) in fits.items():
+        # Correction about the floor centroid: x' = Rc·(x - c) + c + dy.
+        v = np.cross(n, up)
+        cos = float(n.dot(up))
+        if cos < -1.0 + 1e-9:
+            Rc = np.diag([1.0, -1.0, -1.0])
+        else:
+            vx = np.array([[0.0, -v[2], v[1]],
+                           [v[2], 0.0, -v[0]],
+                           [-v[1], v[0], 0.0]])
+            Rc = np.eye(3) + vx + vx.dot(vx) * (1.0 / (1.0 + cos))
+        dy = np.array([0.0, h - c[1], 0.0])
+        out[sid] = {"R": Rc.dot(R0),
+                    "t": Rc.dot(t0 - c) + c + dy,
+                    "rms": rms, "pairs": inliers}
+    return out
+
+
+# --------------------------------------------------------------------------
 # rig_calib.json I/O — the file the calibration writes and the relay applies.
 # Per sensor: R (3x3, row-major nested lists), t (metres), rms, pairs; plus
 # tier ("fine" | "rough"), reference sensor id and the ball radius used.

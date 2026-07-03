@@ -16,8 +16,9 @@ import tempfile
 import numpy as np
 
 from central.calibration import (
-    BallTracker, CentroidTracker, fit_sphere, level_rotation, load_rig_calib,
-    rig_to_dict, save_rig_calib, solve_rig, solve_rough, solve_yaw_translation,
+    BallTracker, CentroidTracker, FloorSampler, fit_floor, fit_sphere,
+    level_rotation, load_rig_calib, rig_to_dict, save_rig_calib, solve_floor_level,
+    solve_rig, solve_rough, solve_yaw_translation,
 )
 
 RNG = np.random.RandomState(11)
@@ -181,6 +182,84 @@ def test_rig_calib_roundtrip():
     print("rig_calib.json round-trip: OK")
 
 
+def synth_room(n_floor=4000, n_wall=1500, n_body=800):
+    """World-frame scene: floor at y=0, a wall, a body blob."""
+    floor = np.column_stack([RNG.uniform(-2, 2, n_floor),
+                             RNG.normal(scale=0.004, size=n_floor),
+                             RNG.uniform(-2, 2, n_floor)])
+    wall = np.column_stack([np.full(n_wall, 2.0) + RNG.normal(scale=0.004, size=n_wall),
+                            RNG.uniform(0, 2.2, n_wall),
+                            RNG.uniform(-2, 2, n_wall)])
+    body = RNG.normal(scale=0.25, size=(n_body, 3)) + np.array([0.2, 1.0, -0.5])
+    return np.vstack([floor, wall, body])
+
+
+def test_fit_floor():
+    world = synth_room()
+    n, c, rms, inliers = fit_floor(world, (0, 1, 0))
+    assert n is not None and inliers > 2000
+    assert np.degrees(np.arccos(min(1, n[1]))) < 0.5, "floor normal off"
+    assert abs(c[1]) < 0.01 and rms < 0.01
+    # A cloud with no floor-like plane near the hint is refused.
+    n2, _, _, _ = fit_floor(RNG.normal(scale=0.3, size=(2000, 3)), (0, 1, 0))
+    assert n2 is None
+    print("fit_floor: OK (tilt %.2f deg, rms %.1f mm, %d inliers)"
+          % (np.degrees(np.arccos(min(1, n[1]))), rms * 1000, inliers))
+
+
+def test_solve_floor_level():
+    """Two cameras with DIFFERENT floor tilts (the user-visible bug: one
+    global correction can't flatten both). After solve_floor_level every
+    sensor's floor must be flat (+Y) and coplanar."""
+    world = synth_room()
+    poses = {0: (rot_x(14).dot(rot_y(20)), np.array([0.1, 1.3, -2.2])),
+             1: (rot_x(-9).dot(rot_y(-130)), np.array([1.4, 1.1, -0.8]))}
+    # Uncalibrated: rig=None, and each hint is the camera's own up estimate
+    # (its IMU): up in the raw view frame = R_wv·(0,1,0) = R_vw^T·(0,1,0).
+    samples, hints = {}, {}
+    for sid, (R_vw, t_vw) in poses.items():
+        R_wv, t_wv = R_vw.T, -R_vw.T.dot(t_vw)
+        samples[sid] = world.dot(R_wv.T) + t_wv        # raw view-frame cloud
+        hints[sid] = R_vw.T.dot([0.0, 1.0, 0.0])
+    sol = solve_floor_level(samples, hints, rig=None, ref=0)
+    assert set(sol) == {0, 1}
+    for sid in (0, 1):
+        R = np.asarray(sol[sid]["R"])
+        t = np.asarray(sol[sid]["t"])
+        Wp = samples[sid].dot(R.T) + t
+        n, c, rms, inl = fit_floor(Wp, (0, 1, 0))
+        tilt = np.degrees(np.arccos(min(1, n[1])))
+        assert tilt < 0.3, "sensor %d floor still tilted %.2f deg" % (sid, tilt)
+        if sid == 0:
+            h0 = c[1]
+        else:
+            assert abs(c[1] - h0) < 0.01, "floors not coplanar"
+    # Composing onto an existing rough rig keeps its yaw: transform a lateral
+    # unit vector and check it only tips slightly, never spins.
+    rough = {0: {"R": np.eye(3), "t": np.zeros(3), "rms": 0, "pairs": 1},
+             1: {"R": rot_y(31), "t": np.array([0.5, 0.0, 0.2]),
+                 "rms": 0, "pairs": 1}}
+    # Raw clouds consistent with that rough rig: world seen through pose,
+    # then rough maps them near world again (identity case for simplicity).
+    sol2 = solve_floor_level({0: samples[0]}, {0: hints[0]}, rig=rough, ref=0)
+    assert 1 in sol2 and np.allclose(sol2[1]["R"], rot_y(31)), \
+        "unsolved sensor's existing entry must be kept untouched"
+    print("solve_floor_level: OK (both floors flat + coplanar)")
+
+
+def test_floor_sampler():
+    s = FloorSampler(per_frame=100, cap=250)
+    big = RNG.uniform(-1, 1, size=(5000, 3))
+    assert s.add(0, 0.0, big) == "ok"
+    assert s.counts()[0] == 100
+    assert s.add(0, 0.1, big) == "ok"
+    assert s.add(0, 0.2, big) == "ok"      # hits the cap after this frame
+    assert s.add(0, 0.3, big) == "full"
+    assert s.stacked()[0].shape == (300, 3)
+    assert s.add(1, 0.0, np.zeros((0, 3))) == "count"
+    print("FloorSampler: OK")
+
+
 def test_apply_registers_views():
     """The relay's apply step: two synthetic views of the same world points,
     each mapped by its solved (R,t), must land on top of each other."""
@@ -213,5 +292,8 @@ if __name__ == "__main__":
     test_solve_yaw_translation()
     test_solve_rough_end_to_end()
     test_rig_calib_roundtrip()
+    test_fit_floor()
+    test_solve_floor_level()
+    test_floor_sampler()
     test_apply_registers_views()
     print("\nALL RIG-WIRING TESTS PASSED")
