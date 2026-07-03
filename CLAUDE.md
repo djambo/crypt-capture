@@ -324,8 +324,15 @@ Two repos:
   (Apache-2.0) via TensorRT ON THE NODE (GPU idle, capture is CPU-bound;
   inference decoupled latest-frame-only so the cloud stream can never wait
   on it); DeepStream rejected (video-pipeline framework, wrong shape);
-  central-side inference = supported fallback for the weak Nano (relay
-  already rebuilds the aligned color grid — no protocol change needed).
+  central-side inference = supported fallback for the weak Nano — **BUILT
+  (2026-07-03): `preview_server --pose-model models/movenet.onnx`** lazily
+  runs the SAME `node/pose.PoseWorker` at the relay per sensor, fed by the
+  color grid it already rebuilds (`aligned_color_grid`), keypoints injected
+  into `_on_pose` like a node's CPOS; node-side CPOS in the last 2 s
+  suppresses that sensor's central worker (Orin keeps TensorRT on-node, only
+  the Nano falls back; a dead node worker auto-fails-over after 2 s). Needs
+  plain `pip install onnxruntime` on the laptop (x86 CPU ~25 ms). Tested
+  (unit + relay/sim E2E).
   Headless: `sim_node --skeleton` (synthetic wall-clock person projected
   through `--pose`), `tests/test_pose.py`; two posed sims → Rough Align
   auto-upgraded and recovered ground truth to 0.24°/6 mm; viewer markers +
@@ -468,7 +475,8 @@ node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control
-            fan-out + rig-calib apply/reload + viewer-driven calibration sessions),
+            fan-out + rig-calib apply/reload + viewer-driven calibration sessions
+            + --pose-model central pose fallback for nodes without on-node inference),
             calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch;
             + trackers/gates, Tier-1 rough solve, rig_calib.json I/O)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
@@ -553,6 +561,8 @@ python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 0 --frames 0 --ba
 python3 -m node.sim_node --host 127.0.0.1 --port 9000 --sensor 1 --frames 0 --ball 0.06 --pose "50,1.2,1.1,-0.6,-8" --skeleton
 python3 -m scripts.send_command --port 8080 calibrate-rough      # -> tier "skeleton"
 python3 -m tests.test_pose     # CPOS round-trip, JointTracker, solve_skeleton
+# Central pose fallback (skeletons for nodes that can't infer, e.g. the Nano):
+python3 -m central.preview_server --pose-model models/movenet.onnx
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

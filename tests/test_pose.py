@@ -427,6 +427,53 @@ def test_pose_process():
     print("PoseProcess: OK (%d result batches)" % len(emitted))
 
 
+def test_central_pose_fallback():
+    """Relay-side pose for nodes that send no CPOS (the weak Nano): the relay
+    runs the model on its rebuilt color grid, lifts to 3D through the ray
+    table, and broadcasts the same skeleton JSON; a node's own CPOS
+    suppresses the central worker."""
+    try:
+        import onnx  # noqa: F401
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        print("central pose fallback: skipped (onnx/onnxruntime missing)")
+        return
+    from central.preview_server import NODE_POSE_QUIET_S, PreviewServer
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "dummy.onnx")
+        _build_dummy_movenet(path)
+        srv = PreviewServer(rig_calib=os.path.join(d, "rig.json"),
+                            pose_model=path)
+        skels = []
+        srv._broadcast_text = lambda obj: (
+            skels.append(obj) if obj.get("type") == "skeleton" else None)
+        srv._ray_table(7, 640, 576)            # intrinsics (FOV fallback)
+        depth = np.full((576, 640), 1500, dtype=np.uint16).tobytes()
+        cgrid = np.zeros((576, 640, 3), dtype=np.uint8)
+        deadline = time.time() + 10.0
+        while not skels and time.time() < deadline:
+            srv._central_pose_submit(7, depth, cgrid, 640, 576, 1)
+            time.sleep(0.05)
+        worker = srv._central_pose.get(7)
+        assert skels, "no central skeleton broadcast"
+        msg = skels[0]
+        assert msg["sensor"] == 7 and msg["joints"]
+        j = list(msg["joints"].values())[0]
+        assert abs(j[2] + 1.5) < 0.05, j       # 1.5 m depth -> view z = -1.5
+        # A node that speaks CPOS itself silences the central worker...
+        calls = []
+        worker.submit = lambda c, dd: calls.append(1)
+        srv._node_pose_seen[7] = time.time()
+        srv._central_pose_submit(7, depth, cgrid, 640, 576, 1)
+        assert not calls, "central pose ran despite node-side CPOS"
+        # ...and going quiet for NODE_POSE_QUIET_S hands it back.
+        srv._node_pose_seen[7] = time.time() - NODE_POSE_QUIET_S - 0.1
+        srv._central_pose_submit(7, depth, cgrid, 640, 576, 1)
+        assert calls, "central pose did not resume after node went quiet"
+        worker.stop()
+    print("central pose fallback: OK (%d skeleton broadcasts)" % len(skels))
+
+
 def test_pose_worker_joint_subset():
     """--pose-joints minimal: only the requested joints are emitted."""
     from node.pose import MINIMAL_JOINTS
@@ -463,4 +510,5 @@ if __name__ == "__main__":
     test_conf_weighted_smoothing()
     test_pose_worker_joint_subset()
     test_pose_process()
+    test_central_pose_fallback()
     print("\nALL POSE TESTS PASSED")

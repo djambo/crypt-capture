@@ -50,9 +50,29 @@ sensor's depth-aligned color grid (`aligned_color_grid`) per frame, so it can
 run the same model there and inject keypoints into the identical internal
 path — **no protocol change**. Trade-offs: the wire's color is
 foreground-masked (subject-only images are slightly out-of-distribution for
-pose models, though usually fine), the central machine needs GPU headroom ×
-N sensors, and it only sees color when nodes stream it. Decision: build
-node-side first; add `--pose-central` to the relay if/when the Nano needs it.
+pose models, though usually fine), the central machine needs CPU/GPU headroom
+× N fallback sensors, and it only sees color when nodes stream it.
+
+**BUILT (2026-07-03): `preview_server --pose-model <onnx>`.** On the central
+machine:
+
+```bash
+pip install onnxruntime          # x86 CPU is plenty: ~25 ms/infer ≈ 40 fps
+# reuse the same MoveNet file as the nodes (Thunder recommended)
+python3 -m central.preview_server --pose-model models/movenet.onnx
+```
+
+Per sensor, on its first color frame the relay lazily spins up the SAME
+`node/pose.PoseWorker` (latest-frame-only thread, gate hysteresis,
+conf-weighted smoothing, depth attach — one worker per fallback sensor) fed
+by the rebuilt color grid, and feeds its keypoints into `_on_pose` exactly
+like a node's CPOS. **Node-side pose always wins**: a sensor that sent CPOS
+in the last 2 s (`NODE_POSE_QUIET_S`) suppresses its central worker, so the
+Orin keeps its on-node TensorRT path and only the Nano falls back — and if an
+Orin's pose ever dies mid-run, the relay picks that sensor up automatically
+2 s later. `--pose-trt` prefers TensorRT if the central machine has an NVIDIA
+GPU. Tested end-to-end (`tests/test_pose.py::test_central_pose_fallback` +
+relay/sim integration).
 
 ## Wire format: `CPOS` (node → central, implemented)
 
@@ -246,10 +266,9 @@ the CPU handed back to the frame pipeline.
 
 ## Remaining
 
-1. Decide the Nano: skip pose there (current profile default), or the
-   central-side fallback (above).
-2. Relay-side skeleton fusion across sensors (confidence-weighted per-joint
-   merge in the calibrated world frame).
+1. Relay-side skeleton fusion across sensors (confidence-weighted per-joint
+   merge in the calibrated world frame). The Nano is settled: no pose on the
+   node (profile default); the relay's `--pose-model` fallback covers it.
 3. Creative hooks: hands (joints 9/10) → particle attractors in the viewer;
    gesture triggers later.
 

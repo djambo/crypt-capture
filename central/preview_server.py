@@ -182,12 +182,24 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
     return payload
 
 
+# Central-side pose (docs/skeleton_pose.md): how long after a node's own CPOS
+# message the relay keeps its fallback inference suppressed for that sensor.
+NODE_POSE_QUIET_S = 2.0
+
+
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=200000,
-                 rig_calib="rig_calib.json"):
+                 rig_calib="rig_calib.json", pose_model=None, pose_trt=False):
         self.calib = calib
         self.stride = stride
         self.max_points = max_points
+        # Central-side pose fallback: run the SAME MoveNet at the relay for
+        # sensors whose node doesn't send CPOS (the weak Nano). None = off.
+        self.pose_model = pose_model
+        self.pose_trt = pose_trt
+        self._central_pose = {}             # sensor_id -> PoseWorker | None(=failed)
+        self._central_stride = {}           # sensor_id -> node stride (coord scale)
+        self._node_pose_seen = {}           # sensor_id -> last CPOS wall time
         self._clients = []                  # browser WebSocket sockets
         # Per-client WRITE lock: node threads (one per sensor) and the calib
         # status/pose broadcasts all write to the same client sockets. sendall
@@ -665,6 +677,9 @@ class PreviewServer:
                         "(%.3f, %.3f, %.3f)" % g))
                     continue
                 if kind == "pose":
+                    # Node-side pose wins: seeing CPOS suppresses the central
+                    # fallback worker for this sensor (NODE_POSE_QUIET_S).
+                    self._node_pose_seen[payload["sensor_id"]] = time.time()
                     self._on_pose(payload)
                     continue
                 if kind == "extrinsic":
@@ -695,6 +710,9 @@ class PreviewServer:
                 if frame.color_aligned and frame.color:
                     cgrid = aligned_color_grid(frame.color, depth,
                                                frame.width, frame.height)
+                if self.pose_model and cgrid is not None:
+                    self._central_pose_submit(frame.sensor_id, depth, cgrid,
+                                              frame.width, frame.height, ns)
                 extrinsic = self._sensor_extrinsic.get(frame.sensor_id)
                 xyz, rgb = unproject(depth, frame.width, frame.height,
                                      ray_x, ray_y, self.stride, ns, cgrid,
@@ -741,6 +759,59 @@ class PreviewServer:
                     self._nodes.remove(conn)
             conn.close()
             print("[preview] node disconnected %s" % (addr[0],))
+
+    # --- central-side pose fallback (docs/skeleton_pose.md) --------------
+    # The weak 1st-gen Nano can't run inference (no usable GPU path, CPU
+    # already saturated by RVL+color), but the relay ALREADY rebuilds that
+    # sensor's depth-aligned color grid every frame — so the laptop runs the
+    # same MoveNet for it. Reuses node/pose.PoseWorker wholesale (latest-
+    # frame-only thread, gate hysteresis, conf-weighted smoothing, depth
+    # attach); onnxruntime releases the GIL during Run, so a thread is fine
+    # here (no pyk4a capture loop to convoy with — the node-side lesson
+    # doesn't apply). Node-side CPOS always wins: any sensor that sends its
+    # own keypoints suppresses the central worker for that sensor.
+
+    def _central_pose_submit(self, sid, depth_u16, cgrid, w, h, node_stride):
+        if time.time() - self._node_pose_seen.get(sid, 0.0) < NODE_POSE_QUIET_S:
+            return
+        worker = self._central_pose.get(sid)
+        if worker is None:
+            if sid in self._central_pose:
+                return                      # init failed earlier: disabled
+            worker = self._central_pose_start(sid)
+            if worker is None:
+                return
+        self._central_stride[sid] = node_stride
+        depth = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
+        worker.submit(cgrid, depth)         # stash-and-return, never blocks
+
+    def _central_pose_start(self, sid):
+        try:
+            from node.pose import MINIMAL_JOINTS, MoveNetEstimator, PoseWorker
+            est = MoveNetEstimator(self.pose_model, threads=2,
+                                   trt=self.pose_trt)
+        except Exception as exc:
+            print("[preview] central pose disabled for sensor %d (%s)"
+                  % (sid, exc))
+            self._central_pose[sid] = None
+            return None
+        print("[preview] sensor %d: central pose fallback (%s on %s)" % (
+            sid, self.pose_model,
+            "/".join(p.replace("ExecutionProvider", "")
+                     for p in est.providers)))
+        worker = PoseWorker(
+            est, lambda kps, s=sid: self._on_central_pose(s, kps),
+            joints=MINIMAL_JOINTS, label="central pose s%d" % sid)
+        self._central_pose[sid] = worker
+        return worker
+
+    def _on_central_pose(self, sid, kps):
+        # Worker coords are in the node's (possibly strided) grid; _on_pose
+        # expects FULL-RES grid coords like a node's own CPOS.
+        ns = self._central_stride.get(sid, 1)
+        self._on_pose({"sensor_id": sid,
+                       "keypoints": [(j, u * ns, v * ns, z, c)
+                                     for j, u, v, z, c in kps]})
 
     def _on_pose(self, payload):
         """A node's 2D pose keypoints (CPOS, docs/skeleton_pose.md): unproject
@@ -837,10 +908,22 @@ def main():
     ap.add_argument("--discovery-port", type=int, default=discovery.DISCOVERY_PORT)
     ap.add_argument("--no-discovery", action="store_true",
                     help="don't answer LAN discovery broadcasts")
+    ap.add_argument("--pose-model",
+                    help="central-side pose fallback (docs/skeleton_pose.md): "
+                         "run this MoveNet ONNX AT THE RELAY for any sensor "
+                         "whose node doesn't send CPOS (the weak Nano). Needs "
+                         "'pip install onnxruntime' here. Sensors with "
+                         "node-side pose are unaffected (their CPOS wins)")
+    ap.add_argument("--pose-trt", action="store_true",
+                    help="prefer the TensorRT provider for --pose-model "
+                         "(NVIDIA GPU on the central machine; CPU is fine "
+                         "on x86 — ~25 ms/infer)")
     args = ap.parse_args()
     server = PreviewServer(calib=args.calib, stride=args.stride,
                            max_points=args.max_points,
-                           rig_calib=args.rig_calib)
+                           rig_calib=args.rig_calib,
+                           pose_model=args.pose_model,
+                           pose_trt=args.pose_trt)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.
