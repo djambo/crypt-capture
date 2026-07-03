@@ -353,6 +353,108 @@ class PoseWorker(object):
                 self.gated = 0
 
 
+class PoseProcess(object):
+    """PoseWorker in its own PROCESS — the hard-won lesson of this codebase
+    (see kinect_node's worker pool): next to pyk4a's capture loop, a thread
+    convoys on the GIL and inference measured 60-70 ms wall for a model that
+    benchmarks at 3 ms standalone. A child process has its own interpreter
+    and GIL, so the model runs at its true speed.
+
+    Parent API mirrors PoseWorker: submit(color, depth) stashes the newest
+    frame (drops when the child is busy — latest-only), set_emit(fn) starts
+    forwarding the child's keypoints. IMPORTANT: construct BEFORE the camera
+    / sockets exist (fork must not inherit them); CUDA/TensorRT initialise in
+    the child only.
+    """
+
+    def __init__(self, model_path, threads=2, trt=False, min_conf=0.2,
+                 gate_conf=0.35, smooth=True, joints=None, label="pose"):
+        import multiprocessing as mp
+        self._in_q = mp.Queue(1)               # newest frame only
+        self._out_q = mp.Queue(64)             # keypoint results + status
+        self._proc = mp.Process(
+            target=_pose_child_main,
+            args=(model_path, int(threads), bool(trt), float(min_conf),
+                  float(gate_conf), bool(smooth),
+                  tuple(joints) if joints is not None else None, label,
+                  self._in_q, self._out_q))
+        self._proc.daemon = True
+        self._proc.start()
+        self._emit = None
+        self._fwd = None
+
+    def set_emit(self, emit):
+        """Start forwarding the child's [(jid,u,v,z,conf)] lists to emit()."""
+        self._emit = emit
+        self._fwd = threading.Thread(target=self._forward)
+        self._fwd.daemon = True
+        self._fwd.start()
+
+    def _forward(self):
+        while True:
+            item = self._out_q.get()
+            if item is None:
+                return
+            kind, payload = item
+            if kind == "kps":
+                try:
+                    self._emit(payload)
+                except Exception as exc:
+                    print("pose: emit failed (%s) — forwarder stopped" % exc)
+                    return
+            elif kind == "info":
+                print(payload)
+
+    def submit(self, color, depth):
+        """Capture thread: hand the newest frame to the child if it's ready
+        for one; otherwise drop (another is 33 ms away). The put pickles
+        ~1.4 MB on the queue's feeder thread, off the capture path."""
+        try:
+            self._in_q.put_nowait((color, depth))
+        except Exception:
+            pass                                # child busy: keep freshest
+
+    def stop(self):
+        try:
+            self._in_q.put(None, timeout=1.0)
+        except Exception:
+            pass
+        self._proc.join(timeout=3.0)
+        if self._proc.is_alive():
+            self._proc.terminate()
+        try:
+            self._out_q.put(None)
+        except Exception:
+            pass
+
+
+def _pose_child_main(model_path, threads, trt, min_conf, gate_conf, smooth,
+                     joints, label, in_q, out_q):
+    """Child process: build the estimator (CUDA/TensorRT init happens HERE,
+    never in the forked parent), reuse PoseWorker for gate/smooth/depth
+    logic, and pump frames from the queue into it."""
+    try:
+        est = MoveNetEstimator(model_path, threads=threads, trt=trt)
+    except Exception as exc:
+        out_q.put(("info", "%s: model load failed (%s) — pose disabled"
+                   % (label, exc)))
+        return
+    out_q.put(("info", "%s: model %s (input %dx%d %s, %s) on %s" % (
+        label, model_path, est.size, est.size,
+        "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name,
+        "/".join(p.replace("ExecutionProvider", "") for p in est.providers))))
+    worker = PoseWorker(est, lambda kps: out_q.put(("kps", kps)),
+                        min_conf=min_conf, gate_conf=gate_conf, smooth=smooth,
+                        joints=joints, label=label)
+    while True:
+        item = in_q.get()
+        if item is None:
+            break
+        color, depth = item
+        worker.submit(color, depth)
+    worker.stop()
+
+
 def _bench():
     """Standalone model benchmark — the model's raw speed on THIS machine with
     no capture pipeline around it (isolates 'slow model/EP' from 'slow

@@ -105,10 +105,19 @@ proves limiting (the estimator interface is one class to swap).
 - `MoveNetEstimator`: tolerant of the common ONNX export variants (NHWC/NCHW,
   int32/uint8/float input, any output list containing one 17×3 tensor);
   letterbox + inverse decode in pure NumPy.
-- `PoseWorker`: own thread, latest-frame-only, capped `intra_op` CPU threads;
-  keypoints + 5×5-median depth lookup → `encode_pose` → the node's ordered
-  sender queue (socket writes stay serialised). Prints `pose N fps` every 150
-  inferences.
+- `PoseWorker`: latest-frame-only, capped `intra_op` CPU threads; keypoints
+  + 5×5-median depth lookup → `encode_pose` → the node's ordered sender
+  queue (socket writes stay serialised). Prints `pose N fps (pre X + run Y)`
+  every 150 inferences.
+- **`PoseProcess` (how the node actually runs it)**: the worker in its OWN
+  PROCESS. As a thread next to pyk4a's capture loop it convoyed on the GIL —
+  inference that benchmarks at 3 ms (TensorRT) / 7 ms (CUDA) measured
+  60-70 ms wall in-process (same lesson as the frame pipeline's process
+  pool). Forked BEFORE the camera/socket exist; CUDA/TensorRT initialise in
+  the child; frames cross via a depth-1 queue (latest-only), keypoints come
+  back on a result queue. Benchmark the raw model any time with
+  `python3 -m node.pose models/movenet.onnx [--trt|--cpu]` (Orin measured:
+  CPU 25 ms, CUDA 7.3 ms, TensorRT 2.9 ms / 254 fps sustained).
 - `kinect_node --pose-model <file.onnx> [--pose-threads 2]
   [--pose-min-conf 0.2]` — off by default; onnxruntime is only imported when
   enabled, so nodes without it are unaffected.

@@ -312,6 +312,38 @@ def test_pose_worker_person_gate():
     print("PoseWorker person gate: OK (ghost frame suppressed)")
 
 
+def test_pose_process():
+    """The out-of-process pose path end-to-end with a real (dummy) ONNX:
+    child loads the model, gates/smooths/attaches depth, results arrive in
+    the parent, clean shutdown."""
+    try:
+        import onnx  # noqa: F401
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        print("PoseProcess: skipped (onnx/onnxruntime not installed)")
+        return
+    from node.pose import PoseProcess
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "dummy.onnx")
+        _build_dummy_movenet(path)             # conf 0.9 on all 17 joints
+        emitted = []
+        proc = PoseProcess(path, threads=1, min_conf=0.2, gate_conf=0.35,
+                           smooth=True, joints=None, label="test proc")
+        proc.set_emit(lambda kps: emitted.append(kps))
+        depth = np.full((576, 640), 1500, dtype=np.uint16)
+        color = np.zeros((576, 640, 4), dtype=np.uint8)
+        deadline = time.time() + 10.0
+        while not emitted and time.time() < deadline:
+            proc.submit(color, depth)
+            time.sleep(0.05)
+        proc.stop()
+        assert emitted, "no keypoints from the pose child process"
+        kps = emitted[0]
+        assert len(kps) == 17
+        assert all(abs(k[3] - 1.5) < 1e-6 for k in kps)   # depth attached
+    print("PoseProcess: OK (%d result batches)" % len(emitted))
+
+
 def test_pose_worker_joint_subset():
     """--pose-joints minimal: only the requested joints are emitted."""
     from node.pose import MINIMAL_JOINTS
@@ -345,4 +377,5 @@ if __name__ == "__main__":
     test_pose_worker()
     test_pose_worker_person_gate()
     test_pose_worker_joint_subset()
+    test_pose_process()
     print("\nALL POSE TESTS PASSED")

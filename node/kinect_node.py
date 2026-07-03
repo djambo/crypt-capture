@@ -358,6 +358,24 @@ def run(host, port, sensor_id, frames,
     pool = ProcessPoolExecutor(max_workers=max(1, workers))
     list(pool.map(len, [b""] * max(1, workers)))    # spawn children eagerly
 
+    # Pose runs in its OWN PROCESS (node/pose.PoseProcess): as a thread here
+    # it convoyed on the capture loop's GIL — inference that benchmarks at
+    # 3 ms (TensorRT) measured 60-70 ms wall in-process. Forked NOW, before
+    # the camera/socket exist; CUDA/TensorRT initialise inside the child.
+    pose_proc = None
+    if pose_model:
+        from node.pose import MINIMAL_JOINTS, PoseProcess
+        joint_sets = {"minimal": MINIMAL_JOINTS, "full": None}
+        if pose_joints in joint_sets:
+            jset = joint_sets[pose_joints]
+        else:                                 # explicit "0,5,6,9,10" list
+            jset = tuple(int(j) for j in pose_joints.split(","))
+        pose_proc = PoseProcess(pose_model, threads=pose_threads,
+                                trt=pose_trt, min_conf=pose_min_conf,
+                                gate_conf=pose_gate, smooth=pose_smooth,
+                                joints=jset,
+                                label="sensor %d pose" % sensor_id)
+
     k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
     k4a.start()
     sock = socket.create_connection((host, port))
@@ -510,48 +528,19 @@ def run(host, port, sensor_id, frames,
     sender_t = threading.Thread(target=sender, daemon=True)
     sender_t.start()
 
-    # Optional 2D pose -> CPOS keypoints (docs/skeleton_pose.md). The worker
-    # holds only the LATEST frame and onnxruntime releases the GIL, so the
-    # cloud stream never waits on inference; keypoint payloads ride the same
-    # ordered sender queue as everything else ("raw"), so socket writes stay
-    # serialised. Enabled with --pose-model <movenet .onnx>.
-    pose_worker = None
-    if pose_model:
-        from node.pose import MoveNetEstimator, PoseWorker
-
+    # Wire the pose child's keypoints into the ordered sender queue (CPOS
+    # rides "raw" like calib/imu, so socket writes stay serialised). NEVER
+    # wait on the frame queue: full -> drop this skeleton, another is one
+    # inference away.
+    if pose_proc is not None:
         def _emit_pose(kps):
             payload = encode_pose(sensor_id, int(time.time() * 1e9), kps)
             try:
-                # NEVER wait on the frame queue: blocking here stalls the
-                # NEXT inference, so a saturated capture pipeline (full-room
-                # streaming) would collapse the skeleton rate to a crawl.
-                # Full queue -> drop this skeleton; another is ~an inference
-                # away.
                 outq.put_nowait(("raw", payload))
             except queue.Full:
                 pass
 
-        from node.pose import MINIMAL_JOINTS
-        joint_sets = {"minimal": MINIMAL_JOINTS, "full": None}
-        if pose_joints in joint_sets:
-            jset = joint_sets[pose_joints]
-        else:                                 # explicit "0,5,6,9,10" list
-            jset = tuple(int(j) for j in pose_joints.split(","))
-        est = MoveNetEstimator(pose_model, threads=pose_threads,
-                               trt=pose_trt)
-        pose_worker = PoseWorker(est, _emit_pose, min_conf=pose_min_conf,
-                                 gate_conf=pose_gate, smooth=pose_smooth,
-                                 joints=jset,
-                                 label="sensor %d pose" % sensor_id)
-        print("sensor %d: pose model %s (input %dx%d %s, %s) on %s" % (
-            sensor_id, pose_model, est.size, est.size,
-            "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name,
-            "/".join(p.replace("ExecutionProvider", "")
-                     for p in est.providers)))
-        if est.providers == ["CPUExecutionProvider"]:
-            print("sensor %d: pose is CPU-ONLY (~10 fps ceiling) — install "
-                  "the Jetson onnxruntime-gpu wheel for 60+ fps (see "
-                  "docs/skeleton_pose.md)" % sensor_id)
+        pose_proc.set_emit(_emit_pose)
 
     try:
         while frames <= 0 or sent < frames:
@@ -635,8 +624,8 @@ def run(host, port, sensor_id, frames,
 
             # Newest frame for the pose worker (stash refs — returns instantly;
             # the worker infers at its own rate on whatever is freshest).
-            if pose_worker is not None and csrc is not None:
-                pose_worker.submit(csrc, depth)
+            if pose_proc is not None and csrc is not None:
+                pose_proc.submit(csrc, depth)
 
             # Snapshot the live-tunable knobs (the control reader mutates them)
             # and hand the heavy stage to a worker process; the sender emits
@@ -662,8 +651,8 @@ def run(host, port, sensor_id, frames,
                                  raw[0], raw[1], raw[2]))
             # (fps/pts stats + profile print now live in the sender thread.)
     finally:
-        if pose_worker is not None:
-            pose_worker.stop()
+        if pose_proc is not None:
+            pose_proc.stop()
         outq.put(None)                        # sender exits after the backlog
         sender_t.join(timeout=10.0)
         if sender_t.is_alive():               # wedged mid-sendall (peer stopped
