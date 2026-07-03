@@ -70,6 +70,82 @@ def fit_sphere(points, radius, iters=10):
     return c, rms
 
 
+def segment_ball(points, radius, min_points=40, max_points=8000,
+                 max_fit_rms=0.012, max_extent_factor=2.6):
+    """Find the marker ball as the best spherical CLUSTER in a foreground cloud.
+
+    The old approach fit a sphere to the whole per-sensor cloud, so it only
+    worked when the ball was the *only* foreground — but during a wand pass the
+    operator's body and arm are in frame too (a body is tens of thousands of
+    points), which the point-count gate then rejected outright. That made
+    detection near-impossible on an inward-facing rig, where you cannot keep
+    your body out of every camera while putting the ball in the centre.
+
+    Instead we voxel-cluster the cloud (one cell per radius) and fit_sphere only
+    the compact, ball-sized clusters, returning the one whose fit best matches
+    the known radius. Held out on a thin stick the ball forms its own spatial
+    cluster (a thin dowel rarely fills a whole voxel densely enough to bridge it
+    to the hand); the body is a separate, far larger cluster that fails the
+    count/extent gates, and a cluster that merges ball+arm fails the extent/rms
+    gates. **Capturing a background plate first** (the fine procedure requires
+    it) removes the room/floor entirely, so the only clusters to score are the
+    operator and the ball — cheaper and far more reliable.
+
+    Returns (center (3,), rms, n_inliers) or (None, None, 0).
+    """
+    p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if p.shape[0] < min_points:
+        return None, None, 0
+    cell = float(radius) if radius > 1e-6 else 0.05
+    vox = np.floor(p / cell).astype(np.int64)
+    uniq, inv = np.unique(vox, axis=0, return_inverse=True)
+    inv = np.asarray(inv).reshape(-1)
+    m = uniq.shape[0]
+    # Connected components over the occupied cells (26-neighbourhood, union-find).
+    cell_index = {(int(c[0]), int(c[1]), int(c[2])): i
+                  for i, c in enumerate(uniq)}
+    parent = list(range(m))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for c, i in cell_index.items():
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dy == 0 and dz == 0:
+                        continue
+                    j = cell_index.get((c[0] + dx, c[1] + dy, c[2] + dz))
+                    if j is not None and j > i:
+                        ra, rb = find(i), find(j)
+                        if ra != rb:
+                            parent[ra] = rb
+    cell_root = np.array([find(i) for i in range(m)], dtype=np.int64)
+    pt_root = cell_root[inv]
+
+    best = None                                   # (center, rms, n)
+    for r in np.unique(pt_root):
+        idx = np.nonzero(pt_root == r)[0]
+        n = idx.shape[0]
+        if n < min_points or n > max_points:
+            continue
+        cluster = p[idx]
+        extent = float(np.max(cluster.max(axis=0) - cluster.min(axis=0)))
+        if extent > max_extent_factor * radius:   # too big to be a ball cap
+            continue
+        c, rms = fit_sphere(cluster, radius)
+        if c is None or rms > max_fit_rms:
+            continue
+        if best is None or rms < best[1]:
+            best = (c, rms, n)
+    if best is None:
+        return None, None, 0
+    return best
+
+
 def solve_rigid(A, B):
     """Rigid transform (R, t) minimising |R·A + t - B|^2 (Kabsch/Umeyama).
 
@@ -176,6 +252,7 @@ class BallTracker:
         self.max_fit_rms = float(max_fit_rms)
         self.tracks = {}            # sensor_id -> [(t_seconds, center (3,))]
         self.rejected = {}          # sensor_id -> {"count": n, "fit": n}
+        self.last = {}              # sensor_id -> (center (3,), rms, n) latest ok
 
     def _reject(self, sensor_id, reason):
         r = self.rejected.setdefault(sensor_id, {"count": 0, "fit": 0})
@@ -183,14 +260,21 @@ class BallTracker:
         return reason
 
     def add(self, sensor_id, t_seconds, points):
-        """Consider one frame. Returns 'ok', 'count' or 'fit'."""
+        """Consider one frame. Returns 'ok', 'count' or 'fit'.
+
+        The ball is SEGMENTED out of the (background-subtracted) foreground as
+        the best spherical cluster, so the operator's body being in frame no
+        longer kills the frame — see segment_ball()."""
         p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-        if p.shape[0] < self.min_points or p.shape[0] > self.max_points:
+        if p.shape[0] < self.min_points:
             return self._reject(sensor_id, "count")
-        c, rms = fit_sphere(p, self.radius)
-        if c is None or rms > self.max_fit_rms:
+        c, rms, n = segment_ball(p, self.radius, min_points=self.min_points,
+                                 max_points=self.max_points,
+                                 max_fit_rms=self.max_fit_rms)
+        if c is None:
             return self._reject(sensor_id, "fit")
         self.tracks.setdefault(sensor_id, []).append((float(t_seconds), c))
+        self.last[sensor_id] = (c, rms, n)
         return "ok"
 
     def counts(self):

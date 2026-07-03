@@ -503,6 +503,15 @@ class PreviewServer:
             if session.get("joints") is not None:
                 msg["joints"] = {str(s): n for s, n
                                  in session["joints"].counts().items()}
+            # Latest detected ball centre per sensor (wand pass), pruned of
+            # stale entries so a camera that has lost the ball fades its marker.
+            balls = session.get("balls")
+            if balls:
+                now = time.time()
+                fresh = {str(s): {"c": v["c"], "rms": v["rms"], "n": v["n"]}
+                         for s, v in balls.items() if now - v["t"] < 1.5}
+                if fresh:
+                    msg["balls"] = fresh
             self._broadcast_text(msg)
             time.sleep(min(CALIB_STATUS_EVERY_S, left))
         self._finish_calibration(session)
@@ -514,7 +523,24 @@ class PreviewServer:
         session = self._calib_session
         if session is None or time.time() > session["deadline"]:
             return
-        session["tracker"].add(sensor_id, time.time(), xyz)
+        status = session["tracker"].add(sensor_id, time.time(), xyz)
+        # Live visual feedback for the wand pass: stash the latest detected ball
+        # centre so the ~1 Hz status broadcast can push it to the viewer, which
+        # draws a marker on the cloud (the "LOCK" indicator the operator was
+        # flying blind without). The centre must be in the SAME frame the wire
+        # cloud is shown in, so apply this sensor's current rig transform (if
+        # one is applied) exactly as the cloud gets it downstream.
+        if status == "ok" and session["tier"] == "fine":
+            c, rms, n = session["tracker"].last[sensor_id]
+            rig = self._rig.get(sensor_id)
+            if rig is not None:
+                R, t = rig
+                c = np.asarray(c, dtype=np.float64).dot(
+                    np.asarray(R, dtype=np.float64).T) + \
+                    np.asarray(t, dtype=np.float64)
+            session.setdefault("balls", {})[sensor_id] = {
+                "c": [float(c[0]), float(c[1]), float(c[2])],
+                "rms": float(rms), "n": int(n), "t": time.time()}
 
     def _finish_calibration(self, session):
         with self._calib_lock:

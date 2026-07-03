@@ -30,6 +30,55 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — Fine Align: ball segmentation + live LOCK feedback
+**Status: applied 2026-07-03** (viewer wired the same session; design:
+crypt-capture `docs/rig_calibration.md`).
+
+**Summary.** The marker-ball (wand) fine-calibration pass got two fixes that
+make it actually usable. (1) **Segmentation**: the relay used to fit a sphere to
+the *whole* per-sensor foreground, so it only detected the ball when the ball
+was the *only* foreground — impossible on an inward-facing rig where your body is
+always in some camera, and every such frame was silently dropped. It now
+segments the **largest spherical cluster** (`segment_ball`) out of the
+background-subtracted foreground, so **your body can be in frame**. (2) **Live
+feedback**: the operator was waving the ball completely blind; the relay now
+streams the detected ball centre per sensor so the viewer can show a LOCK marker
+and per-camera detection state.
+
+**Protocol impact (additive, TEXT only — no `CPV1` change):** the ~1 Hz
+`calib_status` `collecting` message for a **fine** run now carries an optional
+`balls` field:
+```json
+{ "type":"calib_status", "state":"collecting", "tier":"fine",
+  "seconds_left": 22.0,
+  "centers": { "0": 41, "1": 33 },          // running accepted-frame counts
+  "balls": {                                 // NEW — latest detected centre/sensor
+    "0": { "c": [0.34, 0.23, -1.39], "rms": 0.0006, "n": 741 },
+    "1": { "c": [0.04, 0.08, -1.17], "rms": 0.0006, "n": 1004 } } }
+```
+`c` is the ball centre **in the same frame as that sensor's `CPV1` cloud** (the
+relay applies the sensor's current rig transform, if any, before sending), so a
+marker parented into that sensor's group lands on the cloud whether the rig is
+calibrated or not. A sensor's entry is pruned ~1.5 s after its last detection.
+`rms` is the sphere-fit residual (metres), `n` the inlier point count.
+
+**Viewer action (done):**
+- `CalibBallMarker.js` — per-sensor translucent sphere drawn at the **configured
+  ball radius** (`getBallRadius()`) at `balls[sid].c`, parented into the sensor's
+  group; fades when the sensor stops detecting. Fed from `calib_status` via
+  `World.onCalibStatusMessage` → `updateCalibBalls`, ticked each frame, cleared
+  on any terminal state / Reset. Doubles as a **radius sanity check** — the drawn
+  sphere should hug the real ball; if not, the radius field is wrong.
+- Status line shows a per-sensor lock indicator: `s0 ●0.6mm 41 · s1 ○ 33`
+  (`●`+rms = locked now, `○` = searching, trailing number = accepted frames).
+- **Fine Align now requires background subtraction** — the viewer refuses it
+  ("Capture Background first…") because the ball is found in the subtracted
+  foreground; with the room present, clustering is flooded.
+- Ball-sizing guidance in the tooltip: **~15–20 cm matte** (not black — ToF
+  absorbs IR → a hole; not glossy), measure the real radius with calipers.
+
+---
+
 ## 2026-07-03 — Skeleton pipeline: live 3D joints + Rough Align auto-upgrade
 **Status: applied 2026-07-03** (viewer wired the same day; design:
 crypt-capture `docs/skeleton_pose.md`).

@@ -308,6 +308,22 @@ Two repos:
   floors flat on the grid to 0.006°). `tests/test_rig.py` covers
   trackers/gates, rough solve, floor fit/level, JSON round-trip and the apply
   step. Remaining: the real-hardware wand pass, then TSDF fusion.
+  **Fine-pass ball segmentation + live feedback (2026-07-03)** — the wand pass
+  was near-unusable: it fit a sphere to the WHOLE per-sensor foreground, so it
+  only detected the ball when the ball was the *only* foreground (impossible on
+  an inward rig where your body is always in some camera → every such frame
+  silently dropped), and the operator waved the ball blind. Now
+  `calibration.segment_ball` pulls the **largest spherical cluster** out of the
+  (background-subtracted) foreground via voxel connected-components + per-cluster
+  `fit_sphere` (best radius match wins; body/arm clusters fail extent/rms gates)
+  — **body-in-frame is fine**. The relay streams the detected centre per sensor
+  (in the wire-cloud frame) inside `calib_status.balls`; the viewer draws a LOCK
+  sphere at the configured radius + a per-camera `●rms/○` indicator, and now
+  **requires background subtraction** before Fine Align. Ball spec: ~15–20 cm
+  matte (not black/glossy), measure the radius. Unit-tested
+  (`test_calibration.segment_ball`, `test_rig` gates) + headless E2E (two posed
+  sim balls → `balls` feedback flows, solve lands 2.4 mm). Optional future
+  upgrade: retroreflective ball in active IR for even more robust detection.
 - ✅ **Skeleton pipeline wiring (2026-07-03, design: `docs/skeleton_pose.md`)**
   — 2D pose keypoints from the nodes, lifted to metric 3D at the relay.
   New `CPOS` node→central message (`frame.encode_pose`, 3.6-safe): COCO-17
@@ -477,7 +493,8 @@ node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control
             fan-out + rig-calib apply/reload + viewer-driven calibration sessions
             + --pose-model central pose fallback for nodes without on-node inference),
-            calibration.py (rig extrinsics from a tracked marker ball: sphere fit + Kabsch;
+            calibration.py (rig extrinsics from a tracked marker ball: segment_ball
+            [largest spherical cluster] + sphere fit + Kabsch;
             + trackers/gates, Tier-1 rough solve, rig_calib.json I/O)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),

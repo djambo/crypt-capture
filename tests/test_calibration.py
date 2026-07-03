@@ -8,7 +8,8 @@ Run: python3 -m tests.test_calibration
 
 import numpy as np
 
-from central.calibration import fit_sphere, pair_tracks, solve_rigid, solve_rig
+from central.calibration import (fit_sphere, pair_tracks, solve_rigid,
+                                 solve_rig, segment_ball)
 
 RNG = np.random.RandomState(7)
 BALL_R = 0.05  # 10 cm ball
@@ -65,6 +66,33 @@ def test_fit_sphere():
     assert centroid_err > 3 * err
     print("fit_sphere: OK (err %.1f mm, centroid bias %.1f mm)"
           % (err * 1000, centroid_err * 1000))
+
+
+def test_segment_ball():
+    # The realistic wand-pass frame: the operator's BODY plus the ball, both in
+    # the (background-subtracted) foreground. The old whole-cloud fit died on
+    # this — the body's point count blew the gate. segment_ball must pull the
+    # ball cluster out and ignore the body.
+    center = np.array([0.35, 1.1, 1.9])
+    ball = sphere_cap(center, BALL_R, view_origin=np.zeros(3), n=500)
+    # A big blobby "body": a tall box of points well away from the ball so the
+    # thin-stick gap is represented (no bridging points between them).
+    body = np.column_stack([
+        RNG.uniform(-0.25, 0.25, 9000),
+        RNG.uniform(0.0, 1.7, 9000),
+        RNG.uniform(2.3, 2.6, 9000),
+    ])
+    cloud = np.vstack([ball, body])
+    RNG.shuffle(cloud)
+    c, rms, n = segment_ball(cloud, BALL_R)
+    assert c is not None, "ball not found in a body+ball foreground"
+    err = np.linalg.norm(c - center)
+    assert err < 0.006, "segmented ball center off by %.4f m" % err
+    assert n >= 200 and n <= 900, "picked the wrong cluster (%d pts)" % n
+    # A cloud that is ONLY the body has no ball -> honest miss, not a false lock.
+    assert segment_ball(body, BALL_R)[0] is None
+    print("segment_ball: OK (err %.1f mm, %d ball pts of %d)"
+          % (err * 1000, n, cloud.shape[0]))
 
 
 def test_solve_rigid():
@@ -142,6 +170,7 @@ def test_solve_rig_end_to_end():
 
 if __name__ == "__main__":
     test_fit_sphere()
+    test_segment_ball()
     test_solve_rigid()
     test_pair_tracks()
     test_solve_rig_end_to_end()

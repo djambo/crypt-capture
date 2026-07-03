@@ -55,20 +55,28 @@ def test_ball_tracker_gates():
     center = np.array([0.1, -0.2, -1.5])
     cap = sphere_cap(center, BALL_R, view_origin=np.zeros(3))
     assert tr.add(0, 0.0, cap) == "ok"
-    # A person-sized blob: way too many points -> gated before fitting.
+    # A person-sized amorphous blob: no spherical cluster -> honest miss ("fit"),
+    # NOT a rejection on total count (segmentation now handles body-in-frame).
     person = RNG.uniform(-0.4, 0.4, size=(20000, 3))
-    assert tr.add(0, 0.1, person) == "count"
-    # Too few points to fit.
+    assert tr.add(0, 0.1, person) == "fit"
+    # Too few points at all.
     assert tr.add(0, 0.2, cap[:10]) == "count"
     # Plausible count but nothing like a sphere -> fit residual rejects it.
     plane = np.column_stack([RNG.uniform(-0.3, 0.3, 500),
                              RNG.uniform(-0.3, 0.3, 500),
                              np.full(500, -1.5)])
     assert tr.add(0, 0.3, plane) == "fit"
-    assert tr.counts() == {0: 1}
-    assert tr.rejected[0] == {"count": 2, "fit": 1}
-    c = tr.tracks[0][0][1]
-    assert np.linalg.norm(c - center) < 0.005
+    # The realistic frame: ball + body together -> the ball is segmented out and
+    # tracked, its centre recorded (the whole point of the segmentation change).
+    body = np.column_stack([RNG.uniform(-0.3, 0.3, 6000),
+                            RNG.uniform(-0.3, 0.3, 6000),
+                            RNG.uniform(-2.4, -2.1, 6000)])
+    assert tr.add(0, 0.4, np.vstack([cap, body])) == "ok"
+    assert tr.counts() == {0: 2}
+    assert tr.rejected[0] == {"count": 1, "fit": 2}
+    assert np.linalg.norm(tr.last[0][0] - center) < 0.006
+    for _, c in tr.tracks[0]:
+        assert np.linalg.norm(c - center) < 0.006
     print("BallTracker gating: OK")
 
 

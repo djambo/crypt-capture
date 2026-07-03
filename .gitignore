@@ -4,5 +4,6 @@ takes/
 *.glb
 *.ply
 calib.json          # per-device camera intrinsics (nodes now send them on connect)
+rig_calib.json      # per-rig extrinsic calibration (written by the wand pass, machine-local)
 .DS_Store
 models/

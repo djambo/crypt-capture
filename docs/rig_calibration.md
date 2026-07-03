@@ -131,24 +131,74 @@ re-leveling would inject its own fit error into that registration — the
 viewer's Detect Floor therefore goes straight to the local grid snap on
 fine-calibrated rigs.
 
+## The calibration ball (what to build)
+
+A plain **rigid matte sphere on a stick**. Specifics that matter, learned from
+the detection math:
+
+- **Size: ~15–20 cm diameter** (the panel default is 5 cm *radius* = 10 cm; go
+  bigger). A bigger cap gives more surface points AND a better-conditioned
+  centre fit (`fit_sphere` variance ≈ ToF noise ÷ √N and the arc pins the centre
+  harder), and it segments out of the foreground more reliably. Too big is just
+  unwieldy; 15–20 cm is the sweet spot for a subject at 1.5–3 m.
+- **Matte, light-coloured** (white/grey PLA is ideal). **NOT black** — ToF/IR is
+  absorbed, so a black ball reads as a *hole*, not a sphere. **NOT glossy** —
+  specular highlights corrupt the depth of the facing cap.
+- **Measure the printed radius with calipers and enter it exactly** in the
+  viewer's *ball radius* field. `fit_sphere` assumes a KNOWN radius; a wrong
+  radius biases each camera's centre differently (the bias depends on how much
+  cap it sees), which shows up as extra residual. The live LOCK sphere is drawn
+  at the entered radius, so if it doesn't hug the real ball on screen, your
+  number is off.
+- **Held out on a thin stick, away from the body.** Segmentation separates the
+  ball from you by spatial clustering; a thin dowel rarely bridges the gap, but
+  a fat/short handle can fuse ball+hand into one blob that fails the fit.
+
+3D-printing a hollow ~18 cm sphere in light PLA on a ~30 cm dowel is exactly
+right.
+
 ## The fine (Tier-2) wand procedure — operator's view
 
-1. All nodes streaming, empty scene. **Capture background** on every sensor.
-2. Walk in holding the **calibration ball** (a plain rigid sphere, ~10–20 cm —
-   e.g. a styrofoam ball on a short stick; matte, not black). The ball + you
-   are now the only foreground.
-   *(v1 assumption: the ball is held out on the stick away from the body so
-   per-frame foreground clusters cleanly; a later pass can add "largest
-   spherical cluster" segmentation to relax this.)*
+1. All nodes streaming. **Capture Background** on every sensor with the scene
+   empty — this is now **required** (the viewer refuses Fine Align without it):
+   the ball is segmented out of the *background-subtracted foreground*, so the
+   room/floor must be gone, leaving only you + the ball to cluster.
+2. Walk in holding the **calibration ball** (see above) out on its stick. The
+   ball + you are the only foreground; the relay finds the ball as the best
+   *spherical cluster* per frame (`segment_ball`), so **your body being in
+   frame is fine** — it's a separate, non-spherical cluster and is ignored.
 3. **Wave the ball slowly through the whole capture volume** for ~30 s —
    cover left/right, up/down, near/far; slow beats fast (motion skew).
-4. Run the calibration script (below). It reports per-sensor RMS residual —
-   **millimetres = good; centimetres = re-run** (ball too fast, or a sensor
-   barely saw it).
+   **Watch the viewer**: each camera that currently has the ball draws a
+   translucent **LOCK sphere** on it, and the status line shows a per-sensor
+   `● rms` (locked) / `○` (searching) indicator with a running detection count.
+   If a camera never locks, it can't see the ball there — move through its view.
+4. On "done" it reports per-sensor RMS residual — **millimetres = good;
+   centimetres = re-run** (ball waved too fast, a sensor barely saw it, or the
+   radius is wrong).
 5. Transforms are saved to `rig_calib.json` and applied by the relay from then
    on. Re-run only when cameras physically move. A bad pass is undone with the
    viewer's **Reset** button (`clear_rig_calib`) — it also cancels a
    still-running collection.
+
+**Detection (`segment_ball`, `central/calibration.py`).** The old path fit a
+sphere to the *whole* per-sensor cloud, so it only worked when the ball was the
+only foreground — impossible on an inward-facing rig where your body is always
+visible to some camera (the point-count gate then dropped every such frame, and
+nothing told the operator). Now the cloud is voxel-clustered (one cell per
+radius, 26-neighbour connected components) and `fit_sphere` runs only on the
+compact, ball-sized clusters; the one whose fit best matches the known radius
+(low rms, extent ≤ ~2.6·r) wins. The body is a separate, too-large / non-
+spherical cluster and is rejected; a cluster that merges ball+arm fails the
+extent/rms gate. Capturing the background first is what keeps this cheap and
+unambiguous — only two clusters to score (you and the ball).
+
+**Live feedback wire (relay → viewer).** During a fine pass the relay stashes
+each sensor's latest detected centre (transformed into the same frame as its
+wire cloud) and includes it in the ~1 Hz `calib_status` `collecting` message as
+`balls: { "<sid>": { c:[x,y,z], rms, n } }` (pruned ~1.5 s after a sensor's last
+detection). The viewer draws the LOCK spheres from it (`CalibBallMarker`) and
+formats the per-sensor lock indicator into the status line.
 
 ## The math (implemented + unit-tested)
 
@@ -202,10 +252,17 @@ fine-calibrated rigs.
    camera (~half the body depth) and a full 3D solve would turn that bias into
    a bogus tilt; roll/pitch come from the IMU instead. The rough world frame
    is the reference sensor's LEVELED frame (floor flat by construction).
-5. Later polish: per-pair ICP fine refinement on overlapping static
+5. ✅ **Ball segmentation + live LOCK feedback (2026-07-03)**: `segment_ball`
+   (largest spherical cluster) replaced the whole-cloud fit, so the operator's
+   body can be in frame; the relay streams the detected centre per sensor in
+   `calib_status.balls` and the viewer draws a LOCK sphere + per-sensor lock
+   indicator. Fine Align now requires background subtraction (viewer-enforced).
+6. Later polish: per-pair ICP fine refinement on overlapping static
    environment; joint (bundle) solve over all pairs instead of star-to-ref;
-   auto ball segmentation (largest spherical cluster / retroreflective ball in
-   IR) so the operator's body can be in frame.
+   **retroreflective ball in IR** (stream the Kinect active-IR amplitude image
+   and threshold the glowing marker) as a more robust segmentation upgrade if
+   background-subtraction clustering ever proves flaky on real ToF — same
+   `fit_sphere`/`solve_rig` math after detection.
 
 **Headless verification** (no hardware): `node/sim_node.py --ball 0.05 --pose
 "yaw_deg,x,y,z"` ray-renders a shared wall-clock-driven sphere from a known
