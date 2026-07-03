@@ -474,6 +474,9 @@ class PreviewServer:
                 else:
                     tracker = calibration.StationaryBallSampler(
                         radius,
+                        still_window=float(cmd.get("still_window", 0.8)),
+                        min_still_time=float(cmd.get("min_still_time", 0.5)),
+                        max_still_speed=float(cmd.get("max_still_speed", 0.015)),
                         still_radius=float(cmd.get("still_radius", 0.010)),
                         move_dist=float(cmd.get("move_dist", 0.08)),
                         **common)

@@ -171,7 +171,9 @@ it captures that position, move to the next. This is the default because it is
    **Fine Align**. The relay finds the ball as the best *spherical cluster* per
    frame (`segment_ball`), so **your body in frame is fine**.
 3. **Move the ball to a position and HOLD it still.** When a camera's detection
-   settles (spread stays under ~1 cm for ~0.3 s) its **LOCK sphere turns green**;
+   settles (its speed over the ~0.8 s window drops under ~1.5 cm/s — a velocity
+   gate, so a slow transition between spots does NOT count as a hold) its **LOCK
+   sphere turns green**;
    when ≥2 cameras are settled at the same instant the relay **captures** that
    position (one averaged sample per still camera) and the status line's capture
    count ticks up. Then **move to a new spot** (≥ ~8 cm away) and hold again.

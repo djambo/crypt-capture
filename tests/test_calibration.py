@@ -224,8 +224,9 @@ def test_stationary_sampler():
     holds = [np.array(h) for h in [
         (-0.4, 0.9, 0.1), (0.3, 1.1, -0.2), (0.0, 0.7, 0.3),
         (-0.2, 1.3, -0.1), (0.4, 0.8, 0.2), (-0.3, 1.0, -0.3)]]
-    s = StationaryBallSampler(BALL_R, still_radius=0.008, min_still_time=0.3,
-                              still_window=0.5, move_dist=0.06, min_samples=3)
+    # Defaults: whole 0.8 s window must be still (< 8 mm) — so a slow transition
+    # is NOT mistaken for a hold. Hold longer than the window below.
+    s = StationaryBallSampler(BALL_R, move_dist=0.06, min_samples=3)
 
     def feed(center_w, t, jitter):
         for sid, (R, tt) in poses.items():
@@ -237,7 +238,7 @@ def test_stationary_sampler():
 
     t = 0.0
     for hi, h in enumerate(holds):
-        for _ in range(22):                     # hold ~0.73 s (> still_window)
+        for _ in range(32):                     # hold ~1.06 s (> still_window)
             feed(h, t, 0.0008)
             t += 0.033
         if hi + 1 < len(holds):                 # move to the next spot
@@ -246,6 +247,21 @@ def test_stationary_sampler():
                 t += 0.033
 
     assert s.captures >= 5, "only %d holds captured" % s.captures
+
+    # A SLOW continuous drift (a deliberate transition between spots, ~2 cm/s)
+    # must NOT be mistaken for a hold — the whole-window stillness test rejects
+    # it. This is the "it grabbed while I was still moving" fix.
+    s2 = StationaryBallSampler(BALL_R, move_dist=0.06, min_samples=3)
+    t2 = 0.0
+    for k in range(120):                        # ~4 s of continuous slow motion
+        feed_center = np.array([-0.4 + 0.02 * t2, 1.0, 0.0])  # 2 cm/s
+        for sid, (R, tt) in poses.items():
+            cam = -R.T.dot(tt)
+            cap = sphere_cap(feed_center, BALL_R, view_origin=cam, n=200)
+            cap = cap.dot(R.T) + tt + RNG.normal(scale=0.0008, size=cap.shape)
+            s2.add(sid, t2 + 0.007 * sid, cap)
+        t2 += 0.033
+    assert s2.captures == 0, "slow drift wrongly captured %d times" % s2.captures
     rig = solve_rig(s.tracks, ref=0, min_pairs=4)
     assert 1 in rig, "stationary solve dropped the sensor"
     R_map, t_map = R1.T, -R1.T.dot(t1)          # sensor1 -> ref is the inverse

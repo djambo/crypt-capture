@@ -341,8 +341,11 @@ Two repos:
   UNSYNCED / slow rig (old Nano ~10–15 fps) the cameras grab a MOVING ball at
   different instants → paired points are the ball at different places (error =
   speed × time-skew, tens of mm, in every pair — RANSAC can't remove a common
-  bias). `StationaryBallSampler` fixes it: watch each camera's detection settle
-  (rolling-window spread < ~1 cm for ~0.3 s), and when ≥2 cameras are still at
+  bias). `StationaryBallSampler` fixes it: a camera is "still" when its detection
+  SPEED across the ~0.8 s window is under `max_still_speed` (default 1.5 cm/s — a
+  velocity gate measured from the window's two half-means, so ToF jitter is
+  averaged out and a slow transition between spots is NOT mistaken for a hold;
+  first-hardware tuning), and when ≥2 cameras are still at
   once AND the ball has moved to a new spot, commit ONE window-averaged sample
   per still camera under a shared capture id (exact correspondence key — no
   max_dt guess); auto-finish at a target capture count. A stationary ball is at

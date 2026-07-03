@@ -371,23 +371,32 @@ class StationaryBallSampler:
     Nano). Holding the ball STILL removes that error entirely: a stationary ball
     is in the same place no matter when each camera sampled it.
 
-    So this watches each camera's detection settle (a small rolling window whose
-    spread stays under `still_radius` for at least `min_still_time`), and when a
-    quorum of cameras is simultaneously still AND the ball has moved to a NEW
-    spot since the last capture (>= `move_dist`), it commits ONE averaged sample
-    per still camera under a shared capture id. Those ids act as exact
-    correspondence keys (solve_rig pairs by them, no max_dt guesswork), and the
-    per-window averaging also beats down ToF noise. The operator's loop is:
-    move the orb, hold, it captures, move again.
+    So this watches each camera's detection settle: a camera is "still" only when
+    its detection SPEED across the rolling `still_window` is under
+    `max_still_speed` (measured by averaging the window's two halves, so ToF
+    jitter is suppressed) and it has observed for at least `min_still_time`. A
+    velocity gate (not a fixed displacement) means a slow transition between
+    spots is rejected regardless of how full the window is. When a quorum of
+    cameras is simultaneously still AND
+    the ball has moved to a NEW spot since the last capture (>= `move_dist`), it
+    commits ONE averaged sample per still camera under a shared capture id. Those
+    ids act as exact correspondence keys (solve_rig pairs by them, no max_dt
+    guesswork), and the per-window averaging also beats down ToF noise. The
+    operator's loop is: move the orb, hold ~1 s, it captures, move again.
     """
 
-    def __init__(self, radius, still_window=0.6, min_still_time=0.3,
-                 still_radius=0.010, move_dist=0.08, min_still_sensors=2,
-                 min_samples=3, min_points=40, max_points=8000,
-                 max_fit_rms=0.012, min_aspect=0.5):
+    # A camera is "still" when its detection's SPEED across the window is under
+    # max_still_speed (m/s) — a velocity gate, so it rejects a slow transition
+    # between spots regardless of how full the window is, unlike a fixed
+    # displacement threshold. still_radius is a secondary jitter cap.
+    def __init__(self, radius, still_window=0.8, min_still_time=0.5,
+                 max_still_speed=0.015, still_radius=0.010, move_dist=0.08,
+                 min_still_sensors=2, min_samples=3, min_points=40,
+                 max_points=8000, max_fit_rms=0.012, min_aspect=0.5):
         self.radius = float(radius)
         self.still_window = float(still_window)
         self.min_still_time = float(min_still_time)
+        self.max_still_speed = float(max_still_speed)
         self.still_radius = float(still_radius)
         self.move_dist = float(move_dist)
         self.min_still_sensors = int(min_still_sensors)
@@ -441,6 +450,22 @@ class StationaryBallSampler:
         if buf[-1][0] - buf[0][0] < self.min_still_time:
             return False
         pts = np.array([c for _, c in buf])
+        ts = np.array([t for t, _ in buf])
+        # SPEED gate: compare the mean position (and mean time) of the first half
+        # of the window to the second half, and divide displacement by the time
+        # baseline → a velocity. Averaging each half suppresses per-frame ToF
+        # jitter, so this measures systematic MOTION; dividing by the ACTUAL
+        # baseline makes it duration-independent, so a slow transition between
+        # spots is rejected even on a short/partial window (a fixed-displacement
+        # threshold let it through as the window filled — the "it grabbed while I
+        # was still moving" bug).
+        half = max(1, len(pts) // 2)
+        drift = float(np.linalg.norm(
+            pts[:half].mean(axis=0) - pts[half:].mean(axis=0)))
+        dt = float(ts[half:].mean() - ts[:half].mean())
+        if dt <= 1e-6 or drift / dt > self.max_still_speed:
+            return False
+        # Secondary jitter cap so a single glitchy frame can't pass as still.
         spread = float(np.linalg.norm(pts - pts.mean(axis=0), axis=1).max())
         return spread < self.still_radius
 
