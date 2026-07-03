@@ -195,8 +195,9 @@ the node now logs it at startup: `... on CUDA/CPU` vs `... on CPU`).
 # on the Orin (JetPack 6 has CUDA preinstalled; cuDNN comes with the full
 # jetpack meta-package: sudo apt install nvidia-jetpack  # if missing)
 pip3 uninstall -y onnxruntime
+# NOTE: the .dev mirror is dead — .io is the live one (verified on hardware).
 pip3 install onnxruntime-gpu "numpy<2" \
-    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
 # verify BEFORE running the node:
 python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
 # want: ['CUDAExecutionProvider', ..., 'CPUExecutionProvider']

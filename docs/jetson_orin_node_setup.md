@@ -121,7 +121,7 @@ k4arecorder -l 3 /tmp/test.mkv && echo "CAPTURE OK"
 - `Failed to open display` → Xorg session not up (redo step 3 / attach a display).
 - `libusb ... unavailable` → run `lsusb | grep 097c`. If the **depth camera
   `045e:097c` is missing** (color `097d`/mics/hubs present), it's a **power/
-  cold-boot enumeration** issue — power-cycle the Kinect's 5 V adapter; see §10.
+  cold-boot enumeration** issue — power-cycle the Kinect's 5 V adapter; see §11.
 
 ## 8. Python + pyk4a
 ```bash
@@ -163,7 +163,55 @@ The service handles the rest: `Restart=always`, USB-buffer fix on boot, LAN
 discovery, and git self-update (push → reboot → runs latest). It borrows the
 autologin session's GL context via `DISPLAY`/`XAUTHORITY` — **no error 204**.
 
-## 10. Cold-boot power ordering (know this)
+## 10. Skeleton pose — GPU inference (one-time per Orin)
+The service's **orin profile already passes the pose flags** (`--pose-model
+models/movenet.onnx --pose-trt`), so there is nothing to configure — until
+this install is done the node just logs "pose disabled" and streams normally.
+
+```bash
+cd ~/crypt-capture
+
+# onnxruntime-gpu: there are NO aarch64 wheels on PyPI — use NVIDIA's Jetson
+# index (the .io host; the older .dev mirror is dead).
+# "numpy<2" is REQUIRED: pyk4a was compiled on-device against NumPy 1.x and
+# dies with "a module compiled using NumPy 1.x cannot be run in NumPy 2.x"
+# if anything drags in NumPy 2.
+pip3 install --user onnxruntime-gpu "numpy<2" \
+    --extra-index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+python3 -c "import onnxruntime as o; print(o.get_available_providers())"
+# want: ['TensorrtExecutionProvider', 'CUDAExecutionProvider', 'CPUExecutionProvider']
+
+# The model: MoveNet single-pose THUNDER (256 px — the accurate variant;
+# Lightning is faster but noticeably jitterier, and TensorRT has huge
+# headroom either way). models/ is gitignored, so the service's self-update
+# never touches the download.
+mkdir -p models
+curl -L -o models/movenet.onnx \
+  https://huggingface.co/Xenova/movenet-singlepose-thunder/resolve/main/onnx/model.onnx
+ls -lh models/movenet.onnx        # ~25 MB; a few KB = an error page, re-download
+
+# Optional: bench the model alone (expect a few ms/infer on TensorRT):
+python3 -m node.pose models/movenet.onnx --trt
+
+sudo systemctl restart kinect-node
+journalctl -u kinect-node -f
+```
+The **first start compiles the TensorRT engine** (~1–3 min: `pose: building
+the TensorRT engine…`), cached in `models/trt_cache` — every later start is
+instant. Healthy log lines:
+```
+sensor 0 pose: model models/movenet.onnx (input 256x256 NHWC, ...) on Tensorrt/CUDA/CPU
+sensor 0 pose: 28.5 fps (12 ms/infer = pre 2 + run 7, 7 joints, 0% gated)
+```
+with the frame line still pinned at 30 fps (pose runs in its own process and
+can never slow the cloud). If you swap the model file later, also
+`rm -rf models/trt_cache` (the cached engine belongs to the old model).
+
+(Nodes that can't run inference — e.g. an old Nano — get skeletons from the
+relay instead: `preview_server --pose-model models/movenet.onnx` on the
+laptop. See `docs/skeleton_pose.md`.)
+
+## 11. Cold-boot power ordering (know this)
 The depth camera (`045e:097c`) sometimes doesn't enumerate if it isn't powered/
 ready when the host scans USB. Observed behaviour: with the Kinect powered and
 connected, a Jetson **reboot** cycles the USB bus and it re-enumerates cleanly on
@@ -173,16 +221,22 @@ There is **no reliable software USB-reset** on the Jetson (tried and removed).
 To fully automate: a **`uhubctl`-capable powered USB hub** (or a smart plug on the
 Kinect adapter) can power-cycle the port a few seconds after boot.
 
-## 11. Validate end-to-end
+## 12. Validate end-to-end
 ```bash
 # on the laptop / central:
 python3 -m central.preview_server
 ```
 Open the **crypt viewer** at the laptop, confirm the live cloud, then hit
-**Capture Background** (step out, capture, step back in). Point count drops to
-~30–40 k and fps pins to **30**. Streaming the *full unmasked room* (250–400 k pts,
+**Capture Background** (step out during the 3 s countdown, step back in).
+Point count drops to ~30–40 k and fps pins to **30**, with the room frozen as
+the environment layer. Streaming the *full unmasked room* (250–400 k pts,
 ~1.3 MB/f) is network-bound and will read 5–9 fps — that's expected; background
-subtraction is the lever, not faster hardware.
+subtraction is the lever, not faster hardware. Step in front of the camera and
+confirm the **skeleton markers** track you (skeletons layer toggle on).
+
+With two or more nodes streaming: **Rough Align** (walk a slow "L", visible to
+every camera — the status line should report tier **skeleton**), then **Detect
+Floor**. Clouds registered, floors flush on the grid — the rig is at parity.
 
 ---
 
@@ -194,7 +248,8 @@ subtraction is the lever, not faster hardware.
 - [ ] `CAPTURE OK` smoke test (§7)
 - [ ] pyk4a (§8)
 - [ ] Service + `/etc/default/kinect-node` with a **unique `SENSOR_ID`** (§9)
-- [ ] Confirm streaming in the viewer (§11)
+- [ ] Skeleton pose: `onnxruntime-gpu "numpy<2"` + MoveNet Thunder (§10)
+- [ ] Confirm streaming + skeleton in the viewer (§12)
 
 **What differs per node:** just `SENSOR_ID` (0,1,2,3). Discovery finds central
 automatically; if two rigs share a LAN, also set a matching `--rig-id` on both
