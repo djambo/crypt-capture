@@ -25,7 +25,7 @@ can stay source-agnostic (see the North Star in `CLAUDE.md`).
 | field | type | meaning |
 |---|---|---|
 | magic | `4s` | `CPV1` |
-| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present |
+| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present; bit3 = `grid` present |
 | sensor_id | `u32` | source sensor (0..N-1) |
 | frame_id | `u32` | capture frame index (low 32 bits) |
 | count | `u32` | number of points |
@@ -48,12 +48,24 @@ Then the payload blocks, in order:
    viewer always has it. **Read it with a `DataView` (`getFloat32`), not a
    `Float32Array` view:** when rgb is present this block starts at a non-4-byte-
    aligned offset and a typed-array view would throw.
+4. **grid** *(only if flag bit3 set)* — `u16 grid_w`, `u16 grid_h`, then
+   `count × uint32`: per point, its **row-major linear index** (`v*grid_w + u`)
+   into the (strided) depth sub-grid it was sampled from. This is the
+   depth-map connectivity the flat point list otherwise loses — from it the
+   viewer can re-mesh neighbouring grid pixels into triangles (the **textured
+   mesh** subject render; cut edges on depth discontinuities). Indices are
+   ascending and pair 1:1 with positions (index *k* describes point *k*). The
+   dims ride on every frame because `set_camera` resizes the grid live. Sent
+   by default; `preview_server --no-grid` drops it (−4 bytes/point). Same
+   alignment caveat as gravity: with rgb present the offset is not 4-aligned —
+   copy the bytes before viewing as `Uint32Array`.
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The viewer must read `count` from the header, not
 assume a fixed size. The `rgb` block, when present, starts at byte `20 +
 count*12`; the `gravity` block starts right after it (`20 + count*12`, plus
-`count*3` when rgb is present).
+`count*3` when rgb is present); the `grid` block is last (add 12 more when
+gravity is present).
 
 ## Viewer side (sketch, lives in `crypt`)
 

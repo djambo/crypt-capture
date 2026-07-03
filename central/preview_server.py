@@ -55,6 +55,7 @@ _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, coun
 FLAG_POSITIONS = 0x1
 FLAG_RGB = 0x2
 FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (down) vec
+FLAG_GRID = 0x8                               # trailing depth-grid index block
 
 
 def gravity_to_view(g_optical):
@@ -113,10 +114,16 @@ def compute_ray_table(w, h, fx, fy, cx, cy, dist, iters=8):
 
 def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
               color_grid=None, extrinsic=None):
-    """Depth grid -> (xyz, rgb) for the valid (non-zero) pixels, using the
+    """Depth grid -> (xyz, rgb, grid) for the valid (non-zero) pixels, using the
     distortion-aware full-res ray table. The grid may be node-downsampled
     (`node_stride`): grid pixel (u,v) maps to ray_table[v*node_stride, u*node_stride].
     `stride` is an additional relay-side downsample.
+
+    `grid` is (grid_w, grid_h, indices): the dimensions of the (strided)
+    sub-grid the points were sampled from and, per point, its row-major linear
+    index into that sub-grid (uint32, ascending). This is the connectivity the
+    flat point list otherwise throws away — the viewer re-meshes neighbouring
+    grid pixels into triangles from it (the CPV1 grid block, FLAG_GRID).
 
     `extrinsic` (R 3x3, t 3) optionally rigid-transforms the points from the
     streamed grid's camera frame into the canonical DEPTH frame (P_depth = R·P+t),
@@ -129,9 +136,12 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     vs = np.arange(0, h, stride)
     sub = d[vs][:, us]
     m = sub != 0
+    grid_w, grid_h = len(us), len(vs)
     if not m.any():
-        return np.empty((0, 3), dtype=np.float32), (
-            np.empty((0, 3), dtype=np.uint8) if color_grid is not None else None)
+        return (np.empty((0, 3), dtype=np.float32),
+                np.empty((0, 3), dtype=np.uint8) if color_grid is not None
+                else None,
+                (grid_w, grid_h, np.empty(0, dtype=np.uint32)))
     rx = ray_x[np.ix_(vs * node_stride, us * node_stride)]
     ry = ray_y[np.ix_(vs * node_stride, us * node_stride)]
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
@@ -146,7 +156,10 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     rgb = None
     if color_grid is not None:
         rgb = color_grid[vs][:, us][m]
-    return xyz, rgb
+    # Row-major flatten order of `sub[m]` == flatnonzero order, so index k here
+    # is point k in xyz/rgb.
+    grid = (grid_w, grid_h, np.flatnonzero(m).astype(np.uint32))
+    return xyz, rgb, grid
 
 
 def aligned_color_grid(color_bytes, depth_u16, w, h):
@@ -166,11 +179,12 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
     return grid
 
 
-def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
+def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None):
     count = int(xyz.shape[0])
     flags = (FLAG_POSITIONS
              | (FLAG_RGB if rgb is not None else 0)
-             | (FLAG_GRAVITY if gravity is not None else 0))
+             | (FLAG_GRAVITY if gravity is not None else 0)
+             | (FLAG_GRID if grid is not None else 0))
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
@@ -179,6 +193,14 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
         payload += np.ascontiguousarray(rgb, dtype=np.uint8).tobytes()
     if gravity is not None:                  # trailing 12-byte block (after rgb)
         payload += np.asarray(gravity, dtype="<f4").tobytes()
+    if grid is not None:
+        # Depth-grid connectivity (FLAG_GRID, LAST block so older viewers just
+        # ignore the trailing bytes): u16 grid_w, u16 grid_h, then count × u32
+        # row-major linear index into that grid (same order as positions). The
+        # viewer re-meshes neighbouring grid pixels into triangles from this.
+        grid_w, grid_h, indices = grid
+        payload += struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF)
+        payload += np.ascontiguousarray(indices, dtype="<u4").tobytes()
     return payload
 
 
@@ -189,10 +211,15 @@ NODE_POSE_QUIET_S = 2.0
 
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=200000,
-                 rig_calib="rig_calib.json", pose_model=None, pose_trt=False):
+                 rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
+                 send_grid=True):
         self.calib = calib
         self.stride = stride
         self.max_points = max_points
+        # Attach the depth-grid index block (FLAG_GRID) to every CPV1 frame so
+        # the viewer can re-mesh the points. +4 bytes/point (~27% over the
+        # 15 B/pt of xyz+rgb); --no-grid drops it if wire budget matters.
+        self.send_grid = send_grid
         # Central-side pose fallback: run the SAME MoveNet at the relay for
         # sensors whose node doesn't send CPOS (the weak Nano). None = off.
         self.pose_model = pose_model
@@ -794,14 +821,17 @@ class PreviewServer:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
                 extrinsic = self._sensor_extrinsic.get(frame.sensor_id)
-                xyz, rgb = unproject(depth, frame.width, frame.height,
-                                     ray_x, ray_y, self.stride, ns, cgrid,
-                                     extrinsic)
+                xyz, rgb, grid = unproject(depth, frame.width, frame.height,
+                                           ray_x, ray_y, self.stride, ns,
+                                           cgrid, extrinsic)
                 if xyz.shape[0] > self.max_points:
                     idx = np.linspace(0, xyz.shape[0] - 1, self.max_points).astype(int)
                     xyz = xyz[idx]
                     if rgb is not None:
                         rgb = rgb[idx]
+                    # Keep the grid indices paired with the surviving points —
+                    # the mesh just gets sparser where points were dropped.
+                    grid = (grid[0], grid[1], grid[2][idx])
                 # An active calibration session consumes the RAW view-frame
                 # cloud (a re-run must not solve on already-transformed points).
                 if self._calib_session is not None:
@@ -818,7 +848,8 @@ class PreviewServer:
                         g = R.dot(np.asarray(gravity, dtype=np.float32))
                         gravity = (float(g[0]), float(g[1]), float(g[2]))
                 out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb,
-                                    gravity)
+                                    gravity,
+                                    grid if self.send_grid else None)
                 self._broadcast(out)
                 self.frames_relayed += 1
 
@@ -977,6 +1008,10 @@ def main():
                     help="ADDITIONAL relay-side downsample on top of the node's "
                          "--preview-stride (1 = none; total = node*relay)")
     ap.add_argument("--max-points", type=int, default=200000)
+    ap.add_argument("--no-grid", action="store_true",
+                    help="don't attach the depth-grid index block (FLAG_GRID) "
+                         "to CPV1 frames — saves 4 bytes/point but the viewer "
+                         "can't render the textured mesh, only points")
     ap.add_argument("--rig-calib", default="rig_calib.json",
                     help="per-sensor rig extrinsics (from scripts/"
                          "calibrate_rig.py or the viewer's Align buttons); "
@@ -1003,7 +1038,8 @@ def main():
                            max_points=args.max_points,
                            rig_calib=args.rig_calib,
                            pose_model=args.pose_model,
-                           pose_trt=args.pose_trt)
+                           pose_trt=args.pose_trt,
+                           send_grid=not args.no_grid)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

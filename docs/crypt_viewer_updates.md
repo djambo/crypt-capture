@@ -30,6 +30,50 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — CPV1 grid block (`FLAG_GRID`): mesh the points in the viewer
+**Status: applied 2026-07-03** (viewer wired same session — `MeshCloud.js` +
+the panel's subject `render` selector).
+
+**Summary.** The viewer can now render the subject as a **textured triangle
+mesh** instead of points (much better facial detail — colours interpolate
+across a solid surface instead of dotting it). The blocker was that a `CPV1`
+frame is a flat point list: the depth-map (u,v) coordinates that say which
+points are *neighbours* were discarded at the relay, so the viewer had nothing
+to connect triangles from. The relay now ships that connectivity back as an
+additive block: per point, its row-major linear index into the (strided)
+depth sub-grid it was sampled from, plus the sub-grid dimensions. On by
+default (`--no-grid` to drop it; +4 bytes/point ≈ +27% frame size over
+xyz+rgb).
+
+**Protocol impact (additive binary block — new flags bit 3, `FLAG_GRID =
+0x8`).** Appended as the LAST block, after positions/rgb/gravity, so parsers
+reading by front offsets are untouched:
+
+```
+[u16 grid_w][u16 grid_h]            // strided sub-grid dimensions
+[count × u32 grid_index]            // per point, row-major: index = v*grid_w + u
+```
+
+Indices are ascending and pair 1:1 with the positions (index k describes point
+k). `grid_w`/`grid_h` ride on every frame because `set_camera` changes them
+live. Like gravity, the block's offset is NOT 4-aligned when rgb is present —
+copy the bytes into aligned storage before viewing as `Uint32Array` (a typed
+view on the WS buffer throws).
+
+**Viewer action (done).** `parseFrame` reads the block; a new `MeshCloud`
+rebuilds the classic depth-grid triangulation per frame (two triangles per
+fully-valid 2×2 cell, one for 3-valid cells, edges longer than `maxEdge`
+(5 cm default) cut so subject→background discontinuities don't web — same
+scheme as `processing/mesh_take.py`), lit hemisphere+key with flat-shaded
+derivative normals, per-vertex Kinect colour as albedo. The panel's layers
+section gained a **`render` selector** (`points` | `mesh`, also the `m` key,
+`?render=mesh` URL param); points stay the default. The `PointCloud` is still
+fed every frame (hidden = no GPU upload) so particles/floor fits keep working
+and the swap is instant. With a relay that doesn't send the block, mesh mode
+falls back to points and the status line says to update crypt-capture.
+
+---
+
 ## 2026-07-03 — Fine Align: stop-and-go (stationary) sampling + robust solve
 **Status: applied 2026-07-03** (viewer wired same session; design:
 crypt-capture `docs/rig_calibration.md`).

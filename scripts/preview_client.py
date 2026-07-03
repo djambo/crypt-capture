@@ -32,6 +32,8 @@ _HEADER = struct.Struct("<4sIIII")
 
 
 FLAG_RGB = 0x2
+FLAG_GRAVITY = 0x4
+FLAG_GRID = 0x8
 
 
 def parse_preview(payload):
@@ -42,13 +44,25 @@ def parse_preview(payload):
     pos_bytes = count * 3 * 4
     mv = memoryview(payload)
     positions = mv[off:off + pos_bytes]
+    off += pos_bytes
     rgb = None
     if flags & FLAG_RGB:
-        rgb_off = off + pos_bytes
-        rgb = mv[rgb_off:rgb_off + count * 3]
+        rgb = mv[off:off + count * 3]
+        off += count * 3
+    if flags & FLAG_GRAVITY:
+        off += 3 * 4
+    grid = None
+    if flags & FLAG_GRID:
+        # [u16 grid_w][u16 grid_h] then count x u32 row-major grid indices —
+        # the depth-grid connectivity the viewer's mesh render triangulates.
+        grid_w, grid_h = struct.unpack_from("<HH", payload, off)
+        off += 4
+        indices = mv[off:off + count * 4]
+        off += count * 4
+        grid = {"w": grid_w, "h": grid_h, "indices": indices}
     return {
         "flags": flags, "sensor": sensor, "frame_id": frame_id,
-        "count": count, "positions": positions, "rgb": rgb,
+        "count": count, "positions": positions, "rgb": rgb, "grid": grid,
     }
 
 
@@ -76,15 +90,30 @@ def run(host, port, frames):
                 t0 = time.time()
             got += 1
             total_pts += info["count"]
-            # sanity: positions (and rgb, if present) block lengths match count
+            # sanity: positions (and rgb/grid, if present) match count
             assert len(info["positions"]) == info["count"] * 12
             has_rgb = info["rgb"] is not None
             if has_rgb:
                 assert len(info["rgb"]) == info["count"] * 3
+            grid = info["grid"]
+            if grid is not None:
+                assert len(grid["indices"]) == info["count"] * 4
+                # indices are row-major into the grid: strictly ascending and
+                # in range (what the viewer's mesh triangulation relies on)
+                idx = struct.unpack("<%dI" % info["count"],
+                                    grid["indices"].tobytes())
+                assert all(b > a for a, b in zip(idx, idx[1:])), \
+                    "grid indices not ascending"
+                if idx:
+                    assert idx[-1] < grid["w"] * grid["h"], \
+                        (idx[-1], grid["w"], grid["h"])
             if got <= 3 or got % 10 == 0:
-                print("frame %d: sensor %d, %d points, color=%s (%d bytes)"
+                print("frame %d: sensor %d, %d points, color=%s, grid=%s "
+                      "(%d bytes)"
                       % (info["frame_id"], info["sensor"], info["count"],
-                         "yes" if has_rgb else "no", len(payload)))
+                         "yes" if has_rgb else "no",
+                         "%dx%d" % (grid["w"], grid["h"]) if grid else "no",
+                         len(payload)))
         if got and t0:
             dt = max(1e-6, time.time() - t0)
             print("\nreceived %d frames, avg %d pts/frame, %.1f fps"

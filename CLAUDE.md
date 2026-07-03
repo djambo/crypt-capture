@@ -427,6 +427,21 @@ Two repos:
   `sudo deploy/install-node-service.sh` re-run per device. ⏳ remaining:
   hands→particle attractors in the viewer; relay-side skeleton fusion across
   sensors.
+- ✅ **CPV1 grid block → viewer textured mesh (2026-07-03)**: the relay now
+  attaches each point's **depth-grid position** to every `CPV1` frame as an
+  additive trailing block (new `FLAG_GRID = 0x8`, after gravity: `u16 grid_w`,
+  `u16 grid_h`, then `count × u32` row-major linear index into the strided
+  sub-grid, ascending, paired 1:1 with positions). That's the connectivity the
+  flat point list otherwise loses — the `crypt` viewer re-meshes neighbouring
+  grid pixels into triangles and renders the subject as a **textured mesh**
+  (its new `MeshCloud` + panel `render` selector; much better facial detail),
+  swappable live with the classic point render. `unproject` returns
+  `(xyz, rgb, grid)` now (`np.flatnonzero` of the valid mask — zero extra
+  compute); the `max_points` subsample keeps indices paired. On by default
+  (+4 B/pt ≈ +27% frame size); `preview_server --no-grid` drops it. Spec in
+  `docs/preview_protocol.md`; verified headless (`scripts/preview_client`
+  asserts ascending in-range indices; sim → relay → viewer mesh rendered in
+  Chromium, incl. the old-relay fallback to points). `tests/test_grid.py`.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -538,7 +553,7 @@ deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             device-class default flags, auto-detected from the L4T release
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
-            test_pose.py
+            test_pose.py, test_grid.py (CPV1 grid block / mesh connectivity)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
@@ -589,6 +604,8 @@ python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNE
 python3 -m tests.test_camera
 # IMU / gravity path tests (CIMU round-trip + optical->view + CPV1 block):
 python3 -m tests.test_imu
+# CPV1 grid block (depth-grid indices the viewer meshes from):
+python3 -m tests.test_grid
 
 # Rig extrinsic calibration (docs/rig_calibration.md). Headless dry-run: two
 # posed sim nodes share a synthetic ball, the solve must recover the pose:

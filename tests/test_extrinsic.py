@@ -54,7 +54,7 @@ def test_unproject_applies_extrinsic():
     ray = np.zeros((1, 1), dtype=np.float32)
 
     # Identity -> view-frame flip only: (0,0,2)_opt -> (0,-0,-2)_view.
-    xyz_id, _ = ps.unproject(depth, w, h, ray, ray, 1)
+    xyz_id, _, _ = ps.unproject(depth, w, h, ray, ray, 1)
     assert np.allclose(xyz_id[0], [0, 0, -2], atol=1e-5), xyz_id
 
     # A 90° rotation about optical X: (0,0,2) -> (0,-2,0) in the depth frame,
@@ -62,7 +62,7 @@ def test_unproject_applies_extrinsic():
     c, s = math.cos(math.pi / 2), math.sin(math.pi / 2)
     R = np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=np.float32)
     t = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-    xyz, _ = ps.unproject(depth, w, h, ray, ray, 1, extrinsic=(R, t))
+    xyz, _, _ = ps.unproject(depth, w, h, ray, ray, 1, extrinsic=(R, t))
     # P_depth = R·(0,0,2)+t = (0,-2,0)+t = (0.1,-1.8,0.3); view = (x,-y,-z).
     assert np.allclose(xyz[0], [0.1, 1.8, -0.3], atol=1e-4), xyz
     print("unproject applies extrinsic: OK")
