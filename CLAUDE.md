@@ -347,6 +347,10 @@ Two repos:
   pose thread was convoying on the capture loop's GIL, the same lesson as
   the frame worker pool). Production config: `--pose-model models/movenet.onnx
   --pose-trt` (engine cached in models/trt_cache) → skeletons at camera rate.
+  **Full-res streaming is the default now** (deploy EXTRA_ARGS emptied,
+  2026-07-03, user call): point-count-bound throughput means stride 1 holds
+  30 fps with background subtraction on the Orin; keep `--preview-stride 2`
+  only on the weak Nano / laggy full-room views.
   `models/` is gitignored (survives the service's auto-update hard reset);
   the deploy env sample shows the pose EXTRA_ARGS line (Orin-class nodes
   only — not the Nano). ⏳ remaining: hands→particle attractors in the

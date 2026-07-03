@@ -41,7 +41,13 @@ UPDATE_BRANCH=main
 #XAUTHORITY=/run/user/1000/gdm/Xauthority
 
 # Extra kinect_node flags, whitespace-separated, passed verbatim. Examples:
-#   --preview-stride 2          downsample the live cloud (recommended for preview)
+#   --preview-stride 2          downsample the live cloud. NOT needed on
+#                               Orin-class nodes: throughput is point-count-
+#                               bound, so FULL RES holds 30 fps whenever
+#                               background subtraction keeps the subject in
+#                               the ~20-30k point budget. Keep stride 2 on
+#                               the weak 1st-gen Nano, or if the full-room
+#                               (background-cleared) view lags the wire.
 #   --align color_to_depth      fewer / cleaner points
 #   --depth-mode WFOV_UNBINNED  wide FOV
 #   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
@@ -54,5 +60,6 @@ UPDATE_BRANCH=main
 # self-update never touches it). --pose-trt caches its TensorRT engine in
 # models/trt_cache (first ever start compiles ~1-2 min; later starts are
 # instant). Validated on the Orin: 2.9 ms/infer, skeletons at camera rate.
-#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx --pose-trt
-EXTRA_ARGS=--preview-stride 2
+#   EXTRA_ARGS=--pose-model models/movenet.onnx --pose-trt
+# Default: no extra flags = full-resolution cloud.
+EXTRA_ARGS=

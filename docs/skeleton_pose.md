@@ -143,14 +143,14 @@ curl -L -o models/movenet.onnx \
 # test run in the foreground (stop the service first):
 sudo systemctl stop kinect-node
 python3 -m node.kinect_node --host auto --sensor 0 --frames 0 \
-    --preview-stride 2 --pose-model models/movenet.onnx --profile
+    --pose-model models/movenet.onnx --profile
 # expect: "sensor 0: pose model models/movenet.onnx (input ...)" at startup,
 # "sensor 0 pose: N fps ..." lines while running, and your skeleton in the
 # browser the moment you step in. Watch the frame fps line: it must hold the
 # same rate as without --pose-model (that's the decoupling contract).
 
 # make it permanent: add the flags to EXTRA_ARGS in /etc/default/kinect-node
-#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx --pose-trt
+#   EXTRA_ARGS=--pose-model models/movenet.onnx --pose-trt
 sudo systemctl start kinect-node
 ```
 
