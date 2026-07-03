@@ -224,12 +224,19 @@ class MoveNetEstimator(object):
             self.dtype = np.float32
 
     def infer(self, rgb):
-        """(H, W, 3) uint8 RGB -> [(joint_id, u, v, conf)] in image pixels."""
+        """(H, W, 3) uint8 RGB -> [(joint_id, u, v, conf)] in image pixels.
+        Per-stage timings land in last_pre_ms / last_run_ms so slowness is
+        attributable (CPU preprocessing vs the model session itself)."""
+        t0 = time.time()
         square, scale, px, py = letterbox(rgb, self.size)
         x = square.astype(self.dtype)
         if self.nchw:
             x = np.transpose(x, (2, 0, 1))
+        t1 = time.time()
         outputs = self.sess.run(None, {self.input_name: x[None]})
+        t2 = time.time()
+        self.last_pre_ms = (t1 - t0) * 1000.0
+        self.last_run_ms = (t2 - t1) * 1000.0
         raw = None
         for o in outputs:
             if np.asarray(o).size == COCO_JOINTS * 3:
@@ -335,7 +342,61 @@ class PoseWorker(object):
             if self.inferences % self.REPORT_EVERY == 0:
                 fps = self.REPORT_EVERY / max(1e-6, now - self._win_t0)
                 self._win_t0 = now
-                print("%s: %.1f fps (%.0f ms/infer, %d joints, %d%% gated)"
-                      % (self.label, fps, self.last_ms, len(out),
+                split = ""
+                pre = getattr(self.estimator, "last_pre_ms", None)
+                run = getattr(self.estimator, "last_run_ms", None)
+                if pre is not None:
+                    split = " = pre %.0f + run %.0f" % (pre, run)
+                print("%s: %.1f fps (%.0f ms/infer%s, %d joints, %d%% gated)"
+                      % (self.label, fps, self.last_ms, split, len(out),
                          100 * self.gated // self.REPORT_EVERY))
                 self.gated = 0
+
+
+def _bench():
+    """Standalone model benchmark — the model's raw speed on THIS machine with
+    no capture pipeline around it (isolates 'slow model/EP' from 'slow
+    pipeline'):
+
+        python3 -m node.pose models/movenet.onnx            # CUDA-preferred
+        python3 -m node.pose models/movenet.onnx --trt      # TensorRT+cache
+        python3 -m node.pose models/movenet.onnx --cpu
+    """
+    import argparse
+    ap = argparse.ArgumentParser(description="pose model benchmark")
+    ap.add_argument("model")
+    ap.add_argument("--trt", action="store_true")
+    ap.add_argument("--cpu", action="store_true")
+    ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--n", type=int, default=100)
+    args = ap.parse_args()
+    providers = ["CPUExecutionProvider"] if args.cpu else None
+    est = MoveNetEstimator(args.model, threads=args.threads,
+                           providers=providers, trt=args.trt)
+    print("providers: %s | input %dx%d %s %s"
+          % (est.providers, est.size, est.size,
+             "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name))
+    rng = np.random.RandomState(1)
+    img = rng.randint(0, 255, size=(576, 640, 3)).astype(np.uint8)
+    est.infer(img)
+    print("warmup (first run): pre %.1f + run %.1f ms"
+          % (est.last_pre_ms, est.last_run_ms))
+    pre, run = [], []
+    t0 = time.time()
+    for _ in range(args.n):
+        est.infer(img)
+        pre.append(est.last_pre_ms)
+        run.append(est.last_run_ms)
+    wall = time.time() - t0
+    pre.sort()
+    run.sort()
+    n = args.n
+    print("%d runs in %.2f s -> %.1f fps sustained" % (n, wall, n / wall))
+    print("pre  ms: median %.1f  p90 %.1f  max %.1f"
+          % (pre[n // 2], pre[int(n * 0.9)], pre[-1]))
+    print("run  ms: median %.1f  p90 %.1f  max %.1f"
+          % (run[n // 2], run[int(n * 0.9)], run[-1]))
+
+
+if __name__ == "__main__":
+    _bench()
