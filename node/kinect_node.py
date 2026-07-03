@@ -50,7 +50,8 @@ from pyk4a import (
 )
 
 from protocol import control, discovery, rvl
-from protocol.frame import Frame, encode_calib, encode_imu, encode_extrinsic
+from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
+                            encode_pose)
 from node import camera_modes
 
 _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
@@ -319,7 +320,8 @@ def run(host, port, sensor_id, frames,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
         imu_axes=None, imu_extrinsic=False, rig_id=discovery.DEFAULT_RIG_ID,
-        discovery_port=discovery.DISCOVERY_PORT, workers=2):
+        discovery_port=discovery.DISCOVERY_PORT, workers=2,
+        pose_model=None, pose_threads=2, pose_min_conf=0.2):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -506,6 +508,29 @@ def run(host, port, sensor_id, frames,
     sender_t = threading.Thread(target=sender, daemon=True)
     sender_t.start()
 
+    # Optional 2D pose -> CPOS keypoints (docs/skeleton_pose.md). The worker
+    # holds only the LATEST frame and onnxruntime releases the GIL, so the
+    # cloud stream never waits on inference; keypoint payloads ride the same
+    # ordered sender queue as everything else ("raw"), so socket writes stay
+    # serialised. Enabled with --pose-model <movenet .onnx>.
+    pose_worker = None
+    if pose_model:
+        from node.pose import MoveNetEstimator, PoseWorker
+
+        def _emit_pose(kps):
+            payload = encode_pose(sensor_id, int(time.time() * 1e9), kps)
+            try:
+                outq.put(("raw", payload), timeout=0.5)
+            except queue.Full:
+                pass                          # saturated: drop, more coming
+
+        est = MoveNetEstimator(pose_model, threads=pose_threads)
+        pose_worker = PoseWorker(est, _emit_pose, min_conf=pose_min_conf,
+                                 label="sensor %d pose" % sensor_id)
+        print("sensor %d: pose model %s (input %dx%d %s, %s)" % (
+            sensor_id, pose_model, est.size, est.size,
+            "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name))
+
     try:
         while frames <= 0 or sent < frames:
             if state["exc"] is not None:          # sender/worker died: stop
@@ -586,6 +611,11 @@ def run(host, port, sensor_id, frames,
                 csrc = None
             td = time.time()
 
+            # Newest frame for the pose worker (stash refs — returns instantly;
+            # the worker infers at its own rate on whatever is freshest).
+            if pose_worker is not None and csrc is not None:
+                pose_worker.submit(csrc, depth)
+
             # Snapshot the live-tunable knobs (the control reader mutates them)
             # and hand the heavy stage to a worker process; the sender emits
             # results in this same submission order. The queue had room at the
@@ -610,6 +640,8 @@ def run(host, port, sensor_id, frames,
                                  raw[0], raw[1], raw[2]))
             # (fps/pts stats + profile print now live in the sender thread.)
     finally:
+        if pose_worker is not None:
+            pose_worker.stop()
         outq.put(None)                        # sender exits after the backlog
         sender_t.join(timeout=10.0)
         if sender_t.is_alive():               # wedged mid-sendall (peer stopped
@@ -682,6 +714,16 @@ def main():
                     help="use pyk4a's factory ACCEL->DEPTH extrinsic instead of "
                          "the built-in axis convention (falls back to it if the "
                          "build doesn't expose the extrinsic)")
+    ap.add_argument("--pose-model", default=None,
+                    help="single-person MoveNet .onnx: run 2D pose on the color "
+                         "image and stream CPOS keypoints (skeletons in the "
+                         "viewer + skeleton-tier Rough Align; needs "
+                         "'pip install onnxruntime'; see docs/skeleton_pose.md)")
+    ap.add_argument("--pose-threads", type=int, default=2,
+                    help="onnxruntime intra-op CPU threads (bound so inference "
+                         "coexists with the RVL/color workers)")
+    ap.add_argument("--pose-min-conf", type=float, default=0.2,
+                    help="drop keypoints below this model confidence")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,
@@ -689,7 +731,9 @@ def main():
         depth_mode=args.depth_mode, color_resolution=args.color_resolution,
         fps=args.camera_fps, align=args.align, imu_axes=args.imu_axes,
         imu_extrinsic=args.imu_extrinsic, rig_id=args.rig_id,
-        discovery_port=args.discovery_port, workers=args.workers)
+        discovery_port=args.discovery_port, workers=args.workers,
+        pose_model=args.pose_model, pose_threads=args.pose_threads,
+        pose_min_conf=args.pose_min_conf)
 
 
 if __name__ == "__main__":

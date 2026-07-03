@@ -11,12 +11,17 @@ Run: python3 -m tests.test_pose
 """
 
 import math
+import os
 import socket
+import tempfile
 import threading
+import time
 
 import numpy as np
 
 from central.calibration import JointTracker, solve_skeleton
+from node.pose import (COCO_JOINTS, PoseWorker, decode_movenet, letterbox,
+                       sample_depth)
 from node.sim_node import (parse_pose, project_keypoints,
                            skeleton_world_joints, world_to_view)
 from protocol.frame import encode_pose, read_message
@@ -118,9 +123,148 @@ def test_sim_projection_roundtrip():
     print("sim projection round-trip: OK (%d joints)" % len(kps))
 
 
+def test_letterbox_decode():
+    """letterbox + decode_movenet must be exact inverses (up to NN resize)."""
+    rgb = RNG.randint(0, 255, size=(576, 640, 3)).astype(np.uint8)
+    square, scale, px, py = letterbox(rgb, 192)
+    assert square.shape == (192, 192, 3)
+    assert px == 0 and py > 0                      # wide image pads vertically
+    # A keypoint the model would report at the letterboxed position of image
+    # pixel (500, 300) must decode back to (500, 300).
+    u_img, v_img = 500.0, 300.0
+    x_norm = (u_img * scale + px) / 192.0
+    y_norm = (v_img * scale + py) / 192.0
+    raw = np.zeros((1, 1, COCO_JOINTS, 3), dtype=np.float32)
+    raw[0, 0, 4] = (y_norm, x_norm, 0.8)
+    kps = decode_movenet(raw, scale, px, py, 192)
+    jid, u, v, conf = kps[4]
+    assert jid == 4 and abs(conf - 0.8) < 1e-6
+    assert abs(u - u_img) < 1e-3 and abs(v - v_img) < 1e-3
+    print("letterbox/decode round-trip: OK")
+
+
+def test_sample_depth():
+    d = np.zeros((100, 100), dtype=np.uint16)
+    d[50, 50] = 0                                  # hole at the keypoint...
+    d[49, 50] = 1500
+    d[51, 50] = 1520
+    d[50, 49] = 1480
+    assert abs(sample_depth(d, 50, 50) - 1.5) < 0.02   # ...median of neighbours
+    assert sample_depth(d, 5, 5) == 0.0            # empty window
+    assert sample_depth(d, -3, 50) == 0.0          # off-image
+    print("sample_depth: OK")
+
+
+def _build_dummy_movenet(path, size=192, dtype="int32"):
+    """A minimal ONNX with MoveNet's exact interface — NHWC [1,S,S,3] input,
+    [1,1,17,3] float output — whose keypoints are a constant (plus 0×input so
+    the input participates in the graph). Exercises MoveNetEstimator's real
+    onnxruntime path without shipping model weights."""
+    import onnx
+    from onnx import TensorProto, helper
+    kp = np.zeros((1, 1, COCO_JOINTS, 3), dtype=np.float32)
+    kp[0, 0, :, 0] = np.linspace(0.2, 0.8, COCO_JOINTS)   # y
+    kp[0, 0, :, 1] = np.linspace(0.3, 0.7, COCO_JOINTS)   # x
+    kp[0, 0, :, 2] = 0.9                                  # conf
+    ttype = {"int32": TensorProto.INT32, "float32": TensorProto.FLOAT}[dtype]
+    inp = helper.make_tensor_value_info("input", ttype, [1, size, size, 3])
+    out = helper.make_tensor_value_info("output", TensorProto.FLOAT,
+                                        [1, 1, COCO_JOINTS, 3])
+    nodes = [
+        helper.make_node("Cast", ["input"], ["in_f"], to=TensorProto.FLOAT),
+        helper.make_node("ReduceMean", ["in_f"], ["mean"], keepdims=0),
+        helper.make_node("Mul", ["mean", "zero"], ["zeroed"]),
+        helper.make_node("Add", ["kp", "zeroed"], ["output"]),
+    ]
+    init = [
+        helper.make_tensor("zero", TensorProto.FLOAT, [], [0.0]),
+        helper.make_tensor("kp", TensorProto.FLOAT, list(kp.shape),
+                           kp.ravel().tolist()),
+    ]
+    graph = helper.make_graph(nodes, "dummy_movenet", [inp], [out], init)
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    onnx.save(model, path)
+    return kp[0, 0]
+
+
+def test_movenet_estimator():
+    """The real estimator path (onnxruntime session, dtype/layout detection,
+    letterbox, decode) against a dummy model with MoveNet's interface."""
+    try:
+        import onnx  # noqa: F401
+        import onnxruntime  # noqa: F401
+    except ImportError:
+        print("MoveNetEstimator: skipped (onnx/onnxruntime not installed)")
+        return
+    from node.pose import MoveNetEstimator
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "dummy.onnx")
+        truth = _build_dummy_movenet(path, size=192, dtype="int32")
+        est = MoveNetEstimator(path, threads=1)
+        assert est.size == 192 and not est.nchw and est.dtype == np.int32
+        rgb = RNG.randint(0, 255, size=(576, 640, 3)).astype(np.uint8)
+        kps = est.infer(rgb)
+        assert len(kps) == COCO_JOINTS
+        # Decode the constant truth by hand and compare.
+        _, scale, px, py = letterbox(rgb, 192)
+        for jid, u, v, conf in kps:
+            y, x, c = truth[jid]
+            assert abs(conf - c) < 1e-5
+            assert abs(u - (x * 192 - px) / scale) < 1e-3
+            assert abs(v - (y * 192 - py) / scale) < 1e-3
+    print("MoveNetEstimator (dummy ONNX): OK")
+
+
+class _FakeEstimator(object):
+    def __init__(self):
+        self.calls = 0
+
+    def infer(self, rgb):
+        self.calls += 1
+        return [(0, 100.0, 80.0, 0.9), (9, 300.0, 200.0, 0.7),
+                (16, 50.0, 40.0, 0.05)]        # last one below min_conf
+
+
+def test_pose_worker():
+    """Latest-frame semantics + depth attach + emit payloads."""
+    emitted = []
+    est = _FakeEstimator()
+    depth = np.full((576, 640), 1500, dtype=np.uint16)
+    color = RNG.randint(0, 255, size=(576, 640, 4)).astype(np.uint8)  # BGRA
+    w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
+                   label="test pose")
+    for _ in range(5):
+        w.submit(color, depth)
+    deadline = time.time() + 3.0
+    while not emitted and time.time() < deadline:
+        time.sleep(0.01)
+    w.stop()
+    assert emitted, "worker emitted nothing"
+    assert est.calls <= 5                       # never more than submitted
+    kps = emitted[0]
+    assert [k[0] for k in kps] == [0, 9]        # low-conf joint dropped
+    jid, u, v, z, conf = kps[0]
+    assert abs(z - 1.5) < 1e-6                  # depth attached (mm -> m)
+    # Payload encodes/decodes through the real wire format.
+    data = encode_pose(1, 42, kps)
+    a, b = socket.socketpair()
+    threading.Thread(target=lambda: (a.sendall(data), a.close()),
+                     daemon=True).start()
+    kind, msg = read_message(b)
+    b.close()
+    assert kind == "pose" and len(msg["keypoints"]) == 2
+    print("PoseWorker: OK (%d inferences for 5 submits)" % est.calls)
+
+
 if __name__ == "__main__":
     test_cpos_roundtrip()
     test_joint_tracker()
     test_solve_skeleton()
     test_sim_projection_roundtrip()
+    test_letterbox_decode()
+    test_sample_depth()
+    test_movenet_estimator()
+    test_pose_worker()
     print("\nALL POSE TESTS PASSED")

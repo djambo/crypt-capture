@@ -329,8 +329,17 @@ Two repos:
   Headless: `sim_node --skeleton` (synthetic wall-clock person projected
   through `--pose`), `tests/test_pose.py`; two posed sims → Rough Align
   auto-upgraded and recovered ground truth to 0.24°/6 mm; viewer markers +
-  toggle verified in Chromium. ⏳ remaining (hardware): the node inference
-  worker (`node/pose.py`, RTMPose→TensorRT, `--pose-model`, bench on Orin);
+  toggle verified in Chromium. **Node inference worker BUILT**
+  (`node/pose.py` + `kinect_node --pose-model models/movenet.onnx`): v1
+  model = MoveNet single-pose ONNX via plain-pip onnxruntime (zero-friction
+  on JetPack; RTMPose/TensorRT is the upgrade path) — `MoveNetEstimator`
+  (variant-tolerant NHWC/NCHW + int32/uint8/float, pure-NumPy letterbox) +
+  `PoseWorker` (own thread, latest-frame-only, capped intra-op threads,
+  emits via the ordered sender queue → cloud stream can never wait on
+  inference). Estimator verified against a dummy ONNX with MoveNet's exact
+  interface; the real-weights run needs the Orin (exact enable steps:
+  `docs/skeleton_pose.md`). `models/` is gitignored (survives the service's
+  auto-update hard reset). ⏳ remaining: Orin bench with real weights;
   hands→particle attractors in the viewer.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
@@ -423,6 +432,7 @@ protocol/   rvl.py (depth codec), frame.py (wire protocol), websocket.py (ws rel
             control.py (central->node commands, CTL1),
             discovery.py (UDP LAN auto-discovery of central by rig id)
 node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
+            pose.py (MoveNet ONNX 2D pose -> CPOS keypoints, decoupled worker),
             camera_modes.py (depth FOV / color res / fps / align tables, pyk4a-free),
             dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control

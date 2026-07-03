@@ -94,12 +94,64 @@ pose. `tests/test_pose.py` covers the CPOS round-trip, JointTracker gates,
 `solve_skeleton` (recovers 55° / 1.3 m to <1°/2 cm under 1.5 cm joint noise)
 and the sim projection round-trip.
 
-## Remaining (needs hardware)
+## Node inference worker (implemented — `node/pose.py`)
 
-1. **Node inference worker** (`node/pose.py`): RTMPose → ONNX → TensorRT
-   engine per JetPack; color frame in, keypoints + per-keypoint depth lookup
-   (3×3 median) out; `--pose-model <engine>` flag, off by default; bench on
-   the Orin (target ≥10 fps at zero cloud-fps cost, measured via `--profile`).
+v1 model decision revised for zero-friction deployment: **MoveNet single-pose
+(Apache-2.0) via onnxruntime** — single-person (matches the capture volume),
+one ONNX file, trivial decode, no cv2/mmcv, and plain-pip installable on
+JetPack. RTMPose/TensorRT remains the accuracy/speed upgrade path if MoveNet
+proves limiting (the estimator interface is one class to swap).
+
+- `MoveNetEstimator`: tolerant of the common ONNX export variants (NHWC/NCHW,
+  int32/uint8/float input, any output list containing one 17×3 tensor);
+  letterbox + inverse decode in pure NumPy.
+- `PoseWorker`: own thread, latest-frame-only, capped `intra_op` CPU threads;
+  keypoints + 5×5-median depth lookup → `encode_pose` → the node's ordered
+  sender queue (socket writes stay serialised). Prints `pose N fps` every 150
+  inferences.
+- `kinect_node --pose-model <file.onnx> [--pose-threads 2]
+  [--pose-min-conf 0.2]` — off by default; onnxruntime is only imported when
+  enabled, so nodes without it are unaffected.
+
+### Enabling it on a Jetson (Orin, JetPack 6)
+
+```bash
+# on the Orin:
+cd ~/crypt-capture && git pull
+pip3 install onnxruntime                    # CPU aarch64 wheel; GPU optional later
+mkdir -p models
+# MoveNet single-pose ONNX (Apache-2.0), pick ONE:
+#   Thunder (256px, more accurate, ~2-3x slower) — recommended first:
+curl -L -o models/movenet.onnx \
+  https://huggingface.co/Xenova/movenet-singlepose-thunder/resolve/main/onnx/model.onnx
+#   Lightning (192px, fastest):
+# curl -L -o models/movenet.onnx \
+#   https://huggingface.co/Xenova/movenet-singlepose-lightning/resolve/main/onnx/model.onnx
+
+# test run in the foreground (stop the service first):
+sudo systemctl stop kinect-node
+python3 -m node.kinect_node --host auto --sensor 0 --frames 0 \
+    --preview-stride 2 --pose-model models/movenet.onnx --profile
+# expect: "sensor 0: pose model models/movenet.onnx (input ...)" at startup,
+# "sensor 0 pose: N fps ..." lines while running, and your skeleton in the
+# browser the moment you step in. Watch the frame fps line: it must hold the
+# same rate as without --pose-model (that's the decoupling contract).
+
+# make it permanent: add the flag to EXTRA_ARGS in /etc/default/kinect-node
+#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx
+sudo systemctl start kinect-node
+```
+
+`models/` is gitignored, so the service's auto-update (fetch + hard reset)
+never touches the downloaded file. If joints appear but confidences are ~0 or
+the skeleton looks wrong, try the other MoveNet variant and report — the
+estimator logs the detected input signature at startup.
+
+## Remaining
+
+1. Bench on the Orin (pose fps + confirm cloud fps unchanged via `--profile`);
+   optional `onnxruntime-gpu` (NVIDIA's Jetson wheel) or the RTMPose/TensorRT
+   upgrade if CPU inference is too slow or contends with the RVL workers.
 2. Decide the Nano: skip pose there, or central-side fallback (above).
 3. Creative hooks: hands (joints 9/10) → particle attractors in the viewer;
    gesture triggers later.
