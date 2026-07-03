@@ -229,11 +229,16 @@ NODE_POSE_QUIET_S = 2.0
 
 
 class PreviewServer:
-    def __init__(self, calib=None, stride=2, max_points=200000,
+    def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True):
         self.calib = calib
         self.stride = stride
+        # 0 = uncapped (the default): full resolution for points AND mesh —
+        # meshing is for the SUBJECT (a background-subtracted subject is tens
+        # of k points), and a full-environment frame still holds interactive
+        # fps on a LAN. Set a cap only if the wire/GPU budget demands it; it
+        # is enforced grid-aware (stride coarsening) so the mesh stays closed.
         self.max_points = max_points
         # Attach the depth-grid index block (FLAG_GRID) to every CPV1 frame so
         # the viewer can re-mesh the points. +4 bytes/point (~27% over the
@@ -1024,7 +1029,11 @@ def main():
     ap.add_argument("--stride", type=int, default=1,
                     help="ADDITIONAL relay-side downsample on top of the node's "
                          "--preview-stride (1 = none; total = node*relay)")
-    ap.add_argument("--max-points", type=int, default=200000)
+    ap.add_argument("--max-points", type=int, default=0,
+                    help="cap points per frame by coarsening the grid stride "
+                         "(keeps the mesh connected). 0 = uncapped, the "
+                         "default — the crypt viewer preallocates ~1M points "
+                         "(a full 1280x720 depth_to_color frame)")
     ap.add_argument("--no-grid", action="store_true",
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "

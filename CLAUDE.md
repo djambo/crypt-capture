@@ -443,8 +443,12 @@ Two repos:
   mesh, and an EMPTY mesh in depth_to_color (921k candidates ≫ cap → no
   surviving adjacency); `unproject(max_points=…)` now coarsens the sampling
   stride (denser axis first) until the count fits, so a capped frame is a
-  coarser but fully-connected grid. On by default (+4 B/pt ≈ +27% frame
-  size); `preview_server --no-grid` drops it. Spec in
+  coarser but fully-connected grid. **`--max-points` defaults to 0 =
+  UNCAPPED** (user call: full resolution for points and mesh; meshing targets
+  the background-subtracted subject, and even a full-environment frame holds
+  interactive fps on a LAN — the viewer preallocates 1M points/sensor, a full
+  1280×720 depth_to_color frame). Grid block on by default (+4 B/pt ≈ +27%
+  frame size); `preview_server --no-grid` drops it. Spec in
   `docs/preview_protocol.md`; verified headless (`scripts/preview_client`
   asserts ascending in-range indices; sim → relay → viewer mesh rendered in
   Chromium, incl. the old-relay fallback to points and a forced

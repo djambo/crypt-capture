@@ -85,6 +85,16 @@ the mesh stays closed, just coarser. Viewer safety net (done): a grid frame
 that triangulates to zero faces (pre-fix relay) falls back to points with an
 "update the relay" status instead of rendering nothing.
 
+**Follow-up (same day, user call): `--max-points` now defaults to 0 =
+UNCAPPED** — full resolution for points and mesh alike (meshing targets the
+background-subtracted subject; a full-environment mesh still ran 24 fps
+color_to_depth / 13 fps depth_to_color on the real rig). The viewer's
+per-sensor buffers were raised to 1M points to hold a full 1280×720
+depth_to_color frame (921,600). Viewer-only same-session additions, no
+protocol impact: the mesh render now has the same mouse spotlight as the
+point impostors ('s' toggles it), and the debug wireframe toggle swaps to an
+unlit vertex-colour material (lit flat-shading rendered the wires black).
+
 ---
 
 ## 2026-07-03 — Fine Align: stop-and-go (stationary) sampling + robust solve
