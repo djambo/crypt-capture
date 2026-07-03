@@ -523,14 +523,20 @@ class PreviewServer:
             rig = {}
             joint_tracker = session.get("joints")
             if joint_tracker is not None and joint_tracker.tracks:
-                rig = calibration.solve_skeleton(
+                rig_sk = calibration.solve_skeleton(
                     joint_tracker.tracks,
                     min_pairs=session["min_joint_pairs"])
-                if len(rig) > 1 or (rig and len(joint_tracker.tracks) == 1):
+                # Upgrade ONLY if the joint solve covered EVERY sensor the
+                # session saw — a mixed rig (one node with a pose model, one
+                # without) must fall back to the centroid solve, which can
+                # register them all, rather than ship a partial skeleton
+                # calib that leaves the pose-less camera unsolved.
+                seen = set(session["tracker"].tracks) | \
+                    set(joint_tracker.tracks)
+                if rig_sk and set(rig_sk) >= seen:
+                    rig = rig_sk
                     tier = "skeleton"
                     tracked_sensors = set(joint_tracker.tracks)
-                else:
-                    rig = {}                   # not enough joint pairs
             if not rig:
                 gravities = {sid: g for sid, g in
                              self._sensor_gravity.items() if g is not None}
