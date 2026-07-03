@@ -103,6 +103,34 @@ Accuracy honesty: the centroid each camera sees is biased toward that camera
 by ~half your body depth, which is exactly why this tier stops at centimetres
 and why the solver only takes yaw/XY from it (roll/pitch come from the IMU).
 
+## Per-sensor floor leveling (`calibrate_floor`, "floor" tier)
+
+One rigid correction can only flatten ONE plane — with several uncalibrated
+(or IMU-rough-aligned) cameras each cloud carries its **own** floor tilt, so
+"make every cloud sit flush on the floor" is inherently a per-sensor fix. The
+relay's `calibrate_floor` session (~3 s) fits each camera's floor plane in its
+own raw cloud (`fit_floor`: lowest dense band along the IMU up hint + LS
+refine) and composes a per-sensor correction — floor normal onto +Y about the
+floor centroid, all floors to one common height (`solve_floor_level`) — onto
+the current rig transforms. Yaw/XY stay whatever the rough/fine solve said
+(identity if uncalibrated).
+
+Operator's view: floor in view on every camera (background subtraction OFF —
+the plate removes the floor), scene can be empty, press **Detect Floor** in
+the viewer (on a multi-camera rig it sends `calibrate_floor` automatically,
+then chains its local snap-to-grid once the leveled frames arrive) or run
+`send_command calibrate-floor`. Sub-mm plane-fit rms on the sim; on real ToF
+expect a few mm.
+
+Scope honesty: this levels **roll/pitch/height** per camera; it cannot
+recover yaw/XY (a floor is rotation/translation-invariant in its own plane) —
+that's what the centroid track (rough) and the wand (fine) are for. And do
+NOT run it on top of a fine wand calibration: the wand already registers the
+clouds to ~mm (floors coplanar by construction), and independent per-sensor
+re-leveling would inject its own fit error into that registration — the
+viewer's Detect Floor therefore goes straight to the local grid snap on
+fine-calibrated rigs.
+
 ## The fine (Tier-2) wand procedure — operator's view
 
 1. All nodes streaming, empty scene. **Capture background** on every sensor.

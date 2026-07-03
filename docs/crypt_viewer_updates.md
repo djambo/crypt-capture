@@ -30,6 +30,33 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-03 — Per-sensor floor leveling (`calibrate_floor`) + relay write-lock fix
+**Status: applied 2026-07-03** (viewer wired the same day).
+
+**Summary.** Fix for "Detect Floor flattens camera 0's cloud but leaves the
+other camera tilted": one rigid correction can only flatten ONE plane, so
+multi-camera floor leveling is now **per-sensor at the relay**. New
+relay-handled command `{"cmd":"calibrate_floor","seconds":3}` (`tier:
+"floor"`): fits each camera's floor plane in its own raw cloud (floor must be
+in view — background subtraction off) and composes a per-sensor correction
+onto the rig transforms, making every floor flat (+Y) and coplanar on the
+wire. Progress/results arrive as the usual `calib_status` messages with
+`"tier":"floor"`; new poses as `rig_poses`. Meant for uncalibrated/rough rigs
+— a fine wand calib is already mm-coplanar, don't re-level it.
+
+**Viewer action (done):** the **Detect Floor** button now routes by rig
+state: multi-camera + (uncalibrated or rough tier) → send `calibrate_floor`
+and, on its `done`, auto-chain the local snap-to-grid; single camera or
+fine/floor tier → straight to the local snap (which now fits ALL visible
+clouds merged). Floor-tier `calib_status` reports on the floor status line.
+
+**Relay bug fix (no viewer action):** WebSocket frames from concurrent
+writers (per-sensor node threads + status broadcasts) could interleave
+mid-frame on large sends — browsers dropped the socket with "Invalid frame
+header". Client writes are now serialised per connection with a write lock.
+
+---
+
 ## 2026-07-02 — Alignment Reset (`clear_rig_calib`) + rough-align operator guidance
 **Status: applied 2026-07-02** (same-day follow-up to the entry below).
 

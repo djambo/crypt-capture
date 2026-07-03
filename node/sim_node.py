@@ -82,15 +82,24 @@ def synth_frame(width, height, frame_id, sensor_id, stride=1):
 # ball is (like a real shared ball).
 
 def parse_pose(spec):
-    """'yaw_deg,x,y,z' -> (R (3x3 rows), t) — this sensor's view->world pose
-    (yaw about world +Y, position in metres). Identity: '0,0,0,0'."""
+    """'yaw_deg,x,y,z[,pitch_deg]' -> (R (3x3 rows), t) — this sensor's
+    view->world pose (R = R_y(yaw)·R_x(pitch), position in metres). The
+    optional pitch tips the camera (e.g. mounted high looking down), giving
+    each sensor's floor its own tilt in view space — what the per-sensor
+    floor leveling exists to correct. Identity: '0,0,0,0'."""
     parts = [float(p) for p in spec.split(",")]
-    if len(parts) != 4:
-        raise ValueError("--pose wants 'yaw_deg,x,y,z', got %r" % (spec,))
-    yaw, x, y, z = parts
-    a = math.radians(yaw)
-    c, s = math.cos(a), math.sin(a)
-    return ((c, 0.0, s), (0.0, 1.0, 0.0), (-s, 0.0, c)), (x, y, z)
+    if len(parts) not in (4, 5):
+        raise ValueError("--pose wants 'yaw_deg,x,y,z[,pitch_deg]', got %r"
+                         % (spec,))
+    yaw, x, y, z = parts[:4]
+    pitch = parts[4] if len(parts) == 5 else 0.0
+    a, b = math.radians(yaw), math.radians(pitch)
+    cy_, sy_ = math.cos(a), math.sin(a)
+    cx_, sx_ = math.cos(b), math.sin(b)
+    # R_y(yaw) · R_x(pitch), rows.
+    return ((cy_, sy_ * sx_, sy_ * cx_),
+            (0.0, cx_, -sx_),
+            (-sy_, cy_ * sx_, cy_ * cx_)), (x, y, z)
 
 
 def world_to_view(R, t, p):
@@ -109,50 +118,76 @@ def ball_world_pos(now):
             -1.3 + 0.40 * math.sin(2 * math.pi * now / 9.1))
 
 
-def synth_ball_frame(width, height, frame_id, ball_view, radius, stride=1):
+def synth_ball_frame(width, height, frame_id, ball_view, radius, stride=1,
+                     pose=None, floor=None):
     """Ray-render a sphere (center `ball_view` in the VIEW frame: x right,
     y up, z toward viewer) into a strided depth grid + aligned color payload,
     using the same synthetic pinhole intrinsics send_calib() announces.
+
+    With `pose` (view->world R,t) and `floor` (a world-frame floor height in
+    metres), also renders the floor plane world_y = floor as seen from this
+    pose — so a posed multi-sensor sim rig exercises per-sensor floor leveling
+    (each camera sees the SAME world floor at its own tilt). The color payload
+    is emitted in row-major valid-pixel order, matching the depth mask.
     Returns (depth_array, color_bytes, grid_w, grid_h)."""
     xs = list(range(0, width, stride))
     ys = list(range(0, height, stride))
     gw, gh = len(xs), len(ys)
     depth = array("H", bytes(2 * gw * gh))
     color = bytearray()
-    # view -> optical (x right, y down, z forward): the relay flips y,z back.
-    cox, coy, coz = ball_view[0], -ball_view[1], -ball_view[2]
-    if coz <= radius + 0.05:                    # behind / on top of the camera
-        return depth, bytes(color), gw, gh
     fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
     cx, cy = width / 2.0, height / 2.0
-    # Project the ball to bound the pixel scan (pure Python: keep it tight).
-    pr = fx * radius / (coz - radius) + 2 * stride
-    u0, u1 = cx + fx * cox / coz - pr, cx + fx * cox / coz + pr
-    v0, v1 = cy + fx * coy / coz - pr, cy + fx * coy / coz + pr
-    c2r2 = cox * cox + coy * coy + coz * coz - radius * radius
+    # view -> optical (x right, y down, z forward): the relay flips y,z back.
+    cox, coy, coz = ball_view[0], -ball_view[1], -ball_view[2]
+    ball_visible = coz > radius + 0.05          # else behind/on the camera
+    # Ball projection bounds (pure Python: keep the sphere scan tight).
+    if ball_visible:
+        pr = fx * radius / (coz - radius) + 2 * stride
+        u0, u1 = cx + fx * cox / coz - pr, cx + fx * cox / coz + pr
+        v0, v1 = cy + fx * coy / coz - pr, cy + fx * coy / coz + pr
+        c2r2 = cox * cox + coy * coy + coz * coz - radius * radius
+    do_floor = pose is not None and floor is not None
+    if do_floor:
+        R, t = pose
+        # The ray's world-y rate is linear in (rx, ry): (R·d_view)_y uses
+        # R's row 1 (d_view = (rx, -ry, -1) for optical ray (rx, ry, 1)).
+        r10, r11, r12 = R[1][0], R[1][1], R[1][2]
+        ty = t[1]
     jit = random.Random(frame_id * 131)
     for gy, y in enumerate(ys):
-        if y < v0 or y > v1:
-            continue
         ry = (y - cy) / fx
         for gx, x in enumerate(xs):
-            if x < u0 or x > u1:
-                continue
             rx = (x - cx) / fx
-            dc = rx * cox + ry * coy + coz     # d·c for ray d=(rx,ry,1)
-            dd = rx * rx + ry * ry + 1.0       # |d|^2
-            disc = dc * dc - dd * c2r2
-            if disc <= 0.0:
+            z_ball = None
+            if ball_visible and v0 <= y <= v1 and u0 <= x <= u1:
+                dc = rx * cox + ry * coy + coz     # d·c for ray d=(rx,ry,1)
+                dd = rx * rx + ry * ry + 1.0       # |d|^2
+                disc = dc * dc - dd * c2r2
+                if disc > 0.0:
+                    z_ball = (dc - math.sqrt(disc)) / dd  # nearest hit (m)
+            z_floor = None
+            if do_floor:
+                # view dir for optical ray (rx,ry,1) is (rx,-ry,-1); its
+                # world-y rate: (R·(rx,-ry,-1))_y = r10·rx - r11·ry - r12.
+                dy = r10 * rx - r11 * ry - r12
+                if dy < -1e-6:                     # ray heads downward
+                    zf = (floor - ty) / dy
+                    if 0.25 < zf < 6.0:
+                        z_floor = zf
+            z = z_ball if z_floor is None else (
+                z_floor if z_ball is None else min(z_ball, z_floor))
+            if z is None:
                 continue
-            z = (dc - math.sqrt(disc)) / dd    # nearest intersection depth (m)
             depth[gy * gw + gx] = max(1, int(z * 1000) + jit.randint(0, 2))
-            color += bytes((240, 240, 200))    # matte pale ball
+            color += bytes((240, 240, 200) if z == z_ball
+                           else (90, 90, 100))     # pale ball / grey floor
     return depth, bytes(color), gw, gh
 
 
 def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         preview_stride=1, rig_id=discovery.DEFAULT_RIG_ID,
-        discovery_port=discovery.DISCOVERY_PORT, ball=0.0, pose=None):
+        discovery_port=discovery.DISCOVERY_PORT, ball=0.0, pose=None,
+        floor=None):
     if host == "auto":                          # find central by rig id (see discovery.py)
         found = discovery.discover_central(rig_id, port=discovery_port)
         if found is None:
@@ -238,7 +273,8 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             if ball > 0:
                 bv = world_to_view(pose_R, pose_t, ball_world_pos(time.time()))
                 depth, color, gw, gh = synth_ball_frame(
-                    width, height, sent, bv, ball, s)
+                    width, height, sent, bv, ball, s,
+                    pose=(pose_R, pose_t), floor=floor)
             else:
                 depth, color, gw, gh = synth_frame(
                     width, height, sent, sensor_id, s)
@@ -294,11 +330,15 @@ def main():
     ap.add_argument("--pose", default=None,
                     help="this sensor's view->world pose 'yaw_deg,x,y,z' "
                          "(ball mode; default identity)")
+    ap.add_argument("--floor", type=float, default=None,
+                    help="ball mode: also render the world floor plane at "
+                         "this world-frame height (m), e.g. -1.2 — exercises "
+                         "per-sensor floor leveling headlessly")
     args = ap.parse_args()
     n = run(args.host, args.port, args.sensor, args.frames, args.fps,
             preview_stride=args.preview_stride, rig_id=args.rig_id,
             discovery_port=args.discovery_port, ball=args.ball,
-            pose=args.pose)
+            pose=args.pose, floor=args.floor)
     print("sensor %d: streamed %d frames" % (args.sensor, n))
 
 

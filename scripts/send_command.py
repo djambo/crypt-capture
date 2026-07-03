@@ -78,6 +78,13 @@ def main():
     cr.add_argument("--seconds", type=float, default=10.0)
     cr.add_argument("--min-points", type=int, default=None)
 
+    fl = sub.add_parser("calibrate-floor", help="level each camera to its own "
+                        "detected floor plane (relay-side; floor must be in "
+                        "view — clear background subtraction first). Meant "
+                        "for uncalibrated/rough rigs; a fine (wand) calib is "
+                        "already mm-coplanar")
+    fl.add_argument("--seconds", type=float, default=3.0)
+
     sub.add_parser("reload-rig-calib", help="make the relay re-read "
                    "rig_calib.json now")
 
@@ -119,6 +126,9 @@ def main():
         if args.min_points is not None:
             command["min_points"] = args.min_points
         send(args.host, args.port, command)
+    elif args.cmd == "calibrate-floor":
+        send(args.host, args.port,
+             {"cmd": "calibrate_floor", "seconds": args.seconds})
     elif args.cmd == "reload-rig-calib":
         send(args.host, args.port, {"cmd": "reload_rig_calib"})
     elif args.cmd == "clear-rig-calib":
