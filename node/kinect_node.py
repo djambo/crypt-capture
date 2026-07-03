@@ -322,7 +322,8 @@ def run(host, port, sensor_id, frames,
         imu_axes=None, imu_extrinsic=False, rig_id=discovery.DEFAULT_RIG_ID,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
-        pose_gate=0.35, pose_smooth=True, pose_joints="minimal"):
+        pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
+        pose_trt=False):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -536,7 +537,8 @@ def run(host, port, sensor_id, frames,
             jset = joint_sets[pose_joints]
         else:                                 # explicit "0,5,6,9,10" list
             jset = tuple(int(j) for j in pose_joints.split(","))
-        est = MoveNetEstimator(pose_model, threads=pose_threads)
+        est = MoveNetEstimator(pose_model, threads=pose_threads,
+                               trt=pose_trt)
         pose_worker = PoseWorker(est, _emit_pose, min_conf=pose_min_conf,
                                  gate_conf=pose_gate, smooth=pose_smooth,
                                  joints=jset,
@@ -755,6 +757,11 @@ def main():
     ap.add_argument("--pose-joints", default="minimal",
                     help="'minimal' (head+shoulders+wrists+hips, default), "
                          "'full' (all 17), or a comma list of COCO ids")
+    ap.add_argument("--pose-trt", action="store_true",
+                    help="run inference through the TensorRT provider with a "
+                         "persistent engine cache (first start compiles for "
+                         "~1-3 min; later starts are instant). Use when the "
+                         "CUDA provider underperforms")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,
@@ -765,7 +772,8 @@ def main():
         discovery_port=args.discovery_port, workers=args.workers,
         pose_model=args.pose_model, pose_threads=args.pose_threads,
         pose_min_conf=args.pose_min_conf, pose_gate=args.pose_gate,
-        pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints)
+        pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
+        pose_trt=args.pose_trt)
 
 
 if __name__ == "__main__":
