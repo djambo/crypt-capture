@@ -541,9 +541,15 @@ def run(host, port, sensor_id, frames,
                                  gate_conf=pose_gate, smooth=pose_smooth,
                                  joints=jset,
                                  label="sensor %d pose" % sensor_id)
-        print("sensor %d: pose model %s (input %dx%d %s, %s)" % (
+        print("sensor %d: pose model %s (input %dx%d %s, %s) on %s" % (
             sensor_id, pose_model, est.size, est.size,
-            "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name))
+            "NCHW" if est.nchw else "NHWC", np.dtype(est.dtype).name,
+            "/".join(p.replace("ExecutionProvider", "")
+                     for p in est.providers)))
+        if est.providers == ["CPUExecutionProvider"]:
+            print("sensor %d: pose is CPU-ONLY (~10 fps ceiling) — install "
+                  "the Jetson onnxruntime-gpu wheel for 60+ fps (see "
+                  "docs/skeleton_pose.md)" % sensor_id)
 
     try:
         while frames <= 0 or sent < frames:

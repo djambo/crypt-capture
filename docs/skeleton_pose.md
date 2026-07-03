@@ -150,6 +150,31 @@ never touches the downloaded file. If joints appear but confidences are ~0 or
 the skeleton looks wrong, try the other MoveNet variant and report — the
 estimator logs the detected input signature at startup.
 
+### GPU inference (the real fps fix)
+
+The plain-pip `onnxruntime` wheel is **CPU-only** — ~10-12 fps for pose on an
+Orin, sharing cores with the RVL workers. The Orin's GPU is idle by design;
+moving inference there is the intended configuration and needs no code
+change (the estimator auto-picks the best available execution provider and
+the node now logs it at startup: `... on CUDA/CPU` vs `... on CPU`).
+
+```bash
+# on the Orin (JetPack 6 has CUDA preinstalled; cuDNN comes with the full
+# jetpack meta-package: sudo apt install nvidia-jetpack  # if missing)
+pip3 uninstall -y onnxruntime
+pip3 install onnxruntime-gpu "numpy<2" \
+    --extra-index-url https://pypi.jetson-ai-lab.dev/jp6/cu126
+# verify BEFORE running the node:
+python3 -c "import onnxruntime as ort; print(ort.get_available_providers())"
+# want: ['CUDAExecutionProvider', ..., 'CPUExecutionProvider']
+```
+
+(If that index 404s for your JetPack/CUDA combo, NVIDIA's prebuilt Jetson
+wheels are indexed at elinux.org/Jetson_Zoo#ONNX_Runtime — pick the one
+matching `cat /etc/nv_tegra_release` + Python 3.10.) Expected: MoveNet at
+60+ fps on GPU, i.e. skeletons at the camera's own 30 fps with headroom, and
+the CPU handed back to the frame pipeline.
+
 ### Quality knobs (first-hardware findings, 2026-07-03)
 
 - **Shaky joints** → smoothed by default now: a per-joint **One-Euro filter**

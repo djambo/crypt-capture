@@ -168,6 +168,10 @@ class MoveNetEstimator(object):
         self.sess = ort.InferenceSession(
             model_path, sess_options=so,
             providers=providers or ort.get_available_providers())
+        # What is inference actually running on? CPUExecutionProvider-only =
+        # ~10 fps on a Jetson; CUDA/TensorRT = 60+. Logged at node startup so
+        # a CPU-only install is impossible to miss.
+        self.providers = self.sess.get_providers()
         inp = self.sess.get_inputs()[0]
         self.input_name = inp.name
         shape = list(inp.shape)
