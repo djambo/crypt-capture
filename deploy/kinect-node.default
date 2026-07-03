@@ -47,4 +47,12 @@ UPDATE_BRANCH=main
 #   --imu-axes x,z,-y           IMU->depth axis override (see CLAUDE.md)
 #   --rig-id studioB            only needed if >1 rig shares the LAN (must match
 #                               the relay's --rig-id; default is "crypt")
+#
+# Skeleton / pose (docs/skeleton_pose.md) — GPU-capable nodes (Orin) only.
+# One-time setup per node: pip3 install onnxruntime-gpu "numpy<2" (Jetson
+# index) + download models/movenet.onnx (models/ is gitignored, so the
+# self-update never touches it). --pose-trt caches its TensorRT engine in
+# models/trt_cache (first ever start compiles ~1-2 min; later starts are
+# instant). Validated on the Orin: 2.9 ms/infer, skeletons at camera rate.
+#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx --pose-trt
 EXTRA_ARGS=--preview-stride 2

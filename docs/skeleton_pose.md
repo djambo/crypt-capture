@@ -149,8 +149,8 @@ python3 -m node.kinect_node --host auto --sensor 0 --frames 0 \
 # browser the moment you step in. Watch the frame fps line: it must hold the
 # same rate as without --pose-model (that's the decoupling contract).
 
-# make it permanent: add the flag to EXTRA_ARGS in /etc/default/kinect-node
-#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx
+# make it permanent: add the flags to EXTRA_ARGS in /etc/default/kinect-node
+#   EXTRA_ARGS=--preview-stride 2 --pose-model models/movenet.onnx --pose-trt
 sudo systemctl start kinect-node
 ```
 

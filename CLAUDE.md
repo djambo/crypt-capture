@@ -339,11 +339,18 @@ Two repos:
   inference; per-joint One-Euro smoothing (default on) + a torso-confidence
   person gate `--pose-gate` that suppresses whole frames so skeletons stop
   appearing on furniture — first-hardware findings 2026-07-03, tuning ladder
-  for lag in the doc). Estimator verified against a dummy ONNX with MoveNet's exact
-  interface; the real-weights run needs the Orin (exact enable steps:
-  `docs/skeleton_pose.md`). `models/` is gitignored (survives the service's
-  auto-update hard reset). ⏳ remaining: Orin bench with real weights;
-  hands→particle attractors in the viewer.
+  for lag in the doc). Estimator verified against a dummy ONNX with MoveNet's exact interface,
+  then **validated on the Orin** (2026-07-03): bench (`python3 -m node.pose
+  <model> [--trt|--cpu]`) measured CPU 25 ms / CUDA 7.3 ms / TensorRT 2.9 ms
+  (254 fps sustained) — but in-node inference ran 60-70 ms until the worker
+  moved into its OWN PROCESS (`PoseProcess`, forked before the camera; the
+  pose thread was convoying on the capture loop's GIL, the same lesson as
+  the frame worker pool). Production config: `--pose-model models/movenet.onnx
+  --pose-trt` (engine cached in models/trt_cache) → skeletons at camera rate.
+  `models/` is gitignored (survives the service's auto-update hard reset);
+  the deploy env sample shows the pose EXTRA_ARGS line (Orin-class nodes
+  only — not the Nano). ⏳ remaining: hands→particle attractors in the
+  viewer; relay-side skeleton fusion across sensors.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
