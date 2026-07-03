@@ -81,6 +81,10 @@ def main():
     sub.add_parser("reload-rig-calib", help="make the relay re-read "
                    "rig_calib.json now")
 
+    sub.add_parser("clear-rig-calib", help="reset alignment: cancel any "
+                   "running calibration, delete rig_calib.json, back to raw "
+                   "per-camera frames")
+
     args = ap.parse_args()
     if args.cmd == "capture-bg":
         send(args.host, args.port, {"cmd": "capture_bg", "frames": args.frames})
@@ -117,6 +121,8 @@ def main():
         send(args.host, args.port, command)
     elif args.cmd == "reload-rig-calib":
         send(args.host, args.port, {"cmd": "reload_rig_calib"})
+    elif args.cmd == "clear-rig-calib":
+        send(args.host, args.port, {"cmd": "clear_rig_calib"})
 
 
 if __name__ == "__main__":

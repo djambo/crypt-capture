@@ -30,6 +30,26 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-02 — Alignment Reset (`clear_rig_calib`) + rough-align operator guidance
+**Status: applied 2026-07-02** (same-day follow-up to the entry below).
+
+**Summary.** New relay-handled command `{"cmd":"clear_rig_calib"}` — the
+escape hatch when a calibration pass goes wrong: cancels any running
+`calibrate_*` session, deletes `rig_calib.json`, streams raw per-camera frames
+again and broadcasts an **empty** `rig_poses` (viewers must reset gizmos to
+the origin — the existing empty-sensors handling already does this). Also
+`send_command clear-rig-calib`.
+
+**Viewer action (done):** a **Reset** button in the alignment section sending
+the command, plus rewritten per-tier operator help: rough = background
+captured on every camera, ONE person, walk a slow "L" (~2 m legs) through the
+middle with an arm raised for part, fully visible to every camera for the
+whole 10 s (IMU toggle NOT required — gravity from the connect handshake is
+used); fine = everyone out, real ball radius set, wave the ball slowly through
+the whole volume for 30 s. Full procedure: `docs/rig_calibration.md`.
+
+---
+
 ## 2026-07-02 — Rig extrinsic calibration: registered clouds + camera poses + Align buttons
 **Status: applied 2026-07-02** (implemented in the viewer in the same
 cross-repo change; recorded here for the log).
