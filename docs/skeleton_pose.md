@@ -150,6 +150,27 @@ never touches the downloaded file. If joints appear but confidences are ~0 or
 the skeleton looks wrong, try the other MoveNet variant and report — the
 estimator logs the detected input signature at startup.
 
+### Quality knobs (first-hardware findings, 2026-07-03)
+
+- **Shaky joints** → smoothed by default now: a per-joint **One-Euro filter**
+  (u, v and z; ~3× less jitter at rest, <10 px lag at fast motion; filter
+  state resets when a joint vanishes for 0.5 s so re-appearing joints snap
+  instead of sliding). `--pose-no-smooth` for raw output.
+- **Skeletons on furniture** → MoveNet always emits 17 keypoints, garbage
+  included, and per-joint confidence alone lets flukes through. The **person
+  gate** now requires mean TORSO confidence (shoulders+hips, joints
+  5/6/11/12) ≥ `--pose-gate` (default 0.35) before emitting anything; below
+  it the frame is suppressed and the viewer's stale timeout hides the
+  skeleton. The `pose:` stats line prints the gated-frame %. Raise the gate
+  if ghosts persist; lower it if your real skeleton drops out at range.
+- **Skeleton lags the cloud** → inherent: each skeleton is one inference old
+  and updates at pose fps, not cloud fps. Read the `pose: N fps
+  (M ms/infer)` line: at Thunder-on-CPU rates (~5-8 fps, 130-200 ms) the lag
+  is visible. Ladder: **Lightning** (192 px, ~3× faster) → more
+  `--pose-threads` → `onnxruntime-gpu` (NVIDIA's Jetson wheel) → the
+  RTMPose/TensorRT upgrade path. For alignment and hand-attractor use, ~10
+  fps is comfortable.
+
 ## Remaining
 
 1. Bench on the Orin (pose fps + confirm cloud fps unchanged via `--profile`);

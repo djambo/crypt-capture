@@ -336,7 +336,10 @@ Two repos:
   (variant-tolerant NHWC/NCHW + int32/uint8/float, pure-NumPy letterbox) +
   `PoseWorker` (own thread, latest-frame-only, capped intra-op threads,
   emits via the ordered sender queue → cloud stream can never wait on
-  inference). Estimator verified against a dummy ONNX with MoveNet's exact
+  inference; per-joint One-Euro smoothing (default on) + a torso-confidence
+  person gate `--pose-gate` that suppresses whole frames so skeletons stop
+  appearing on furniture — first-hardware findings 2026-07-03, tuning ladder
+  for lag in the doc). Estimator verified against a dummy ONNX with MoveNet's exact
   interface; the real-weights run needs the Orin (exact enable steps:
   `docs/skeleton_pose.md`). `models/` is gitignored (survives the service's
   auto-update hard reset). ⏳ remaining: Orin bench with real weights;

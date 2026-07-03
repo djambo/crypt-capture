@@ -20,8 +20,8 @@ import time
 import numpy as np
 
 from central.calibration import JointTracker, solve_skeleton
-from node.pose import (COCO_JOINTS, PoseWorker, decode_movenet, letterbox,
-                       sample_depth)
+from node.pose import (COCO_JOINTS, JointSmoother, OneEuro, PoseWorker,
+                       decode_movenet, letterbox, sample_depth)
 from node.sim_node import (parse_pose, project_keypoints,
                            skeleton_world_joints, world_to_view)
 from protocol.frame import encode_pose, read_message
@@ -217,13 +217,49 @@ def test_movenet_estimator():
     print("MoveNetEstimator (dummy ONNX): OK")
 
 
+def test_one_euro():
+    """Jitter shrinks a lot at rest; fast motion tracks with little lag."""
+    rng = np.random.RandomState(3)
+    # Static signal + noise: filtered variance must drop >5x.
+    f = OneEuro()
+    xs, ys = [], []
+    for k in range(120):
+        t = k / 30.0
+        x = 100.0 + rng.normal(scale=2.0)
+        xs.append(x)
+        ys.append(f.filter(x, t))
+    raw_std = np.std(np.array(xs[30:]) - 100.0)
+    smt_std = np.std(np.array(ys[30:]) - 100.0)
+    assert smt_std < raw_std / 2.5, (raw_std, smt_std)
+    # A fast ramp (500 px/s) must not lag more than ~a frame's travel.
+    f2 = OneEuro()
+    for k in range(60):
+        t = k / 30.0
+        out = f2.filter(500.0 * t, t)
+    lag_px = 500.0 * (59 / 30.0) - out
+    assert lag_px < 25.0, "ramp lag %.1f px" % lag_px
+    # JointSmoother resets a stale joint (no slide across the frame).
+    js = JointSmoother()
+    js.filter(5, 100.0, 100.0, 1.5, 0.0)
+    u, v, z = js.filter(5, 400.0, 300.0, 2.0, 1.0)   # > RESET_S later
+    assert u == 400.0 and v == 300.0 and z == 2.0
+    print("OneEuro/JointSmoother: OK (std %.2f -> %.2f px, ramp lag %.1f px)"
+          % (raw_std, smt_std, lag_px))
+
+
 class _FakeEstimator(object):
-    def __init__(self):
+    """Person-shaped keypoints with confident torso joints (5/6/11/12)."""
+
+    def __init__(self, torso_conf=0.8):
         self.calls = 0
+        self.torso_conf = torso_conf
 
     def infer(self, rgb):
         self.calls += 1
+        c = self.torso_conf
         return [(0, 100.0, 80.0, 0.9), (9, 300.0, 200.0, 0.7),
+                (5, 120.0, 120.0, c), (6, 160.0, 120.0, c),
+                (11, 125.0, 200.0, c), (12, 155.0, 200.0, c),
                 (16, 50.0, 40.0, 0.05)]        # last one below min_conf
 
 
@@ -244,7 +280,7 @@ def test_pose_worker():
     assert emitted, "worker emitted nothing"
     assert est.calls <= 5                       # never more than submitted
     kps = emitted[0]
-    assert [k[0] for k in kps] == [0, 9]        # low-conf joint dropped
+    assert [k[0] for k in kps] == [0, 9, 5, 6, 11, 12]  # low-conf dropped
     jid, u, v, z, conf = kps[0]
     assert abs(z - 1.5) < 1e-6                  # depth attached (mm -> m)
     # Payload encodes/decodes through the real wire format.
@@ -254,8 +290,26 @@ def test_pose_worker():
                      daemon=True).start()
     kind, msg = read_message(b)
     b.close()
-    assert kind == "pose" and len(msg["keypoints"]) == 2
+    assert kind == "pose" and len(msg["keypoints"]) == 6
     print("PoseWorker: OK (%d inferences for 5 submits)" % est.calls)
+
+
+def test_pose_worker_person_gate():
+    """Weak torso (furniture ghost) -> the frame emits NOTHING."""
+    emitted = []
+    est = _FakeEstimator(torso_conf=0.15)       # below the 0.35 gate
+    depth = np.full((576, 640), 1500, dtype=np.uint16)
+    color = np.zeros((576, 640, 4), dtype=np.uint8)
+    w = PoseWorker(est, lambda kps: emitted.append(kps), min_conf=0.2,
+                   gate_conf=0.35, label="test gate")
+    w.submit(color, depth)
+    deadline = time.time() + 2.0
+    while est.calls == 0 and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+    w.stop()
+    assert est.calls >= 1 and not emitted, (est.calls, emitted)
+    print("PoseWorker person gate: OK (ghost frame suppressed)")
 
 
 if __name__ == "__main__":
@@ -266,5 +320,7 @@ if __name__ == "__main__":
     test_letterbox_decode()
     test_sample_depth()
     test_movenet_estimator()
+    test_one_euro()
     test_pose_worker()
+    test_pose_worker_person_gate()
     print("\nALL POSE TESTS PASSED")

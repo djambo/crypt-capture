@@ -19,12 +19,20 @@ Kept import-safe without onnxruntime (the dependency is only touched when a
 model is actually configured) and Python-3.6-safe like all node code.
 """
 
+import math
 import threading
 import time
 
 import numpy as np
 
 COCO_JOINTS = 17
+# Torso joints (shoulders + hips) used by the person gate: MoveNet ALWAYS
+# emits 17 keypoints — pointed at furniture it produces low-confidence
+# garbage, and a couple of joints can fluke past a per-joint threshold. A
+# real person reliably lights up the torso, so the gate is the MEAN torso
+# confidence: below it, the whole frame emits nothing (the viewer's stale
+# timeout then hides the skeleton).
+CORE_JOINTS = (5, 6, 11, 12)
 
 
 def letterbox(rgb, size):
@@ -57,6 +65,69 @@ def decode_movenet(raw, scale, pad_x, pad_y, size):
         v = (y * size - pad_y) / scale
         out.append((jid, float(u), float(v), float(conf)))
     return out
+
+
+class OneEuro(object):
+    """One-Euro filter (Casiez et al.) for one scalar channel — the standard
+    keypoint de-jitterer: heavy smoothing at low speed (kills idle shake),
+    light smoothing at high speed (movement stays responsive, minimal lag).
+    beta is in 1/(units per second): larger = trusts fast motion sooner."""
+
+    def __init__(self, min_cutoff=0.5, beta=0.01, d_cutoff=1.0):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.d_cutoff = float(d_cutoff)
+        self._t = None
+        self._x = 0.0
+        self._dx = 0.0
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def filter(self, x, t):
+        if self._t is None:
+            self._t = t
+            self._x = x
+            self._dx = 0.0
+            return x
+        dt = max(1e-6, t - self._t)
+        self._t = t
+        dx = (x - self._x) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        self._dx = a_d * dx + (1.0 - a_d) * self._dx
+        cutoff = self.min_cutoff + self.beta * abs(self._dx)
+        a = self._alpha(cutoff, dt)
+        self._x = a * x + (1.0 - a) * self._x
+        return self._x
+
+
+class JointSmoother(object):
+    """Per-joint One-Euro smoothing for (u, v) pixels + z metres. A joint
+    unseen for `reset_s` drops its filter state, so a re-appearing joint
+    snaps to its new position instead of sliding across the frame."""
+
+    RESET_S = 0.5
+
+    def __init__(self):
+        self._f = {}                 # joint_id -> (t_last, fu, fv, fz)
+
+    def filter(self, jid, u, v, z, t):
+        st = self._f.get(jid)
+        if st is None or t - st[0] > self.RESET_S:
+            st = [t, OneEuro(0.5, 0.01, 1.0), OneEuro(0.5, 0.01, 1.0),
+                  OneEuro(0.5, 0.3, 1.0)]      # z in metres: speeds ~m/s
+            self._f[jid] = st
+        st[0] = t
+        u = st[1].filter(u, t)
+        v = st[2].filter(v, t)
+        if z > 0:
+            z = st[3].filter(z, t)
+        return u, v, z
+
+    def reset(self):
+        self._f.clear()
 
 
 def sample_depth(depth_u16, u, v, half=2):
@@ -135,12 +206,16 @@ class PoseWorker(object):
 
     REPORT_EVERY = 150
 
-    def __init__(self, estimator, emit, min_conf=0.2, label="pose"):
+    def __init__(self, estimator, emit, min_conf=0.2, gate_conf=0.35,
+                 smooth=True, label="pose"):
         self.estimator = estimator
         self.emit = emit
         self.min_conf = float(min_conf)
+        self.gate_conf = float(gate_conf)   # mean CORE_JOINTS confidence gate
+        self.smoother = JointSmoother() if smooth else None
         self.label = label
         self.inferences = 0
+        self.gated = 0                      # frames rejected by the gate
         self.last_ms = 0.0
         self._cond = threading.Condition()
         self._latest = None
@@ -181,13 +256,27 @@ class PoseWorker(object):
                 print("%s: inference failed (%s) — pose worker stopped"
                       % (self.label, exc))
                 return
-            self.last_ms = (time.time() - t0) * 1000.0
-            out = []
-            for jid, u, v, conf in kps:
-                if conf < self.min_conf:
-                    continue
-                out.append((jid, u, v, sample_depth(depth, u, v), conf))
+            now = time.time()
+            self.last_ms = (now - t0) * 1000.0
             self.inferences += 1
+            # Person gate: no credible torso -> no person -> emit nothing
+            # (and reset smoothing so a returning person doesn't inherit
+            # filter state aimed at wherever the ghost was).
+            core = [c for j, _u, _v, c in kps if j in CORE_JOINTS]
+            if not core or sum(core) / len(core) < self.gate_conf:
+                self.gated += 1
+                if self.smoother is not None:
+                    self.smoother.reset()
+                out = []
+            else:
+                out = []
+                for jid, u, v, conf in kps:
+                    if conf < self.min_conf:
+                        continue
+                    z = sample_depth(depth, u, v)
+                    if self.smoother is not None:
+                        u, v, z = self.smoother.filter(jid, u, v, z, now)
+                    out.append((jid, u, v, z, conf))
             if out:
                 try:
                     self.emit(out)
@@ -196,9 +285,9 @@ class PoseWorker(object):
                           % (self.label, exc))
                     return
             if self.inferences % self.REPORT_EVERY == 0:
-                now = time.time()
                 fps = self.REPORT_EVERY / max(1e-6, now - self._win_t0)
                 self._win_t0 = now
-                print("%s: %.1f fps (%.0f ms/infer, %d joints >= %.2f conf)"
+                print("%s: %.1f fps (%.0f ms/infer, %d joints, %d%% gated)"
                       % (self.label, fps, self.last_ms, len(out),
-                         self.min_conf))
+                         100 * self.gated // self.REPORT_EVERY))
+                self.gated = 0

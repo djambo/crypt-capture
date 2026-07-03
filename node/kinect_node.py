@@ -321,7 +321,8 @@ def run(host, port, sensor_id, frames,
         depth_mode=None, color_resolution=None, fps=None, align=None,
         imu_axes=None, imu_extrinsic=False, rig_id=discovery.DEFAULT_RIG_ID,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
-        pose_model=None, pose_threads=2, pose_min_conf=0.2):
+        pose_model=None, pose_threads=2, pose_min_conf=0.2,
+        pose_gate=0.35, pose_smooth=True):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -526,6 +527,7 @@ def run(host, port, sensor_id, frames,
 
         est = MoveNetEstimator(pose_model, threads=pose_threads)
         pose_worker = PoseWorker(est, _emit_pose, min_conf=pose_min_conf,
+                                 gate_conf=pose_gate, smooth=pose_smooth,
                                  label="sensor %d pose" % sensor_id)
         print("sensor %d: pose model %s (input %dx%d %s, %s)" % (
             sensor_id, pose_model, est.size, est.size,
@@ -724,6 +726,14 @@ def main():
                          "coexists with the RVL/color workers)")
     ap.add_argument("--pose-min-conf", type=float, default=0.2,
                     help="drop keypoints below this model confidence")
+    ap.add_argument("--pose-gate", type=float, default=0.35,
+                    help="person gate: mean torso-joint (shoulders+hips) "
+                         "confidence required to emit ANYTHING — stops "
+                         "skeletons appearing on furniture (raise if ghosts "
+                         "persist, lower if your real skeleton drops out)")
+    ap.add_argument("--pose-no-smooth", action="store_true",
+                    help="disable the One-Euro keypoint smoothing (raw, "
+                         "shakier joints)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,
@@ -733,7 +743,8 @@ def main():
         imu_extrinsic=args.imu_extrinsic, rig_id=args.rig_id,
         discovery_port=args.discovery_port, workers=args.workers,
         pose_model=args.pose_model, pose_threads=args.pose_threads,
-        pose_min_conf=args.pose_min_conf)
+        pose_min_conf=args.pose_min_conf, pose_gate=args.pose_gate,
+        pose_smooth=not args.pose_no_smooth)
 
 
 if __name__ == "__main__":
