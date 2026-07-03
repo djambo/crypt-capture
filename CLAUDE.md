@@ -543,6 +543,12 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   `int(time.time()*1e9)` (node files included). Keep new node/protocol code
   3.6-safe. (`central/preview_server.py` + `protocol/websocket.py` are
   central-only, x86/3.8+ — they don't run on the Nano.)
+- **NumPy 2 breaks pyk4a on the Jetsons**: pyk4a is compiled on-device against
+  the installed NumPy 1.x, so any later `pip install` that drags in NumPy ≥2
+  (e.g. bare `onnxruntime` for the pose model) kills the node with "a module
+  compiled using NumPy 1.x cannot be run in NumPy 2.x". Fix/prevention: always
+  `pip3 install <pkg> "numpy<2"` on nodes (or rebuild pyk4a). Hit on the Orin
+  2026-07-03.
 - **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
   to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
   (The `deploy/` systemd unit applies this automatically as a root `ExecStartPre`.)

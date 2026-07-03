@@ -118,7 +118,10 @@ proves limiting (the estimator interface is one class to swap).
 ```bash
 # on the Orin:
 cd ~/crypt-capture && git pull
-pip3 install onnxruntime                    # CPU aarch64 wheel; GPU optional later
+# "numpy<2" is REQUIRED: bare onnxruntime pulls numpy 2.x as a dependency
+# upgrade, and pyk4a (compiled on the Jetson against numpy 1.x) then fails to
+# import with "a module compiled using NumPy 1.x cannot be run in NumPy 2.x".
+pip3 install onnxruntime "numpy<2"          # CPU aarch64 wheel; GPU optional later
 mkdir -p models
 # MoveNet single-pose ONNX (Apache-2.0), pick ONE:
 #   Thunder (256px, more accurate, ~2-3x slower) — recommended first:
