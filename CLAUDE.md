@@ -293,7 +293,9 @@ Two repos:
   **Relay write-lock fix (2026-07-03)** — WS frames to a client are now
   serialised per connection: concurrent writers (per-sensor node threads +
   status broadcasts) interleaved bytes mid-frame on large sends and browsers
-  dropped the socket ("Invalid frame header").
+  dropped the socket ("Invalid frame header"). *(Superseded 2026-07-04: the
+  per-client `ClientSender` thread is now the socket's only writer — same
+  guarantee, no lock; see the multi-viewer entry below.)*
   **Unknown-command NACK (2026-07-03)** — the relay replies
   `{"type":"cmd_error", cmd}` to browser commands it doesn't recognise
   instead of dropping them silently; the viewer turns that (plus a 4 s
@@ -427,6 +429,30 @@ Two repos:
   `sudo deploy/install-node-service.sh` re-run per device. ⏳ remaining:
   hands→particle attractors in the viewer; relay-side skeleton fusion across
   sensors.
+- ✅ **Multi-viewer fix — per-client sender threads (2026-07-04)**: a second
+  browser connecting to the relay (e.g. the VR PC viewing the laptop's
+  stream) dropped EVERY viewer to ~2 fps. Cause: the relay broadcast inline
+  in each node's handler thread with a blocking `sendall` per client — one
+  viewer whose link couldn't drain the stream (~90 Mbps for a subtracted
+  ~25k-pt cloud at 30 fps, far more full-room; hopeless on Wi-Fi) filled its
+  TCP buffer, blocked the node thread, and backpressured the Jetson, so all
+  viewers ran at the slowest client's rate. Now each viewer socket gets its
+  own `ClientSender` thread fed via a **latest-frame mailbox**: node threads
+  hand frames off without ever touching viewer sockets; binary cloud frames
+  overwrite a per-sensor slot (a slow viewer skips stale clouds and renders
+  the freshest its link carries — freshness beats completeness, the node
+  pipeline's rule), TEXT/JSON messages are ordered and never dropped, and
+  the sender being the sole writer replaces the 2026-07-03 per-client write
+  lock. `_ws_reader` also treats a hard connection reset as a disconnect
+  (no traceback spam). No wire/protocol change. Unit-tested
+  (`tests/test_sender.py`: latest-wins, text lossless, producer never
+  blocks on a wedged client, dead socket drops cleanly) + E2E (sim → relay
+  → one never-reading viewer + one fast viewer: fast viewer stays at the
+  full ingest rate; the pre-fix relay starved it to 0). Per-viewer fps is
+  now bounded only by that viewer's own link/GPU — a remote PC still needs
+  the bandwidth for 30 fps (Ethernet both hops, or keep background
+  subtraction on; JPEG/NVENC color transport remains the deferred lever for
+  many viewers).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -538,7 +564,7 @@ deploy/     kinect-node.service (+ .default env + install-node-service.sh):
             device-class default flags, auto-detected from the L4T release
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
-            test_pose.py
+            test_pose.py, test_sender.py (per-viewer ClientSender mailbox)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),

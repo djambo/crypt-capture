@@ -25,6 +25,7 @@ And verify the stream with the headless client:
 """
 
 import argparse
+import collections
 import json
 import math
 import socket
@@ -187,6 +188,82 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None):
 NODE_POSE_QUIET_S = 2.0
 
 
+class ClientSender:
+    """Per-viewer sender thread with a latest-frame mailbox.
+
+    Every viewer socket gets its own writer thread: the node handler threads
+    hand frames off without ever touching the socket, so one slow or stalled
+    viewer can never block the node stream or the other viewers. (The old
+    path did a blocking sendall to every client inline in the node thread —
+    a single viewer on a thin link filled its TCP buffer, the sendall
+    blocked, the node socket stopped being read, and EVERY viewer dropped to
+    the slowest link's rate.)
+
+    Binary cloud frames overwrite a per-sensor slot: a viewer that can't
+    keep up simply skips stale clouds and always sends the freshest one its
+    link can carry — freshness beats completeness, the same rule as the
+    node's capture pipeline. TEXT/JSON messages (rig_poses, calib_status,
+    skeleton, cmd_error) are queued in order and never dropped. The thread
+    being the socket's only writer also serialises frames, replacing the
+    old per-client write lock.
+    """
+
+    def __init__(self, conn, on_error):
+        self.conn = conn
+        self._on_error = on_error           # called with conn when the socket dies
+        self._cv = threading.Condition()
+        self._texts = collections.deque()   # ordered, lossless
+        self._frames = {}                   # sensor_id -> newest encoded WS frame
+        self._frame_order = collections.deque()  # sensor ids with a pending frame
+        self._closed = False
+        self.dropped = 0                    # stale cloud frames skipped (stats)
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def put_frame(self, sensor_id, ws_frame):
+        """Queue a binary cloud frame; overwrites any unsent one for the sensor."""
+        with self._cv:
+            if self._closed:
+                return
+            if sensor_id in self._frames:
+                self.dropped += 1
+            else:
+                self._frame_order.append(sensor_id)
+            self._frames[sensor_id] = ws_frame
+            self._cv.notify()
+
+    def put_text(self, ws_frame):
+        """Queue a TEXT frame; ordered, never dropped."""
+        with self._cv:
+            if self._closed:
+                return
+            self._texts.append(ws_frame)
+            self._cv.notify()
+
+    def close(self):
+        with self._cv:
+            self._closed = True
+            self._cv.notify()
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while not (self._closed or self._texts or self._frame_order):
+                    self._cv.wait()
+                if self._closed:
+                    return
+                batch = list(self._texts)
+                self._texts.clear()
+                while self._frame_order:
+                    batch.append(self._frames.pop(self._frame_order.popleft()))
+            try:
+                for data in batch:
+                    self.conn.sendall(data)
+            except OSError:
+                self._on_error(self.conn)
+                return
+
+
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=200000,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False):
@@ -201,12 +278,11 @@ class PreviewServer:
         self._central_stride = {}           # sensor_id -> node stride (coord scale)
         self._node_pose_seen = {}           # sensor_id -> last CPOS wall time
         self._clients = []                  # browser WebSocket sockets
-        # Per-client WRITE lock: node threads (one per sensor) and the calib
-        # status/pose broadcasts all write to the same client sockets. sendall
-        # of a large frame spans multiple send() syscalls, so concurrent
-        # writers would interleave bytes MID-FRAME and the browser drops the
-        # socket with "Invalid frame header".
-        self._client_locks = {}             # conn -> threading.Lock
+        # Per-client sender thread (ClientSender): the socket's ONLY writer,
+        # fed via a latest-frame mailbox so a slow viewer never blocks the
+        # node threads or the other viewers, and concurrent writers can't
+        # interleave bytes mid-frame.
+        self._client_senders = {}           # conn -> ClientSender
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
@@ -244,7 +320,7 @@ class PreviewServer:
                 continue
             with self._lock:
                 self._clients.append(conn)
-                self._client_locks[conn] = threading.Lock()
+                self._client_senders[conn] = ClientSender(conn, self._drop)
             print("[preview] viewer connected %s (%d total)"
                   % (addr[0], len(self._clients)))
             # A calibrated rig greets each viewer with the camera poses so its
@@ -269,6 +345,8 @@ class PreviewServer:
                     except ValueError:
                         continue
                     self._on_browser_command(cmd, conn)
+        except OSError:
+            pass                    # hard reset = a disconnect, not an error
         finally:
             self._drop(conn)
 
@@ -315,43 +393,37 @@ class PreviewServer:
         with self._lock:
             if conn in self._clients:
                 self._clients.remove(conn)
-            self._client_locks.pop(conn, None)
+            sender = self._client_senders.pop(conn, None)
+        if sender is not None:
+            sender.close()
         try:
             conn.close()
         except OSError:
             pass
 
-    def _send_frame(self, conn, frame):
-        """Write one encoded WS frame to a client, serialised per client so
-        concurrent writers never interleave bytes mid-frame."""
-        lock = self._client_locks.get(conn)
-        if lock is None:
-            return
-        try:
-            with lock:
-                conn.sendall(frame)
-        except OSError:
-            self._drop(conn)
-
-    def _broadcast(self, payload):
-        frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
+    def _senders(self):
         with self._lock:
-            clients = list(self._clients)
-        for conn in clients:
-            self._send_frame(conn, frame)
+            return list(self._client_senders.values())
+
+    def _broadcast(self, sensor_id, payload):
+        """Hand a binary cloud frame to every viewer's sender (non-blocking:
+        each sender keeps only the newest unsent frame per sensor)."""
+        frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
+        for sender in self._senders():
+            sender.put_frame(sensor_id, frame)
 
     def _send_text(self, conn, obj):
-        data = json.dumps(obj).encode("utf-8")
-        self._send_frame(conn, websocket.encode_frame(
-            data, opcode=websocket.OP_TEXT))
+        with self._lock:
+            sender = self._client_senders.get(conn)
+        if sender is not None:
+            sender.put_text(websocket.encode_frame(
+                json.dumps(obj).encode("utf-8"), opcode=websocket.OP_TEXT))
 
     def _broadcast_text(self, obj):
         frame = websocket.encode_frame(json.dumps(obj).encode("utf-8"),
                                        opcode=websocket.OP_TEXT)
-        with self._lock:
-            clients = list(self._clients)
-        for conn in clients:
-            self._send_frame(conn, frame)
+        for sender in self._senders():
+            sender.put_text(frame)
 
     # --- rig extrinsics: one canonical world frame on the wire -----------
     # (docs/rig_calibration.md; solved by scripts/calibrate_rig.py or the
@@ -819,7 +891,7 @@ class PreviewServer:
                         gravity = (float(g[0]), float(g[1]), float(g[2]))
                 out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb,
                                     gravity)
-                self._broadcast(out)
+                self._broadcast(frame.sensor_id, out)
                 self.frames_relayed += 1
 
                 win["n"] += 1; win["pts"] += xyz.shape[0]; win["bytes"] += len(out)
