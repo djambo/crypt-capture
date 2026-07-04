@@ -479,6 +479,30 @@ Two repos:
   the bandwidth for 30 fps (Ethernet both hops, or keep background
   subtraction on; JPEG/NVENC color transport remains the deferred lever for
   many viewers).
+- ✅ **Scene recording + in-scene playback (2026-07-04)** — the "hit Record on
+  a running scene" milestone (`central/recording.py` + relay wiring; spec in
+  `docs/preview_protocol.md` "Scene recording"). `record_start`/`record_stop`
+  (viewer Record button or `send_command record-start/-stop`) tee every
+  outgoing `CPV1` message — the already-registered, background-subtracted
+  bytes every viewer renders — into a `CPR1` take (`recordings/<id>.cpr` +
+  JSON sidecar meta). **Seamless by construction:** the tee is an O(1)
+  non-blocking enqueue on the node threads with a dedicated writer thread; a
+  too-slow disk drops-and-counts frames (reported in meta/status) instead of
+  ever stalling the live path. `record_status` (~1 Hz) + a `recordings`
+  index (on connect + every stop/delete) keep every viewer's panel in sync;
+  `list_recordings`/`delete_recording` round out the command set. The ws
+  port now also answers **plain HTTP** (`GET /recordings` index +
+  `GET /recordings/<id>` take download, CORS-open — the delivery path for
+  the future "pick a record and experience it" web app; the browser port
+  handler was split so non-upgrade requests route to HTTP). The `crypt`
+  viewer plays takes back INTO the live scene through its same renderer
+  cores (recorded format == wire format — the North Star contract).
+  Unit-tested (`tests/test_recording.py`: round-trip, non-blocking tee +
+  drop-over-cap, truncation, id safety, commands, HTTP) + E2E (sim → relay →
+  record via send_command → HTTP download byte-identical + 45 CPV1 frames;
+  viewer record→list→play→loop verified in headless Chromium). NB this is
+  the wire-stream recorder (preview-resolution); M3's node-local
+  full-fidelity record/download is still separate/future.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -575,7 +599,10 @@ node/       sim_node.py, kinect_node.py (real), background.py (bg subtraction),
             dump_calibration.py
 central/    recorder.py (records synced takes), preview_server.py (live ws relay + control
             fan-out + rig-calib apply/reload + viewer-driven calibration sessions
-            + --pose-model central pose fallback for nodes without on-node inference),
+            + --pose-model central pose fallback for nodes without on-node inference
+            + scene recording commands + HTTP /recordings delivery),
+            recording.py (scene recording: CPR1 take writer [non-blocking tee]
+            /reader + recordings index/delete),
             calibration.py (rig extrinsics from a tracked marker ball: segment_ball
             [largest spherical cluster] + sphere fit + robust Kabsch [RANSAC];
             BallTracker [continuous] + StationaryBallSampler [stop-and-go, default];
@@ -591,7 +618,8 @@ deploy/     kinect-node.service (+ .default env + install-node-service.sh):
 tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
             test_pose.py, test_grid.py (CPV1 grid block / mesh connectivity),
-            test_sender.py (per-viewer ClientSender mailbox)
+            test_sender.py (per-viewer ClientSender mailbox),
+            test_recording.py (CPR1 round-trip, non-blocking tee, HTTP endpoint)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
@@ -667,6 +695,14 @@ python3 -m scripts.send_command --port 8080 calibrate-rough      # -> tier "skel
 python3 -m tests.test_pose     # CPOS round-trip, JointTracker, solve_skeleton
 # Central pose fallback (skeletons for nodes that can't infer, e.g. the Nano):
 python3 -m central.preview_server --pose-model models/movenet.onnx
+
+# Scene recording (record the live stream at the relay, replay in the viewer):
+python3 -m scripts.send_command --port 8080 record-start --name "my take"
+python3 -m scripts.send_command --port 8080 record-stop      # waits for "saved"
+python3 -m scripts.send_command --port 8080 list-recordings
+curl http://127.0.0.1:8080/recordings                        # same index, HTTP
+curl -O http://127.0.0.1:8080/recordings/<id>                # the CPR1 take
+python3 -m tests.test_recording
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1
@@ -765,8 +801,14 @@ trigger-record-download.
    node streams the full range and culls via background subtraction.) ⏳ remaining:
    `arm/record/stop/status` commands (M3 needs them); optional status/echo back
    to the UI (no ack today — feedback is the cloud changing).
-4. **M3 — Record + download.** Trigger → node records full-rate to **local
-   disk** → HTTP file server → recordings browser + download in UI.
+4. 🟡 **M3 — Record + download.** ✅ *scene recording* (2026-07-04, see Current
+   status): the relay records the live **wire stream** (registered,
+   subject-only `CPV1`) on the viewer's Record button, lists takes, and serves
+   them over HTTP; the viewer replays them into the running scene — the app's
+   record→replay loop is functional end-to-end at preview fidelity. ⏳
+   *remaining (original M3)*: node-local **full-fidelity** recording (full-res,
+   pre-downsample, for post-processing/TSDF) → per-node HTTP download —
+   reuses the same `record_start/stop` command surface when built.
 5. **M4 — N nodes.** Node discovery/registry; trigger fans out to all.
 6. 🟡 **Phase 2 (M5) — Aligned/fused.** ✅ *calibration method decided + math
    core built*: **marker-ball ("wand") calibration**, not ICP (inward-facing

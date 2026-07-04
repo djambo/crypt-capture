@@ -103,6 +103,9 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | `{"cmd":"calibrate_fine","seconds":30,"ball_radius":0.05}` | **rig calibration, Tier-2 wand pass — handled AT THE RELAY** (not forwarded). Collects per-sensor ball centers off the raw clouds for `seconds`, solves the rig (Kabsch), writes `rig_calib.json` and starts registering all sensors on the wire. Optional gate overrides: `min_points`, `max_points`, `max_fit_rms`, `min_pairs`. Progress/results stream back as `calib_status` (below). See `docs/rig_calibration.md`. |
 | `{"cmd":"calibrate_rough","seconds":10}` | **rig calibration, Tier-1 rough — relay-handled.** When the nodes stream pose keypoints, the session **auto-upgrades to the skeleton solve** (named joints → full 3D Kabsch, ~2–5 cm, `"tier":"skeleton"`; see docs/skeleton_pose.md; optional `min_conf`, `min_joint_pairs`). Fallback with no pose data: per-sensor IMU leveling + the operator's body-centroid track for yaw/XY (~5–10 cm, `"tier":"rough"`; optional `min_points`, `min_pairs`). Either way: walk a slow "L", visible to every camera. |
 | `{"cmd":"calibrate_floor","seconds":3}` | **per-sensor floor leveling — relay-handled** (`"tier":"floor"`). Fits each camera's floor plane in its OWN raw cloud (floor must be in view: background subtraction off; empty scene is fine) and composes a per-sensor correction (floor normal → +Y about the floor centroid, common height) onto the current rig transforms (identity if uncalibrated) — every camera's floor comes out flat and coplanar even when each cloud has its own tilt. One rigid viewer-side correction can't do this; that's why it's per-sensor at the relay. Meant for uncalibrated/rough rigs (a fine wand calib is already mm-coplanar — re-leveling it per sensor only degrades registration). The viewer's **Detect Floor** button sends this automatically on multi-camera rigs. |
+| `{"cmd":"record_start","name":<optional>}` / `{"cmd":"record_stop"}` | **scene recording — relay-handled** (see the Scene recording section below). Start/stop teeing the outgoing registered `CPV1` stream to a `.cpr` take on the relay's disk. Non-blocking tee: recording never slows the live stream. Idempotent: `record_start` during a take just re-broadcasts the live status. |
+| `{"cmd":"list_recordings"}` | **relay-handled**: reply (to the sender) with the `recordings` index message. Rarely needed — the index is pushed on connect and after every stop/delete. |
+| `{"cmd":"delete_recording","id":<take id>}` | **relay-handled**: delete a saved take (data + meta); broadcasts the refreshed index. |
 | `{"cmd":"reload_rig_calib"}` | **relay-handled**: re-read `rig_calib.json` now (it is also mtime-watched, so this is rarely needed). |
 | `{"cmd":"clear_rig_calib"}` | **relay-handled — reset alignment**: cancel any running `calibrate_*` session, delete `rig_calib.json`, stream raw per-camera frames again, and broadcast an empty `rig_poses` (viewers reset gizmos to the origin). The viewer's alignment **Reset** button. |
 
@@ -160,7 +163,59 @@ the additive-extension mechanism for this channel).
 | `{"type":"calib_status","state":"done","tier":…,"sensors":{"<id>":{"rms":<m>,"pairs":<n>}},"unsolved":[…]}` | the solve finished and was applied; per-sensor residuals (mm-scale rms = good wand pass). `unsolved` lists sensors that had tracks but too few matched pairs. |
 | `{"type":"calib_status","state":"failed","reason":…}` / `{"state":"busy"}` / `{"state":"cancelled"}` | nothing usable was collected / a session is already running / a running session was cancelled by `clear_rig_calib` (sent after the clear, so it supersedes any in-flight `collecting`). |
 | `{"type":"skeleton","sensor":<id>,"joints":{"<joint_id>":[x,y,z,conf]}}` | **live 3D pose joints** for one sensor (docs/skeleton_pose.md), sent whenever that node ships pose keypoints (`CPOS`) — up to ~frame rate. COCO-17 joint ids; coordinates in the SAME frame as that sensor's `CPV1` points (view frame, or the shared world frame once a rig calibration is applied), so the viewer can draw them straight onto the cloud. |
+| `{"type":"record_status","state":"recording","id":…,"name":…,"seconds":<s>,"frames":<n>,"bytes":<n>,"dropped":<n>}` | **scene recording is running** — broadcast on `record_start` and ~1 Hz while active (and sent to each client on connect if a take is running), so every viewer's Record button/status stays in sync. `dropped` > 0 means the relay's disk can't keep up (frames were skipped rather than stalling the live stream). |
+| `{"type":"record_status","state":"saved","recording":{…meta…}}` / `{"state":"idle"}` | a take finished and was written (meta = the recordings-index entry, below) / a `record_stop` arrived with nothing running (resets a stale panel). |
+| `{"type":"recordings","items":[{"id","name","created","duration","frames","bytes","sensors":[…],"max_count","dropped","format":"CPR1","version":1}, …]}` | the **saved-takes index**, newest first — sent to each client on connect, after every stop/delete, and on request (`list_recordings`). `max_count` is the densest frame's point count (viewers size playback buffers from it). |
 | `{"type":"cmd_error","cmd":…,"error":"unknown command"}` | the relay received a browser command it doesn't recognise (sent only to that client). The usual cause is a **viewer newer than the relay** — the viewer should tell the operator to update/restart the relay instead of hanging on an optimistic status. |
+
+## Scene recording (record the live stream, replay it in the scene)
+
+The relay can **record the live scene while it plays** — the `record_start`
+command tees every outgoing `CPV1` message (already RVL-decoded, unprojected,
+background-subtracted and rig-registered — exactly what viewers render) into a
+take file on the relay's disk. The tee is an O(1), non-blocking enqueue on the
+node threads with a dedicated writer thread behind it, so **recording never
+degrades the live/VR experience**; if the disk falls behind a large buffer,
+frames are dropped-and-counted instead of stalling the stream. Because the
+recorded format IS the wire format, playback feeds the same source-agnostic
+renderer and recorded content is indistinguishable from live (the North Star).
+Implementation: `central/recording.py`; storage: `--recordings-dir`
+(default `recordings/`).
+
+### Take container: `CPR1` (little-endian)
+
+```
+header: magic "CPR1" (4s) | u16 version = 1 | u16 reserved
+frame:  f64 t (seconds since recording start) | u32 len | one CPV1 message
+```
+
+A JSON sidecar `<id>.json` next to the `.cpr` holds the meta (the
+recordings-index entry). Frames are chronological; `t` drives playback pacing.
+A truncated tail (crash mid-write) is valid — readers stop at the last intact
+frame. Bump the magic (`CPR2`, …) for breaking changes.
+
+### HTTP endpoints (same port as the WebSocket)
+
+The relay answers **plain HTTP** on the ws port (it already speaks HTTP for
+the upgrade handshake), CORS-open (`Access-Control-Allow-Origin: *`) so any
+origin — the Vite dev viewer today, the recording-playback web app later —
+can fetch:
+
+- `GET /recordings` → the saved-takes index as JSON (same items as the
+  `recordings` WS message).
+- `GET /recordings/<id>` → that take's `CPR1` file
+  (`application/octet-stream`).
+
+```js
+// viewer: derive the HTTP base from the ws URL, fetch + play a take
+const base = wsUrl.replace(/^ws/, 'http')
+const take = await (await fetch(`${base}/recordings/${id}`)).arrayBuffer()
+```
+
+Sizing rule of thumb: a background-subtracted subject (~25k pts, rgb + grid)
+records ~0.5 MB/frame ≈ **~0.9 GB/min at 30 fps**. Record with background
+subtraction ON (that's also the intended artistic use — subject-only takes);
+full-room recordings get big fast.
 
 ## Versioning
 

@@ -61,9 +61,20 @@ def _read_http_headers(sock):
     return lines[0], headers
 
 
-def server_handshake(sock):
-    """Complete the server side of the WS upgrade. Returns True on success."""
-    parsed = _read_http_headers(sock)
+def read_http_request(sock):
+    """Read one HTTP request head off a fresh connection: (request_line,
+    headers) or None. Lets a server peek whether this is a WebSocket upgrade
+    (pass the result to server_handshake) or a plain HTTP request (e.g. the
+    relay's GET /recordings download endpoint) on the same port."""
+    return _read_http_headers(sock)
+
+
+def server_handshake(sock, parsed=None):
+    """Complete the server side of the WS upgrade. Returns True on success.
+    `parsed` = an already-read (request_line, headers) from
+    read_http_request; None reads the request here."""
+    if parsed is None:
+        parsed = _read_http_headers(sock)
     if not parsed:
         return False
     _request, headers = parsed

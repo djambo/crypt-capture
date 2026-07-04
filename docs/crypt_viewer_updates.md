@@ -30,6 +30,66 @@ users to tune it; 0 turns it off.
 
 ---
 
+## 2026-07-04 — Scene recording: record the live scene, replay it in the scene
+**Status: applied 2026-07-04** (viewer wired in the same cross-repo change —
+`RecordingPlayer.js` + the panel's collapsible **recording** section).
+
+**Summary.** The director can now hit **Record** on a running scene (subject
+streaming with background removed, N cameras) and the RELAY tees every
+outgoing `CPV1` message — already decoded, unprojected, subtracted and
+rig-registered, exactly the bytes every viewer renders — into a `.cpr` take on
+its disk. The tee is a non-blocking enqueue off the node threads with a
+dedicated writer thread behind it, so **recording never interrupts or degrades
+the live/VR experience**; a too-slow disk drops-and-counts frames instead of
+stalling the stream. Saved takes are listed in the viewer and **play back INTO
+the scene through the same renderer cores** (PointCloud/MeshCloud, same world
+frame, panel render selector applies) while everything live keeps streaming —
+the recorded format IS the wire format, which is the North Star's
+"live == recorded" contract. Takes are also served over plain HTTP so the
+future "pick a record and experience it" web app can fetch them from anywhere.
+
+**Protocol impact (all additive; spec: `docs/preview_protocol.md`):**
+- **Upstream commands (relay-handled):** `{"cmd":"record_start","name":?}` /
+  `{"cmd":"record_stop"}` / `{"cmd":"list_recordings"}` /
+  `{"cmd":"delete_recording","id":…}`. `record_start` during a running take is
+  idempotent (re-broadcasts the live status).
+- **Downstream TEXT messages:**
+  `{"type":"record_status","state":"recording","id","name","seconds","frames",
+  "bytes","dropped"}` (on start + ~1 Hz while recording + on connect if
+  active), `{"state":"saved","recording":{…meta…}}`, `{"state":"idle"}` (stop
+  with nothing running); and `{"type":"recordings","items":[…]}` — the saved-
+  takes index (newest first), pushed on connect and after every stop/delete.
+  Item fields: `id,name,created,duration,frames,bytes,sensors,max_count,
+  dropped` (`max_count` = densest frame, for playback buffer sizing).
+- **HTTP on the ws port** (CORS `*`): `GET /recordings` (the index as JSON),
+  `GET /recordings/<id>` (the take file). Derive the base from the ws URL:
+  `wsUrl.replace(/^ws/, 'http')`.
+- **Take container `CPR1`:** `"CPR1" | u16 version=1 | u16 reserved`, then per
+  frame `f64 t (s since start) | u32 len | one verbatim CPV1 message`.
+  Chronological; `t` drives playback pacing; a truncated tail is valid (stop
+  at the last intact frame).
+
+**Viewer action (done).** `cpv1.js` (CPV1 parser extracted from
+LivePointCloud, shared with playback); `RecordingPlayer.js` (fetch the take,
+slice frames — each CPV1 must sit at offset 0 of its own buffer for the
+Float32Array position view's 4-alignment — then wall-clock-paced playback with
+the live path's freshness rule, per-sensor PointCloud `edl:null` + MeshCloud
+sized to `max_count`, loop by default); panel **recording** section
+(collapsible: Record/Stop with live `● REC Ns · frames · MB` status driven by
+`record_status`, loop toggle, take rows with ▶/■ and ✕ delete); playback lives
+in `World.playbackGroup` under `captureGroup` (floor snap applies; per-sensor
+live IMU leveling does NOT — a take is already registered). A relay without
+these commands NACKs (`cmd_error`) → the recording status line says to update
+crypt-capture (plus the usual 4 s no-reply watchdog).
+
+**Ops notes.** Record with background subtraction ON (subject-only takes;
+~0.9 GB/min at 30 fps for a ~25k-pt subject — full-room takes get big fast).
+Recordings live in the relay's `--recordings-dir` (default `recordings/`,
+gitignored). Headless: `send_command record-start/record-stop/
+list-recordings/delete-recording`; tests: `python3 -m tests.test_recording`.
+
+---
+
 ## 2026-07-03 — CPV1 grid block (`FLAG_GRID`): mesh the points in the viewer
 **Status: applied 2026-07-03** (viewer wired same session — `MeshCloud.js` +
 the panel's subject `render` selector).
