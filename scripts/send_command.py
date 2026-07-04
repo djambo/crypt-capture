@@ -20,7 +20,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from protocol import websocket
 
 
-def send(host, port, command):
+def send(host, port, command, wait_type=None, wait_state=None, timeout=5.0):
+    """Send one command; optionally wait for (and print) the first TEXT reply
+    of a given "type" (e.g. list-recordings wants the recordings index back
+    on the same socket) — and, when `wait_state` is given, of a matching
+    "state" (record-stop wants the final "saved" status, not a stale in-
+    flight "recording" tick). Binary cloud frames arriving meanwhile are
+    skipped."""
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     if not websocket.client_handshake(sock, host, port):
@@ -28,12 +34,43 @@ def send(host, port, command):
     payload = json.dumps(command).encode("utf-8")
     # client -> server frames must be masked (RFC 6455)
     sock.sendall(websocket.encode_frame(payload, opcode=websocket.OP_TEXT, mask=True))
+    reply = None
+    if wait_type:
+        sock.settimeout(timeout)
+        try:
+            while True:
+                msg = websocket.read_frame(sock)
+                if msg is None or msg[0] == websocket.OP_CLOSE:
+                    break
+                opcode, data = msg
+                if opcode != websocket.OP_TEXT:
+                    continue
+                try:
+                    obj = json.loads(data.decode("utf-8"))
+                except ValueError:
+                    continue
+                if obj.get("type") == wait_type and (
+                        not wait_state or obj.get("state") in wait_state):
+                    reply = obj
+                    break
+                if obj.get("type") == "cmd_error" and \
+                        obj.get("cmd") == command.get("cmd"):
+                    reply = obj
+                    break
+        except socket.timeout:
+            pass
     try:
         sock.sendall(websocket.encode_frame(b"", opcode=websocket.OP_CLOSE, mask=True))
     except OSError:
         pass
     sock.close()
     print("sent:", command)
+    if wait_type:
+        if reply is None:
+            print("no %s reply within %.0fs" % (wait_type, timeout))
+        else:
+            print(json.dumps(reply, indent=2, sort_keys=True))
+    return reply
 
 
 def main():
@@ -85,6 +122,22 @@ def main():
                         "already mm-coplanar")
     fl.add_argument("--seconds", type=float, default=3.0)
 
+    rs = sub.add_parser("record-start", help="start recording the live scene "
+                        "AT THE RELAY (tees the outgoing CPV1 stream to a "
+                        ".cpr take in --recordings-dir; the viewer's Record "
+                        "button sends the same command)")
+    rs.add_argument("--name", help="display name (defaults to the take id)")
+
+    sub.add_parser("record-stop", help="stop and save the running scene "
+                   "recording")
+
+    sub.add_parser("list-recordings", help="print the relay's saved scene "
+                   "recordings (also: HTTP GET /recordings on the ws port)")
+
+    dr = sub.add_parser("delete-recording", help="delete a saved scene "
+                        "recording by id")
+    dr.add_argument("--id", required=True)
+
     sub.add_parser("reload-rig-calib", help="make the relay re-read "
                    "rig_calib.json now")
 
@@ -129,6 +182,21 @@ def main():
     elif args.cmd == "calibrate-floor":
         send(args.host, args.port,
              {"cmd": "calibrate_floor", "seconds": args.seconds})
+    elif args.cmd == "record-start":
+        command = {"cmd": "record_start"}
+        if args.name:
+            command["name"] = args.name
+        send(args.host, args.port, command, wait_type="record_status")
+    elif args.cmd == "record-stop":
+        send(args.host, args.port, {"cmd": "record_stop"},
+             wait_type="record_status", wait_state=("saved", "idle"))
+    elif args.cmd == "list-recordings":
+        send(args.host, args.port, {"cmd": "list_recordings"},
+             wait_type="recordings")
+    elif args.cmd == "delete-recording":
+        send(args.host, args.port,
+             {"cmd": "delete_recording", "id": args.id},
+             wait_type="recordings")
     elif args.cmd == "reload-rig-calib":
         send(args.host, args.port, {"cmd": "reload_rig_calib"})
     elif args.cmd == "clear-rig-calib":

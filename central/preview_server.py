@@ -37,19 +37,23 @@ import os
 
 import numpy as np
 
-from central import calibration
+from central import calibration, recording
 from protocol import control, discovery, rvl, websocket
 from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_camera", "set_imu")
-# Browser→RELAY commands, handled here (rig calibration; nothing goes to nodes).
+# Browser→RELAY commands, handled here (rig calibration + scene recording;
+# nothing goes to nodes).
 _RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "calibrate_floor",
-                   "reload_rig_calib", "clear_rig_calib")
+                   "reload_rig_calib", "clear_rig_calib",
+                   "record_start", "record_stop", "list_recordings",
+                   "delete_recording")
 
 RIG_CALIB_POLL_S = 1.0        # how often the rig_calib.json mtime is checked
 CALIB_STATUS_EVERY_S = 1.0    # progress broadcast cadence during collection
+RECORD_STATUS_EVERY_S = 1.0   # live REC stats broadcast cadence
 
 PREVIEW_MAGIC = b"CPV1"
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
@@ -308,7 +312,7 @@ class ClientSender:
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
-                 send_grid=True):
+                 send_grid=True, recordings_dir="recordings"):
         self.calib = calib
         self.stride = stride
         # 0 = uncapped (the default): full resolution for points AND mesh —
@@ -353,6 +357,12 @@ class PreviewServer:
         self._rig_mtime = None
         self._calib_lock = threading.Lock()
         self._calib_session = None          # active wand/rough collection
+        # Scene recording (docs/preview_protocol.md "Scene recording"): tee
+        # the outgoing CPV1 stream to disk on record_start, replayed by the
+        # viewer over the HTTP endpoint below. add_frame is non-blocking, so
+        # recording never slows the live path.
+        self.recordings_dir = recordings_dir
+        self._recorder = recording.TakeRecorder(recordings_dir)
         if self.rig_calib_path:
             self._load_rig_calib(announce=False)
 
@@ -362,24 +372,121 @@ class PreviewServer:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((host, port))
         srv.listen(8)
-        print("[preview] browser WebSocket on ws://%s:%d/" % (host, port))
+        print("[preview] browser WebSocket on ws://%s:%d/ (+ HTTP "
+              "/recordings)" % (host, port))
         while True:
             conn, addr = srv.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            if not websocket.server_handshake(conn):
-                conn.close()
-                continue
-            with self._lock:
-                self._clients.append(conn)
-                self._client_senders[conn] = ClientSender(conn, self._drop)
-            print("[preview] viewer connected %s (%d total)"
-                  % (addr[0], len(self._clients)))
-            # A calibrated rig greets each viewer with the camera poses so its
-            # gizmos land at the sensors' true positions immediately.
-            if self._rig:
-                self._send_text(conn, self._rig_poses_message())
-            threading.Thread(target=self._ws_reader, args=(conn,),
+            # Read the request off the accept loop's back: a slow client's
+            # headers must not stall other viewers connecting.
+            threading.Thread(target=self._serve_client, args=(conn, addr),
                              daemon=True).start()
+
+    def _serve_client(self, conn, addr):
+        """One browser connection: a WebSocket upgrade becomes a viewer; a
+        plain HTTP request hits the recordings endpoint (same port, so the
+        viewer — and the future playback web app — derive it straight from
+        the ws:// URL)."""
+        try:
+            parsed = websocket.read_http_request(conn)
+        except OSError:
+            parsed = None
+        if not parsed:
+            conn.close()
+            return
+        request_line, headers = parsed
+        if "websocket" not in headers.get("upgrade", "").lower():
+            try:
+                self._serve_http(conn, request_line)
+            finally:
+                conn.close()
+            return
+        if not websocket.server_handshake(conn, parsed):
+            conn.close()
+            return
+        with self._lock:
+            self._clients.append(conn)
+            self._client_senders[conn] = ClientSender(conn, self._drop)
+        print("[preview] viewer connected %s (%d total)"
+              % (addr[0], len(self._clients)))
+        # A calibrated rig greets each viewer with the camera poses so its
+        # gizmos land at the sensors' true positions immediately. Every viewer
+        # also gets the recordings index + any live REC state so its panel is
+        # populated without asking.
+        if self._rig:
+            self._send_text(conn, self._rig_poses_message())
+        self._send_text(conn, self._recordings_message())
+        status = self._recorder.status()
+        if status is not None:
+            self._send_text(conn, dict(status, type="record_status",
+                                       state="recording"))
+        self._ws_reader(conn)
+
+    # --- plain-HTTP side of the browser port (recording delivery) --------
+
+    def _serve_http(self, conn, request_line):
+        """Minimal HTTP for recorded takes: GET /recordings (JSON index) and
+        GET /recordings/<id> (the CPR1 file). CORS-open so the Vite dev
+        server / any playback web app can fetch across origins."""
+        parts = request_line.split()
+        method = parts[0].upper() if parts else ""
+        path = parts[1] if len(parts) > 1 else ""
+        path = path.split("?", 1)[0]
+        if method == "OPTIONS":              # permissive preflight
+            self._http_respond(conn, "204 No Content", None, b"")
+            return
+        if method != "GET":
+            self._http_respond(conn, "405 Method Not Allowed", "text/plain",
+                               b"GET only")
+            return
+        if path in ("/recordings", "/recordings/"):
+            body = json.dumps(
+                recording.list_recordings(self.recordings_dir)).encode("utf-8")
+            self._http_respond(conn, "200 OK", "application/json", body)
+            return
+        if path.startswith("/recordings/"):
+            rec_id = path[len("/recordings/"):]
+            take = recording.take_path(self.recordings_dir, rec_id)
+            if take and os.path.isfile(take):
+                self._http_send_file(conn, take)
+            else:
+                self._http_respond(conn, "404 Not Found", "text/plain",
+                                   b"no such recording")
+            return
+        self._http_respond(conn, "404 Not Found", "text/plain",
+                           b"try /recordings")
+
+    _HTTP_CORS = ("Access-Control-Allow-Origin: *\r\n"
+                  "Access-Control-Allow-Methods: GET, OPTIONS\r\n"
+                  "Access-Control-Allow-Headers: *\r\n")
+
+    def _http_respond(self, conn, status, ctype, body):
+        head = "HTTP/1.1 %s\r\n%sConnection: close\r\n" % (
+            status, self._HTTP_CORS)
+        if ctype:
+            head += "Content-Type: %s\r\n" % ctype
+        head += "Content-Length: %d\r\n\r\n" % len(body)
+        try:
+            conn.sendall(head.encode("ascii") + body)
+        except OSError:
+            pass
+
+    def _http_send_file(self, conn, path):
+        size = os.path.getsize(path)
+        head = ("HTTP/1.1 200 OK\r\n%s"
+                "Content-Type: application/octet-stream\r\n"
+                "Connection: close\r\n"
+                "Content-Length: %d\r\n\r\n" % (self._HTTP_CORS, size))
+        try:
+            conn.sendall(head.encode("ascii"))
+            with open(path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    conn.sendall(chunk)
+        except OSError:
+            pass
 
     def _ws_reader(self, conn):
         """Read browser messages: text = a JSON command to forward to nodes;
@@ -410,6 +517,14 @@ class PreviewServer:
                 self._load_rig_calib(force=True)
             elif name == "clear_rig_calib":
                 self._clear_rig_calib()
+            elif name == "record_start":
+                self._start_recording(cmd)
+            elif name == "record_stop":
+                self._stop_recording()
+            elif name == "list_recordings":
+                self._send_text(conn, self._recordings_message())
+            elif name == "delete_recording":
+                self._delete_recording(cmd)
             else:
                 self._start_calibration(cmd)
             return
@@ -561,6 +676,59 @@ class PreviewServer:
             self._broadcast_text({"type": "calib_status",
                                   "state": "cancelled",
                                   "tier": session["tier"]})
+
+    # --- scene recording (viewer Record button; docs/preview_protocol.md) ---
+    # The tee itself lives in _serve_node (recorder.add_frame on every
+    # broadcast payload — non-blocking); here is the command plumbing + the
+    # live REC status broadcast that keeps every viewer's panel in sync.
+
+    def _recordings_message(self):
+        return {"type": "recordings",
+                "items": recording.list_recordings(self.recordings_dir)}
+
+    def _start_recording(self, cmd):
+        already = self._recorder.recording
+        meta = self._recorder.start(name=cmd.get("name"))
+        if already:
+            # Another viewer pressed Record while a take runs: don't clobber
+            # it, just re-broadcast the live state so their panel syncs.
+            self._broadcast_record_status()
+            return
+        print("[preview] recording started: %s" % meta["id"])
+        self._broadcast_record_status()
+        threading.Thread(target=self._record_status_loop, daemon=True).start()
+
+    def _record_status_loop(self):
+        while self._recorder.recording:
+            time.sleep(RECORD_STATUS_EVERY_S)
+            self._broadcast_record_status()
+
+    def _broadcast_record_status(self):
+        status = self._recorder.status()
+        if status is not None:
+            self._broadcast_text(dict(status, type="record_status",
+                                      state="recording"))
+
+    def _stop_recording(self):
+        meta = self._recorder.stop()
+        if meta is None:
+            # Nothing running (e.g. double Stop): tell viewers so a stale
+            # panel resets instead of showing REC forever.
+            self._broadcast_text({"type": "record_status", "state": "idle"})
+            return
+        print("[preview] recording saved: %s — %d frames, %.1f s, %.1f MB%s"
+              % (meta["id"], meta["frames"], meta.get("duration", 0.0),
+                 meta["bytes"] / 1e6,
+                 " (%d DROPPED — disk too slow)" % meta["dropped"]
+                 if meta.get("dropped") else ""))
+        self._broadcast_text({"type": "record_status", "state": "saved",
+                              "recording": meta})
+        self._broadcast_text(self._recordings_message())
+
+    def _delete_recording(self, cmd):
+        if recording.delete_recording(self.recordings_dir, cmd.get("id")):
+            print("[preview] recording deleted: %s" % cmd.get("id"))
+        self._broadcast_text(self._recordings_message())
 
     # --- viewer-driven calibration sessions (Fine/Rough Align buttons) ---
 
@@ -945,6 +1113,10 @@ class PreviewServer:
                                     gravity,
                                     grid if self.send_grid else None)
                 self._broadcast(frame.sensor_id, out)
+                # Scene recording tee: the exact bytes every viewer gets, by
+                # reference — an O(1) enqueue when recording, one attribute
+                # read when not. Never blocks this node thread.
+                self._recorder.add_frame(out)
                 self.frames_relayed += 1
 
                 win["n"] += 1; win["pts"] += xyz.shape[0]; win["bytes"] += len(out)
@@ -1110,6 +1282,10 @@ def main():
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "
                          "can't render the textured mesh, only points")
+    ap.add_argument("--recordings-dir", default="recordings",
+                    help="where scene recordings (viewer Record button) are "
+                         "written and served from (HTTP GET /recordings on "
+                         "the ws port)")
     ap.add_argument("--rig-calib", default="rig_calib.json",
                     help="per-sensor rig extrinsics (from scripts/"
                          "calibrate_rig.py or the viewer's Align buttons); "
@@ -1137,7 +1313,8 @@ def main():
                            rig_calib=args.rig_calib,
                            pose_model=args.pose_model,
                            pose_trt=args.pose_trt,
-                           send_grid=not args.no_grid)
+                           send_grid=not args.no_grid,
+                           recordings_dir=args.recordings_dir)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

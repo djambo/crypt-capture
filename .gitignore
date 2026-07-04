@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 takes/
+recordings/         # scene recordings (viewer Record button; served over HTTP)
 *.glb
 *.ply
 calib.json          # per-device camera intrinsics (nodes now send them on connect)
