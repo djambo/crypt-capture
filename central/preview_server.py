@@ -338,6 +338,11 @@ class PreviewServer:
         # node threads or the other viewers, and concurrent writers can't
         # interleave bytes mid-frame.
         self._client_senders = {}           # conn -> ClientSender
+        # XR pose passthrough (viewer "vr space" feature): stable per-viewer
+        # ids stamped onto rebroadcast xr_pose messages, so receivers can key
+        # one remote-headset gizmo per presenting viewer.
+        self._xr_sids = {}                  # conn -> small int id
+        self._xr_sid_next = 0
         self._nodes = []                    # connected node TCP sockets
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
@@ -512,6 +517,9 @@ class PreviewServer:
         if not isinstance(cmd, dict):
             return
         name = cmd.get("cmd")
+        if name == "xr_pose":                  # viewer->viewers passthrough
+            self._relay_xr_pose(cmd, conn)
+            return
         if name in _RELAY_COMMANDS:            # handled here, not forwarded
             if name == "reload_rig_calib":
                 self._load_rig_calib(force=True)
@@ -541,6 +549,32 @@ class PreviewServer:
             self._send_text(conn, {"type": "cmd_error", "cmd": name,
                                    "error": "unknown command"})
 
+    def _relay_xr_pose(self, cmd, conn):
+        """Fan a presenting viewer's headset/controller pose out to every
+        OTHER viewer (docs/preview_protocol.md "XR pose passthrough"): the
+        VR browser samples its own WebXR devices in WORLD coordinates ~10 Hz
+        and sends {cmd:"xr_pose", ...}; everyone else draws a live headset
+        gizmo in the shared scene. Stateless besides a stable per-connection
+        id — no validation of the pose payload, the relay is a wire here.
+        The sender is excluded (it draws its own devices locally); receivers
+        hide a gizmo that stops updating (~2 s), so no "gone" message is
+        needed. TEXT frames are ordered+lossless per client; ~10 Hz of tiny
+        JSON is negligible next to the cloud stream."""
+        msg = dict(cmd)
+        msg.pop("cmd", None)
+        msg["type"] = "xr_pose"
+        with self._lock:
+            if conn is not None and conn not in self._xr_sids:
+                self._xr_sids[conn] = self._xr_sid_next
+                self._xr_sid_next += 1
+            msg["sid"] = self._xr_sids.get(conn, -1)
+            senders = [s for c, s in self._client_senders.items()
+                       if c is not conn]
+        frame = websocket.encode_frame(json.dumps(msg).encode("utf-8"),
+                                       opcode=websocket.OP_TEXT)
+        for sender in senders:
+            sender.put_text(frame)
+
     def send_to_nodes(self, cmd):
         """Send a control command to every connected node. Returns count sent."""
         data = control.encode(cmd)
@@ -559,6 +593,7 @@ class PreviewServer:
         with self._lock:
             if conn in self._clients:
                 self._clients.remove(conn)
+            self._xr_sids.pop(conn, None)
             sender = self._client_senders.pop(conn, None)
         if sender is not None:
             sender.close()

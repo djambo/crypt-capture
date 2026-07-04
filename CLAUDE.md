@@ -503,6 +503,15 @@ Two repos:
   viewer record→list→play→loop verified in headless Chromium). NB this is
   the wire-stream recorder (preview-resolution); M3's node-local
   full-fidelity record/download is still separate/future.
+- ✅ **XR pose passthrough (2026-07-04)** — `{"cmd":"xr_pose", head, ctl,
+  rect}` from a presenting viewer is rebroadcast by the relay as
+  `{"type":"xr_pose", sid, …}` TEXT to every OTHER viewer (sender excluded;
+  `sid` = stable per-connection id, freed on drop), so any desktop viewer
+  draws a live headset/controller/play-area gizmo of whoever is in VR (the
+  crypt panel's "vr space" section — its sliders reposition the VR tracking
+  space on the viewer's camera rig, all viewer-side). Relay is a stateless
+  wire here; ~10 Hz tiny JSON on the ordered TEXT path. Spec entry in
+  `docs/crypt_viewer_updates.md`; unit-tested (`tests/test_xr_pose.py`).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

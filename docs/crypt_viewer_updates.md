@@ -11,6 +11,30 @@
 > Star, base `CPV1` spec, v0 viewer sketch) was delivered separately as your
 > initial `CLAUDE.md`; these entries amend it.
 
+## 2026-07-04 — XR pose passthrough (`xr_pose`)
+**Status: applied 2026-07-04 (both sides built together — viewer already
+consumes this).**
+
+The relay now fans a presenting viewer's headset/controller pose out to every
+OTHER connected viewer, so a laptop operator can watch the VR headset move
+through the shared scene live (the crypt panel's new **vr space** section).
+
+- **Viewer → relay:** send TEXT `{"cmd":"xr_pose", head:{p:[x,y,z],
+  q:[x,y,z,w]}, ctl:[{p:[…]}|null, …], rect:[[x,y,z]×N]}` at ~10 Hz while
+  presenting. All coordinates are WORLD space (after the sender's own rig
+  transform); `rect` is the play-area outline.
+- **Relay → other viewers:** the same payload rebroadcast as
+  `{"type":"xr_pose", "sid":N, …}` — `sid` is a stable small int per sender
+  connection, so receivers key one remote-headset gizmo per presenting
+  viewer. The sender is excluded (it draws its own devices locally).
+- The relay is stateless here (no validation, no persistence); receivers hide
+  a gizmo ~2 s after its messages stop, so there is no "gone" message.
+- Old relay + new viewer: `xr_pose` triggers the standard `cmd_error` NACK —
+  harmless (the viewer only loses remote-headset display). New relay + old
+  viewer: unknown TEXT types were always ignored.
+
+Tests: `python3 -m tests.test_xr_pose`.
+
 ## How to use this file (note)
 Two recent server-side fixes need **no viewer change** — they just make the
 points correct: (a) **lens-distortion correction** (the relay now undistorts via
