@@ -214,20 +214,25 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None):
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
-    payload = header + np.ascontiguousarray(xyz, dtype="<f4").tobytes()
+    # Collect the blocks and join ONCE. A chain of `payload += chunk` reallocates
+    # and copies the whole growing buffer at every step (O(n²) memory traffic —
+    # ~4 MB xyz + ~1 MB grid copied several times on a full cloud); b"".join does
+    # a single allocation of the final size and copies each chunk in exactly
+    # once. Byte-for-byte identical output (order preserved).
+    parts = [header, np.ascontiguousarray(xyz, dtype="<f4").tobytes()]
     if rgb is not None:
-        payload += np.ascontiguousarray(rgb, dtype=np.uint8).tobytes()
+        parts.append(np.ascontiguousarray(rgb, dtype=np.uint8).tobytes())
     if gravity is not None:                  # trailing 12-byte block (after rgb)
-        payload += np.asarray(gravity, dtype="<f4").tobytes()
+        parts.append(np.asarray(gravity, dtype="<f4").tobytes())
     if grid is not None:
         # Depth-grid connectivity (FLAG_GRID, LAST block so older viewers just
         # ignore the trailing bytes): u16 grid_w, u16 grid_h, then count × u32
         # row-major linear index into that grid (same order as positions). The
         # viewer re-meshes neighbouring grid pixels into triangles from this.
         grid_w, grid_h, indices = grid
-        payload += struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF)
-        payload += np.ascontiguousarray(indices, dtype="<u4").tobytes()
-    return payload
+        parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
+        parts.append(np.ascontiguousarray(indices, dtype="<u4").tobytes())
+    return b"".join(parts)
 
 
 # Central-side pose (docs/skeleton_pose.md): how long after a node's own CPOS

@@ -129,9 +129,12 @@ def encode_frame(payload, opcode=OP_BINARY, mask=False):
         key = os.urandom(4)
         out += key
         out += bytes(b ^ key[i & 3] for i, b in enumerate(payload))
-    else:
-        out += payload
-    return bytes(out)
+        return bytes(out)
+    # Server→client (the point-cloud path): `out` is just the 2–10 byte header.
+    # Concatenate the (multi-MB) payload ONCE. The old `out += payload;
+    # bytes(out)` copied the whole payload twice — up to ~17 MB × 2 per frame at
+    # 720p; a single `bytes(out) + payload` copies it once.
+    return bytes(out) + payload
 
 
 def read_frame(sock):

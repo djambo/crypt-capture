@@ -514,6 +514,39 @@ Two repos:
   (`tests/test_ingest_freshness.py`: freshest-survives + recording-keeps-all;
   `tests/test_relay_workers.py`: parallel == sequential bytes) + E2E
   (sim→relay→client with `--workers 4`).
+- ✅ **Relay zero-waste frame assembly + measured full-cloud budget
+  (2026-07-05)** — a hot-path microbench (full un-subtracted frame, per stage,
+  1 core, on a 2.8 GHz Xeon) to see what REALLY caps full-cloud fps. Two safe,
+  byte-identical relay-only copies removed: `build_message` now `b"".join`s the
+  blocks instead of a `payload += chunk` chain (each `+=` reallocated+copied the
+  whole growing buffer — O(n²) traffic; 2.6→1.2 ms NFOV, 9.7→6.2 ms 720p), and
+  `websocket.encode_frame` concatenates the multi-MB payload ONCE instead of
+  `out += payload; bytes(out)` copying it twice (**19→3 ms at 720p**, 1→0.5 ms
+  NFOV). Both come straight off the per-sensor reader-thread budget; all
+  relay/grid/recording tests stay green (output unchanged). **The measured
+  headline: full cloud has TWO independent walls, and for the "30 fps full cloud,
+  no bg" goal the WIRE binds first, not relay CPU.**
+  *Wire:* CPV1 is 19 B/pt uncompressed (12 xyz f32 + 3 rgb + 4 grid u32) →
+  **~1.6 Gbit/s per sensor** (NFOV 640×576 full, ~358 k pts) to **~4 Gbit/s**
+  (720p depth_to_color, ~890 k pts). One full-cloud sensor already exceeds a
+  gigabit LAN; 3 cams full-cloud ≈ 5 Gbit/s — unreachable without 10 GbE or wire
+  compression. This is exactly why background subtraction (~25 k pts ≈ 114
+  Mbit/s) "just works" and full cloud doesn't — it's physics on the wire, no
+  relay-CPU fix reaches it. *Relay CPU:* the per-sensor reader-thread SERIAL
+  chain (rvl.decompress + temporal denoise + color-grid — all must stay ordered)
+  is ~38 ms NFOV / ~120 ms 720p on that Xeon → a **single sensor caps ~26 fps
+  NFOV even with infinite --workers**; `rvl.decompress` alone is ~24 ms (the
+  single biggest stage, and NOT pooled — deliberately left untouched, it's
+  bit-identical-tested). Each sensor has its own reader thread so N cams
+  parallelize across cores; the shared pool only speeds the stateless
+  unproject+build tail. Practical levers documented for the operator: **run the
+  realistic (background-subtracted) mode** — it fits gigabit and scales to 3
+  cams trivially; for a full-cloud test add `--no-temporal-denoise` (drops ~7 ms
+  NFOV / ~22 ms 720p off the serial chain) and `--workers` on a many-core box.
+  ⏳ The real full-cloud unlock (if ever needed for VR environment capture) is a
+  **CPV2 wire format**: int16-quantized positions (12→6 B) + a valid-mask
+  BITMAP instead of the u32 grid indices (4 B/pt → ~0.13 B/pt on a full frame)
+  ≈ 9 B/pt (−52 %) — a coordinated crypt-viewer change, not yet built.
 - ✅ **Scene recording + in-scene playback (2026-07-04)** — the "hit Record on
   a running scene" milestone (`central/recording.py` + relay wiring; spec in
   `docs/preview_protocol.md` "Scene recording"). `record_start`/`record_stop`
