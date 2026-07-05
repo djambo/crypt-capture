@@ -28,6 +28,7 @@ import argparse
 import collections
 import json
 import math
+import select
 import socket
 import struct
 import threading
@@ -1062,62 +1063,90 @@ class PreviewServer:
         self._ray[sensor_id] = (full_w, full_h, rx, ry)
         return rx, ry
 
+    def _handle_node_control(self, kind, payload):
+        """Apply a non-frame node->central message (intrinsics / IMU gravity /
+        pose keypoints / grid->depth extrinsic). Extracted so BOTH the main read
+        loop and the drop-stale ingest drain can apply it — a control message
+        sitting in a skipped backlog must still take effect, in order."""
+        if kind == "calib":
+            sid = payload["sensor_id"]
+            self._sensor_intr[sid] = (
+                payload["fx"], payload["fy"], payload["cx"],
+                payload["cy"], payload.get("dist", (0.0,) * 8))
+            self._ray.pop(sid, None)        # rebuild ray table on next frame
+            d = payload.get("dist", (0.0,) * 8)
+            print("[preview] sensor %d intrinsics from node: "
+                  "fx=%.1f fy=%.1f cx=%.1f cy=%.1f dist=[%s]" % (
+                      sid, payload["fx"], payload["fy"],
+                      payload["cx"], payload["cy"],
+                      " ".join("%.3f" % c for c in d)))
+        elif kind == "imu":
+            sid = payload["sensor_id"]
+            g = gravity_to_view(payload["gravity"])
+            self._sensor_gravity[sid] = g
+            print("[preview] sensor %d gravity(view) = %s" % (
+                sid, None if g is None else
+                "(%.3f, %.3f, %.3f)" % g))
+        elif kind == "pose":
+            # Node-side pose wins: seeing CPOS suppresses the central
+            # fallback worker for this sensor (NODE_POSE_QUIET_S).
+            self._node_pose_seen[payload["sensor_id"]] = time.time()
+            self._on_pose(payload)
+        elif kind == "extrinsic":
+            sid = payload["sensor_id"]
+            R = np.asarray(payload["R"], dtype=np.float32).reshape(3, 3)
+            t = np.asarray(payload["t"], dtype=np.float32)
+            # Skip the transform when it's identity+zero (color_to_depth),
+            # so the default path stays a pure no-op.
+            if np.allclose(R, np.eye(3), atol=1e-6) and \
+                    np.allclose(t, 0.0, atol=1e-6):
+                self._sensor_extrinsic[sid] = None
+            else:
+                self._sensor_extrinsic[sid] = (R, t)
+            print("[preview] sensor %d grid->depth extrinsic %s" % (
+                sid, "identity" if self._sensor_extrinsic[sid] is None
+                else "set (registers to depth frame)"))
+
     def _serve_node(self, conn, addr):
         print("[preview] node connected %s" % (addr[0],))
         with self._lock:
             self._nodes.append(conn)
-        win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0}   # throughput log
+        win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}   # throughput log
         try:
             while True:
                 msg = read_message(conn)
                 if msg is None:
                     break
                 kind, payload = msg
-                if kind == "calib":
-                    sid = payload["sensor_id"]
-                    self._sensor_intr[sid] = (
-                        payload["fx"], payload["fy"], payload["cx"],
-                        payload["cy"], payload.get("dist", (0.0,) * 8))
-                    self._ray.pop(sid, None)        # rebuild ray table on next frame
-                    d = payload.get("dist", (0.0,) * 8)
-                    print("[preview] sensor %d intrinsics from node: "
-                          "fx=%.1f fy=%.1f cx=%.1f cy=%.1f dist=[%s]" % (
-                              sid, payload["fx"], payload["fy"],
-                              payload["cx"], payload["cy"],
-                              " ".join("%.3f" % c for c in d)))
-                    continue
-                if kind == "imu":
-                    sid = payload["sensor_id"]
-                    g = gravity_to_view(payload["gravity"])
-                    self._sensor_gravity[sid] = g
-                    print("[preview] sensor %d gravity(view) = %s" % (
-                        sid, None if g is None else
-                        "(%.3f, %.3f, %.3f)" % g))
-                    continue
-                if kind == "pose":
-                    # Node-side pose wins: seeing CPOS suppresses the central
-                    # fallback worker for this sensor (NODE_POSE_QUIET_S).
-                    self._node_pose_seen[payload["sensor_id"]] = time.time()
-                    self._on_pose(payload)
-                    continue
-                if kind == "extrinsic":
-                    sid = payload["sensor_id"]
-                    R = np.asarray(payload["R"], dtype=np.float32).reshape(3, 3)
-                    t = np.asarray(payload["t"], dtype=np.float32)
-                    # Skip the transform when it's identity+zero (color_to_depth),
-                    # so the default path stays a pure no-op.
-                    if np.allclose(R, np.eye(3), atol=1e-6) and \
-                            np.allclose(t, 0.0, atol=1e-6):
-                        self._sensor_extrinsic[sid] = None
-                    else:
-                        self._sensor_extrinsic[sid] = (R, t)
-                    print("[preview] sensor %d grid->depth extrinsic %s" % (
-                        sid, "identity" if self._sensor_extrinsic[sid] is None
-                        else "set (registers to depth frame)"))
+                if kind != "frame":
+                    self._handle_node_control(kind, payload)
                     continue
                 frame = payload
                 if not frame.depth_rvl:
                     continue
+                # Freshness on ingest — the fix for "slow motion" on a relay that
+                # can't keep up: when the relay processes frames slower than the
+                # node sends them, frames pile up in the socket buffer and
+                # read_message would grind through the backlog OLDEST-first, so
+                # the viewer plays an ever-growing delay (time dilation) even at a
+                # healthy recv fps. Instead, if more frames are already queued,
+                # skip straight to the FRESHEST and drop the stale ones — the
+                # node pipeline's "freshness beats completeness" rule applied to
+                # the relay's read side. Control messages in the backlog are still
+                # applied in order. Disabled while recording / calibrating, which
+                # must consume every frame.
+                if not (self._recorder.recording
+                        or self._calib_session is not None):
+                    while select.select((conn,), (), (), 0)[0]:
+                        nxt = read_message(conn)
+                        if nxt is None:
+                            break                       # node closed mid-drain
+                        nkind, npayload = nxt
+                        if nkind != "frame":
+                            self._handle_node_control(nkind, npayload)
+                        elif npayload.depth_rvl:
+                            win["drop"] += 1
+                            frame = npayload            # newer frame supersedes
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
                 if self._temporal_denoise is not None:
                     # BEFORE color/pose/unproject: every downstream consumer
@@ -1190,11 +1219,12 @@ class PreviewServer:
                     with self._lock:
                         nclients = len(self._clients)
                     print("[preview] sensor %d: %.1f fps in | %d pts | "
-                          "%.0f KB/f | %d viewer(s)" % (
+                          "%.0f KB/f | %d stale skipped | %d viewer(s)" % (
                               frame.sensor_id, win["n"] / dt,
                               win["pts"] // win["n"],
-                              win["bytes"] / win["n"] / 1024.0, nclients))
-                    win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0}
+                              win["bytes"] / win["n"] / 1024.0,
+                              win["drop"], nclients))
+                    win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}
         finally:
             with self._lock:
                 if conn in self._nodes:
