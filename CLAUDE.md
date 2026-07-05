@@ -513,7 +513,7 @@ Two repos:
   wire here; ~10 Hz tiny JSON on the ordered TEXT path. Spec entry in
   `docs/crypt_viewer_updates.md`; unit-tested (`tests/test_xr_pose.py`).
 - ✅ **Temporal depth denoise (2026-07-05, merged to main from
-  `experimental/temporal-depth-denoise`)** — still OPT-IN, off by default:
+  `experimental/temporal-depth-denoise`; ON BY DEFAULT since 2026-07-05)** —
   `central/temporal_denoise.py`, a per-pixel One-Euro low-pass filter over
   the raw depth grid, applied at the relay right after RVL decode and
   BEFORE unprojection/color-alignment/pose-lift — kills the ToF's per-pixel
@@ -525,11 +525,13 @@ Two repos:
   physical ray every frame — filtering keyed by pixel, before the valid-set
   is flattened into a point list, is filtering one signal over time (the
   flat XYZ list can't do this: index i is a different physical point every
-  frame as the mask shifts). **Relay-only, opt-in, off by default**
-  (`preview_server --temporal-denoise` [+ `--denoise-min-cutoff`
-  `--denoise-beta`]) — no node/protocol change, so it's a one-flag toggle
-  on the laptop while the Jetsons keep running untouched (exactly the
-  "quick swap" this was built for). The critical invariant — the filtered
+  frame as the mask shifts). **Relay-only, ON BY DEFAULT** (per-pixel over
+  time = a couple of vectorized passes, negligible fps cost, and it only
+  helps): `preview_server` runs it automatically; `--no-temporal-denoise`
+  turns it off, `--denoise-min-cutoff`/`--denoise-beta` tune it (the
+  `--temporal-denoise` flag is now a no-op kept for compat). No node/protocol
+  change, so it's a relay-only toggle while the Jetsons keep running
+  untouched. The critical invariant — the filtered
   depth's zero/non-zero mask must stay BYTE-IDENTICAL to the raw depth's,
   or `aligned_color_grid`'s RGB pairing silently breaks — is enforced
   explicitly and covered by a dedicated test. Unit-tested
@@ -543,6 +545,51 @@ Two repos:
   first estimate — no real noisy-Kinect data was available to tune
   against here, so expect to retune by eye once running against a real,
   noisy Kinect (⏳ open follow-up).
+- ✅ **Spatial (within-frame) depth denoise (2026-07-05)** — the COMPANION to
+  the temporal filter, also OPT-IN, off by default: `central/spatial_denoise.py`
+  (`SpatialDepthFilter`), an **edge-preserving bilateral** filter across
+  NEIGHBOURING depth pixels within one frame, applied at the relay right after
+  the temporal filter and BEFORE unprojection/color-alignment/pose-lift. The
+  two filters attack ToF noise on different axes: temporal smooths one pixel
+  *over time* (can't touch a single frame's spatial roughness → a still subject
+  still has a pebbled surface); spatial smooths *across pixels* within a frame
+  → flattens that grain immediately, even on the first frame / a subject that
+  never holds still. They compose (run either/both/neither). **Bilateral, not a
+  blur**: each neighbour is weighted by BOTH spatial closeness (Gaussian on
+  pixel distance) AND depth similarity (Gaussian on depth difference,
+  `sigma_depth` mm — the "range" term). The range term makes it edge-preserving
+  — same-surface neighbours differ by ToF jitter (a few mm) so they average and
+  the grain smooths out, but a silhouette (subject 1.2 m vs wall 2.5 m) is a
+  jump of hundreds of mm so those across-edge neighbours get ~zero weight and
+  are excluded → the edge stays crisp and no phantom mid-depth bridge points
+  appear (same principle as the viewer's `MeshCloud` `maxEdge` cut, but done at
+  the relay over the depth grid so the POINT render benefits too, and every
+  viewer/recording gets it for free). Doing it in DEPTH-GRID space (before the
+  flat point list) is what makes "neighbour" a cheap fixed array shift — no
+  KD-tree. **Stateless** (no per-sensor memory, unlike the temporal One-Euro →
+  a camera-mode switch just works). Preserves the same critical invariant: the
+  filtered depth's zero/non-zero mask stays BYTE-IDENTICAL to the raw (invalid
+  neighbours are missing measurements, excluded from every average; a valid
+  centre always keeps its self-weight so it can't collapse to 0). **Relay-only,
+  opt-in** (`preview_server --spatial-denoise` [+ `--spatial-radius` 1=3x3 /
+  2=5x5, `--spatial-sigma-depth` mm]) — one-flag toggle, no node/protocol
+  change. Unit-tested (`tests/test_spatial_denoise.py`: measured noise
+  reduction on a flat surface, edge preservation / no phantom bridge, hole-
+  neighbour exclusion, mask preservation across random frames, statelessness,
+  array-input from the temporal filter) + E2E (real `preview_server` + real
+  `sim_node`: point count identical on vs off, colour pairing intact).
+  **Perf** (it runs inline in the node handler thread, so its ms come straight
+  off relay fps): cost scales with GRID PIXELS SCANNED, not point count. The
+  range weight is computed in-place (reused scratch buffers, no per-offset
+  allocation) and the frame is CROPPED to the valid-pixel bounding box first,
+  so a background-subtracted subject (the intended target) is ~3 ms at
+  1280x720 r=1 — essentially free. A FULL un-subtracted environment frame is
+  the costly case (whole grid valid): ~13 ms at 640x576, ~45 ms at 1280x720
+  (r=2 ≈ 2.3x). So if full-room fps drops: turn on background subtraction
+  (biggest win, and the intended mode), keep r=1, or leave it off for the
+  setup/environment view. Defaults (`radius=1, sigma_depth=30 mm`) are a first
+  estimate — retune by eye against a real noisy Kinect (⏳ open follow-up, same
+  as temporal).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -648,7 +695,9 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
             BallTracker [continuous] + StationaryBallSampler [stop-and-go, default];
             + Tier-1 rough solve, rig_calib.json I/O),
             temporal_denoise.py (per-pixel One-Euro depth low-pass, opt-in
-            via --temporal-denoise, defaults still pending real-hardware tuning)
+            via --temporal-denoise, defaults still pending real-hardware tuning),
+            spatial_denoise.py (edge-preserving bilateral within-frame depth
+            smoothing, opt-in via --spatial-denoise; companion to temporal)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay),
@@ -663,7 +712,8 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_sender.py (per-viewer ClientSender mailbox),
             test_recording.py (CPR1 round-trip, non-blocking tee, HTTP endpoint),
             test_xr_pose.py (xr_pose passthrough fanout/sid),
-            test_temporal_denoise.py (EXPERIMENTAL per-pixel One-Euro depth filter)
+            test_temporal_denoise.py (EXPERIMENTAL per-pixel One-Euro depth filter),
+            test_spatial_denoise.py (EXPERIMENTAL edge-preserving bilateral depth filter)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
@@ -751,12 +801,23 @@ curl http://127.0.0.1:8080/recordings                        # same index, HTTP
 curl -O http://127.0.0.1:8080/recordings/<id>                # the CPR1 take
 python3 -m tests.test_recording
 
-# Temporal depth denoise (off by default — one flag toggles it, no node
-# change needed; defaults still pending eyes-on tuning on real hardware):
-python3 -m central.preview_server --temporal-denoise
+# Temporal depth denoise: ON BY DEFAULT (negligible fps cost, only helps).
+# The relay runs it automatically — no flag needed:
+python3 -m central.preview_server
+python3 -m central.preview_server --no-temporal-denoise   # turn it OFF
 #   tune: --denoise-min-cutoff 1.0 (lower = smoother at rest)
 #         --denoise-beta 0.01      (higher = less lag on real motion)
 python3 -m tests.test_temporal_denoise
+
+# Spatial (within-frame) depth denoise — edge-preserving bilateral, companion
+# to the temporal filter above; compose them or run either alone. Off by
+# default, one flag, no node change:
+python3 -m central.preview_server --spatial-denoise
+#   tune: --spatial-radius 1        (1 = 3x3 window, 2 = 5x5 = stronger)
+#         --spatial-sigma-depth 30  (mm edge threshold; lower protects finer
+#                                    edges, higher smooths harder)
+python3 -m central.preview_server --temporal-denoise --spatial-denoise  # both
+python3 -m tests.test_spatial_denoise
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

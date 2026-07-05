@@ -313,7 +313,7 @@ class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True, recordings_dir="recordings",
-                 temporal_denoise=None):
+                 temporal_denoise=None, spatial_denoise=None):
         self.calib = calib
         self.stride = stride
         # EXPERIMENTAL (central/temporal_denoise.py): per-pixel One-Euro
@@ -321,6 +321,12 @@ class PreviewServer:
         # ToF "vibrating points" jitter while staying responsive to real
         # motion. None = off (the default; --temporal-denoise enables it).
         self._temporal_denoise = temporal_denoise
+        # EXPERIMENTAL (central/spatial_denoise.py): edge-preserving bilateral
+        # smoothing ACROSS neighbouring pixels within one frame — flattens the
+        # per-frame ToF surface grain the temporal filter can't touch, without
+        # blurring across silhouette edges. Composes with the temporal filter
+        # (this runs after it). None = off (--spatial-denoise enables it).
+        self._spatial_denoise = spatial_denoise
         # 0 = uncapped (the default): full resolution for points AND mesh —
         # meshing is for the SUBJECT (a background-subtracted subject is tens
         # of k points), and a full-environment frame still holds interactive
@@ -1122,6 +1128,15 @@ class PreviewServer:
                     # raw frame (see temporal_denoise.py's module docstring).
                     depth = self._temporal_denoise.filter(
                         frame.sensor_id, depth, frame.width, frame.height)
+                if self._spatial_denoise is not None:
+                    # AFTER temporal, BEFORE color/pose/unproject — same
+                    # contract: one filtered depth frame feeds every downstream
+                    # consumer, with the exact same valid-pixel mask as the raw
+                    # frame (see spatial_denoise.py's module docstring). Returns
+                    # a uint16 (h,w) array; .filter accepts either bytes or the
+                    # temporal filter's array output.
+                    depth = self._spatial_denoise.filter(
+                        frame.sensor_id, depth, frame.width, frame.height)
                 # the node may have downsampled by frame.stride; the ray table is
                 # full-res, so derive the original dimensions.
                 ns = frame.stride or 1
@@ -1357,13 +1372,21 @@ def main():
                     help="prefer the TensorRT provider for --pose-model "
                          "(NVIDIA GPU on the central machine; CPU is fine "
                          "on x86 — ~25 ms/infer)")
-    ap.add_argument("--temporal-denoise", action="store_true",
-                    help="EXPERIMENTAL: per-pixel One-Euro low-pass over the "
-                         "raw depth grid (central/temporal_denoise.py), "
-                         "before unprojection — smooths the ToF's per-pixel "
-                         "'vibrating points' jitter while staying responsive "
-                         "to real motion. Relay-only (no node/protocol "
-                         "change); off by default")
+    # Temporal denoise is ON by default: it's per-pixel over time (a couple of
+    # vectorized passes, negligible fps cost) and only helps. --no-temporal-
+    # denoise turns it off; --temporal-denoise is kept as an explicit no-op.
+    ap.add_argument("--temporal-denoise", dest="temporal_denoise",
+                    action="store_true",
+                    help="per-pixel One-Euro low-pass over the raw depth grid "
+                         "(central/temporal_denoise.py), before unprojection — "
+                         "smooths the ToF's per-pixel 'vibrating points' jitter "
+                         "while staying responsive to real motion. Relay-only "
+                         "(no node/protocol change). ON BY DEFAULT (this flag "
+                         "is now a no-op; use --no-temporal-denoise to disable)")
+    ap.add_argument("--no-temporal-denoise", dest="temporal_denoise",
+                    action="store_false",
+                    help="disable the default-on temporal depth denoise")
+    ap.set_defaults(temporal_denoise=True)
     ap.add_argument("--denoise-min-cutoff", type=float, default=1.0,
                     help="temporal denoise: baseline smoothing (Hz) when a "
                          "pixel is static — lower = smoother at rest")
@@ -1371,15 +1394,42 @@ def main():
                     help="temporal denoise: how fast smoothing backs off as "
                          "a pixel starts moving — higher = less lag, less "
                          "denoising on slow motion")
+    ap.add_argument("--spatial-denoise", action="store_true",
+                    help="EXPERIMENTAL: edge-preserving bilateral smoothing "
+                         "ACROSS neighbouring depth pixels within each frame "
+                         "(central/spatial_denoise.py), before unprojection — "
+                         "flattens the ToF's per-frame surface grain the "
+                         "temporal filter can't touch, without blurring across "
+                         "silhouette edges. Composes with --temporal-denoise. "
+                         "Relay-only (no node/protocol change); off by default")
+    ap.add_argument("--spatial-radius", type=int, default=1,
+                    help="spatial denoise: half-window in pixels (1 = 3x3, "
+                         "2 = 5x5). Larger = stronger smoothing, more work")
+    ap.add_argument("--spatial-sigma-depth", type=float, default=30.0,
+                    help="spatial denoise: edge-preservation threshold in mm — "
+                         "neighbours whose depth differs by more than ~2-3x "
+                         "this are excluded from the average, so silhouettes "
+                         "stay crisp. Lower protects finer steps; higher "
+                         "smooths harder")
     args = ap.parse_args()
     denoise = None
     if args.temporal_denoise:
         from central.temporal_denoise import TemporalDepthFilter
         denoise = TemporalDepthFilter(min_cutoff=args.denoise_min_cutoff,
                                       beta=args.denoise_beta)
-        print("[preview] temporal denoise ON (min_cutoff=%.2f beta=%.3f) "
-              "— EXPERIMENTAL, see central/temporal_denoise.py" % (
+        print("[preview] temporal denoise ON (default; min_cutoff=%.2f "
+              "beta=%.3f) — --no-temporal-denoise to disable" % (
                   args.denoise_min_cutoff, args.denoise_beta))
+    else:
+        print("[preview] temporal denoise OFF (--no-temporal-denoise)")
+    spatial = None
+    if args.spatial_denoise:
+        from central.spatial_denoise import SpatialDepthFilter
+        spatial = SpatialDepthFilter(radius=args.spatial_radius,
+                                     sigma_depth=args.spatial_sigma_depth)
+        print("[preview] spatial denoise ON (radius=%d sigma_depth=%.1fmm) "
+              "— EXPERIMENTAL, see central/spatial_denoise.py" % (
+                  args.spatial_radius, args.spatial_sigma_depth))
     server = PreviewServer(calib=args.calib, stride=args.stride,
                            max_points=args.max_points,
                            rig_calib=args.rig_calib,
@@ -1387,7 +1437,8 @@ def main():
                            pose_trt=args.pose_trt,
                            send_grid=not args.no_grid,
                            recordings_dir=args.recordings_dir,
-                           temporal_denoise=denoise)
+                           temporal_denoise=denoise,
+                           spatial_denoise=spatial)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

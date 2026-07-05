@@ -31,11 +31,13 @@ EXPLICITLY (`np.where(valid, ...)` on the raw input mask) rather than
 relying on that, and every test in tests/test_temporal_denoise.py checks
 the mask directly.
 
-Status: EXPERIMENTAL, opt-in via `preview_server.py --temporal-denoise`
-(default OFF). Relay-only (central/preview_server.py) — no node or protocol
-change, so it can be toggled by restarting the relay on the laptop while
-the Jetson nodes keep running untouched. Defaults are a first estimate (no
-real noisy-Kinect data was available to tune against here) — expect to
+Status: ON BY DEFAULT (per-pixel over time is a couple of vectorized passes,
+negligible fps cost, and only helps). `preview_server.py` runs it
+automatically; `--no-temporal-denoise` turns it off (`--temporal-denoise` is
+now a no-op kept for compat). Relay-only (central/preview_server.py) — no node
+or protocol change, so it can be toggled by restarting the relay on the laptop
+while the Jetson nodes keep running untouched. Defaults are a first estimate
+(no real noisy-Kinect data was available to tune against here) — expect to
 retune --denoise-min-cutoff/--denoise-beta by eye once running on hardware.
 """
 
