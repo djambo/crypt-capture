@@ -1372,13 +1372,21 @@ def main():
                     help="prefer the TensorRT provider for --pose-model "
                          "(NVIDIA GPU on the central machine; CPU is fine "
                          "on x86 — ~25 ms/infer)")
-    ap.add_argument("--temporal-denoise", action="store_true",
-                    help="EXPERIMENTAL: per-pixel One-Euro low-pass over the "
-                         "raw depth grid (central/temporal_denoise.py), "
-                         "before unprojection — smooths the ToF's per-pixel "
-                         "'vibrating points' jitter while staying responsive "
-                         "to real motion. Relay-only (no node/protocol "
-                         "change); off by default")
+    # Temporal denoise is ON by default: it's per-pixel over time (a couple of
+    # vectorized passes, negligible fps cost) and only helps. --no-temporal-
+    # denoise turns it off; --temporal-denoise is kept as an explicit no-op.
+    ap.add_argument("--temporal-denoise", dest="temporal_denoise",
+                    action="store_true",
+                    help="per-pixel One-Euro low-pass over the raw depth grid "
+                         "(central/temporal_denoise.py), before unprojection — "
+                         "smooths the ToF's per-pixel 'vibrating points' jitter "
+                         "while staying responsive to real motion. Relay-only "
+                         "(no node/protocol change). ON BY DEFAULT (this flag "
+                         "is now a no-op; use --no-temporal-denoise to disable)")
+    ap.add_argument("--no-temporal-denoise", dest="temporal_denoise",
+                    action="store_false",
+                    help="disable the default-on temporal depth denoise")
+    ap.set_defaults(temporal_denoise=True)
     ap.add_argument("--denoise-min-cutoff", type=float, default=1.0,
                     help="temporal denoise: baseline smoothing (Hz) when a "
                          "pixel is static — lower = smoother at rest")
@@ -1409,9 +1417,11 @@ def main():
         from central.temporal_denoise import TemporalDepthFilter
         denoise = TemporalDepthFilter(min_cutoff=args.denoise_min_cutoff,
                                       beta=args.denoise_beta)
-        print("[preview] temporal denoise ON (min_cutoff=%.2f beta=%.3f) "
-              "— EXPERIMENTAL, see central/temporal_denoise.py" % (
+        print("[preview] temporal denoise ON (default; min_cutoff=%.2f "
+              "beta=%.3f) — --no-temporal-denoise to disable" % (
                   args.denoise_min_cutoff, args.denoise_beta))
+    else:
+        print("[preview] temporal denoise OFF (--no-temporal-denoise)")
     spatial = None
     if args.spatial_denoise:
         from central.spatial_denoise import SpatialDepthFilter

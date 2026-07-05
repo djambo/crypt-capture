@@ -21,13 +21,15 @@ Status markers: ✅ done · 🧪 experimental (branch, not merged) · 💡 idea 
 
 ## Per-sensor cleanup (single camera, before or independent of fusion)
 
-### ✅ Temporal denoise (done, merged to main — still opt-in)
+### ✅ Temporal denoise (done, merged to main — ON BY DEFAULT)
 `central/temporal_denoise.py` (see this repo's CLAUDE.md "Current status"
 entry for full detail). Per-pixel One-Euro low-pass over
 the raw depth grid, applied right after RVL decode and before unprojection:
 kills the ToF's per-pixel jitter ("every point is vibrating", worst in VR)
-while staying responsive to real motion. Opt-in via `--temporal-denoise`;
-defaults (`min_cutoff=1.0`, `beta=0.01`) are a first estimate pending
+while staying responsive to real motion. **On by default** (per-pixel over
+time = a couple of vectorized passes, negligible fps cost, and only helps);
+`--no-temporal-denoise` disables it, `--denoise-min-cutoff`/`--denoise-beta`
+tune it. Defaults (`min_cutoff=1.0`, `beta=0.01`) are a first estimate pending
 eyes-on tuning against a real (not simulated) noisy Kinect.
 
 ### ✅ Spatial (within-frame) depth smoothing (done, opt-in)

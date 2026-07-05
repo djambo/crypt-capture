@@ -513,7 +513,7 @@ Two repos:
   wire here; ~10 Hz tiny JSON on the ordered TEXT path. Spec entry in
   `docs/crypt_viewer_updates.md`; unit-tested (`tests/test_xr_pose.py`).
 - ✅ **Temporal depth denoise (2026-07-05, merged to main from
-  `experimental/temporal-depth-denoise`)** — still OPT-IN, off by default:
+  `experimental/temporal-depth-denoise`; ON BY DEFAULT since 2026-07-05)** —
   `central/temporal_denoise.py`, a per-pixel One-Euro low-pass filter over
   the raw depth grid, applied at the relay right after RVL decode and
   BEFORE unprojection/color-alignment/pose-lift — kills the ToF's per-pixel
@@ -525,11 +525,13 @@ Two repos:
   physical ray every frame — filtering keyed by pixel, before the valid-set
   is flattened into a point list, is filtering one signal over time (the
   flat XYZ list can't do this: index i is a different physical point every
-  frame as the mask shifts). **Relay-only, opt-in, off by default**
-  (`preview_server --temporal-denoise` [+ `--denoise-min-cutoff`
-  `--denoise-beta`]) — no node/protocol change, so it's a one-flag toggle
-  on the laptop while the Jetsons keep running untouched (exactly the
-  "quick swap" this was built for). The critical invariant — the filtered
+  frame as the mask shifts). **Relay-only, ON BY DEFAULT** (per-pixel over
+  time = a couple of vectorized passes, negligible fps cost, and it only
+  helps): `preview_server` runs it automatically; `--no-temporal-denoise`
+  turns it off, `--denoise-min-cutoff`/`--denoise-beta` tune it (the
+  `--temporal-denoise` flag is now a no-op kept for compat). No node/protocol
+  change, so it's a relay-only toggle while the Jetsons keep running
+  untouched. The critical invariant — the filtered
   depth's zero/non-zero mask must stay BYTE-IDENTICAL to the raw depth's,
   or `aligned_color_grid`'s RGB pairing silently breaks — is enforced
   explicitly and covered by a dedicated test. Unit-tested
@@ -799,9 +801,10 @@ curl http://127.0.0.1:8080/recordings                        # same index, HTTP
 curl -O http://127.0.0.1:8080/recordings/<id>                # the CPR1 take
 python3 -m tests.test_recording
 
-# Temporal depth denoise (off by default — one flag toggles it, no node
-# change needed; defaults still pending eyes-on tuning on real hardware):
-python3 -m central.preview_server --temporal-denoise
+# Temporal depth denoise: ON BY DEFAULT (negligible fps cost, only helps).
+# The relay runs it automatically — no flag needed:
+python3 -m central.preview_server
+python3 -m central.preview_server --no-temporal-denoise   # turn it OFF
 #   tune: --denoise-min-cutoff 1.0 (lower = smoother at rest)
 #         --denoise-beta 0.01      (higher = less lag on real motion)
 python3 -m tests.test_temporal_denoise
