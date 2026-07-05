@@ -633,7 +633,10 @@ docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
             crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
-            crypt_viewer_updates.md (ongoing one-way change log for the viewer), jetson_setup.md
+            crypt_viewer_updates.md (ongoing one-way change log for the viewer),
+            kinect_data_improvements.md (catalog of relay post-processing ideas:
+            per-sensor cleanup, seam/fusion quality, recording-only heavy passes —
+            come back to it before starting new data-quality work), jetson_setup.md
 takes/      recordings (gitignored)
 ```
 The browser **viewer is NOT here** — it lives in the `crypt` repo and consumes
