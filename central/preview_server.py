@@ -1344,11 +1344,24 @@ class PreviewServer:
                 else:
                     # Parallel path: fan the heavy stateless stage (unproject +
                     # build) across the pool so one sensor uses multiple cores.
-                    # Retire IN ORDER with a bounded window so latency stays
-                    # fixed (drop-stale above keeps the INPUT fresh) and the
-                    # recording tee stays ordered.
                     inflight.append(
                         (frame, pool.submit(self._finish_frame, *job)))
+                    # LATENCY-ADAPTIVE retirement (still strictly in order): emit
+                    # every frame whose future is ALREADY done. When the pool
+                    # keeps up (a light subtracted subject, or a fast box), the
+                    # previous frame finishes during the ~33 ms socket wait for
+                    # the next, so this emits it within ~1 frame — instead of
+                    # always holding workers-1 frames, which on `--workers auto`
+                    # (4-8) added ~100-260 ms of pure latency (the cloud visibly
+                    # lagging the dead-reckoned skeleton). drop-stale keeps the
+                    # INPUT fresh; this keeps the OUTPUT prompt.
+                    while inflight and inflight[0][1].done():
+                        f0, fut0 = inflight.popleft()
+                        o0, n0, _ = fut0.result()
+                        win = self._emit(f0, o0, n0, win)
+                    # Throughput mode: only BLOCK when the window is full, i.e.
+                    # the pool is the real bottleneck (heavy full-room stream) —
+                    # then buffering up to `workers` keeps every core fed.
                     while len(inflight) >= self.workers:
                         f0, fut0 = inflight.popleft()
                         o0, n0, _ = fut0.result()

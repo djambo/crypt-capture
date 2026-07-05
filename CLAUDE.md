@@ -574,6 +574,25 @@ Two repos:
   full-cloud is ever needed on <2.5 GbE: per-client format negotiation (mixed
   old/new viewers) and/or shipping quantised DEPTH + intrinsics so the browser
   unprojects (≈5 B/pt).
+- ✅ **Relay latency-adaptive frame retirement (2026-07-05)** — the parallel
+  `--workers` path used to hold `workers-1` frames in flight before emitting the
+  oldest, so on `--workers auto` (4-8) it added **~100-260 ms of pure latency**
+  to the cloud even when the pool had headroom (a light single-camera subtracted
+  subject) — the cloud visibly lagging behind the viewer's dead-reckoned
+  (motion-predicted) skeleton. Fixed in `_serve_node`: after each submit, emit
+  every future that is ALREADY `.done()` (strictly in order) BEFORE the
+  window-full block, so when per-frame work < the ~33 ms inter-frame gap the
+  previous frame retires within ~1 frame; the `len(inflight) >= workers` block
+  now only kicks in when the pool is the real bottleneck (heavy full-room),
+  preserving throughput mode. Output bytes/order unchanged (drop-stale still
+  keeps the INPUT fresh; this keeps the OUTPUT prompt). Measured: workers=6,
+  light 3 ms stage @30 fps → mean emit latency 168 → 34 ms. NB the cloud is
+  still capped at the Kinect's **30 fps** and, unlike the skeleton, is NOT
+  motion-predicted (a point cloud has no per-point identity across frames to
+  extrapolate — that needs template/mesh tracking, approach C), so the skeleton
+  will always *lead* on fast motion; this removes the avoidable relay latency,
+  not that inherent asymmetry. `tests/test_relay_workers.py` (parallel ==
+  sequential bytes) + `tests/test_ingest_freshness.py` still green.
 - ✅ **Scene recording + in-scene playback (2026-07-04)** — the "hit Record on
   a running scene" milestone (`central/recording.py` + relay wiring; spec in
   `docs/preview_protocol.md` "Scene recording"). `record_start`/`record_stop`
