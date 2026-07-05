@@ -512,8 +512,8 @@ Two repos:
   space on the viewer's camera rig, all viewer-side). Relay is a stateless
   wire here; ~10 Hz tiny JSON on the ordered TEXT path. Spec entry in
   `docs/crypt_viewer_updates.md`; unit-tested (`tests/test_xr_pose.py`).
-- 🧪 **EXPERIMENTAL — temporal depth denoise (2026-07-05, branch
-  `experimental/temporal-depth-denoise`, NOT merged to main)**:
+- ✅ **Temporal depth denoise (2026-07-05, merged to main from
+  `experimental/temporal-depth-denoise`)** — still OPT-IN, off by default:
   `central/temporal_denoise.py`, a per-pixel One-Euro low-pass filter over
   the raw depth grid, applied at the relay right after RVL decode and
   BEFORE unprojection/color-alignment/pose-lift — kills the ToF's per-pixel
@@ -541,9 +541,8 @@ Two repos:
   frames: identical point counts/fps with the flag on vs off, zero
   RGB/depth count mismatches). Defaults (`min_cutoff=1.0, beta=0.01`) are a
   first estimate — no real noisy-Kinect data was available to tune
-  against here, so expect to retune by eye on real hardware. Merge to
-  main once it's been eyeballed on a real Kinect and the constants feel
-  right.
+  against here, so expect to retune by eye once running against a real,
+  noisy Kinect (⏳ open follow-up).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -648,8 +647,8 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
             [largest spherical cluster] + sphere fit + robust Kabsch [RANSAC];
             BallTracker [continuous] + StationaryBallSampler [stop-and-go, default];
             + Tier-1 rough solve, rig_calib.json I/O),
-            temporal_denoise.py (EXPERIMENTAL, branch experimental/temporal-
-            depth-denoise: per-pixel One-Euro depth low-pass, --temporal-denoise)
+            temporal_denoise.py (per-pixel One-Euro depth low-pass, opt-in
+            via --temporal-denoise, defaults still pending real-hardware tuning)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay),
@@ -752,8 +751,8 @@ curl http://127.0.0.1:8080/recordings                        # same index, HTTP
 curl -O http://127.0.0.1:8080/recordings/<id>                # the CPR1 take
 python3 -m tests.test_recording
 
-# EXPERIMENTAL temporal depth denoise (branch experimental/temporal-depth-
-# denoise, off by default — one flag toggles it, no node change needed):
+# Temporal depth denoise (off by default — one flag toggles it, no node
+# change needed; defaults still pending eyes-on tuning on real hardware):
 python3 -m central.preview_server --temporal-denoise
 #   tune: --denoise-min-cutoff 1.0 (lower = smoother at rest)
 #         --denoise-beta 0.01      (higher = less lag on real motion)

@@ -21,10 +21,9 @@ Status markers: ✅ done · 🧪 experimental (branch, not merged) · 💡 idea 
 
 ## Per-sensor cleanup (single camera, before or independent of fusion)
 
-### ✅ Temporal denoise (done, experimental)
-`central/temporal_denoise.py`, branch `experimental/temporal-depth-denoise`
-(not yet merged to main — see that branch's commit + this repo's CLAUDE.md
-"Current status" entry for full detail). Per-pixel One-Euro low-pass over
+### ✅ Temporal denoise (done, merged to main — still opt-in)
+`central/temporal_denoise.py` (see this repo's CLAUDE.md "Current status"
+entry for full detail). Per-pixel One-Euro low-pass over
 the raw depth grid, applied right after RVL decode and before unprojection:
 kills the ToF's per-pixel jitter ("every point is vibrating", worst in VR)
 while staying responsive to real motion. Opt-in via `--temporal-denoise`;
