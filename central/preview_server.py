@@ -29,6 +29,7 @@ import collections
 import json
 import math
 import select
+from concurrent.futures import ThreadPoolExecutor
 import socket
 import struct
 import threading
@@ -314,9 +315,18 @@ class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True, recordings_dir="recordings",
-                 temporal_denoise=None, spatial_denoise=None):
+                 temporal_denoise=None, spatial_denoise=None, workers=1):
         self.calib = calib
         self.stride = stride
+        # Per-sensor CPU parallelism for the relay's heavy STATELESS stage
+        # (unproject + build_message). 1 = the classic single-threaded reader
+        # (default, unchanged). >1 fans that stage across a thread pool so ONE
+        # sensor's stream can use more than one core on a slow/older central
+        # machine (the decode + temporal/spatial denoise stay ordered on the
+        # reader thread). numpy releases the GIL during the big array ops, so
+        # threads scale here; frames retire in order with a bounded window, so
+        # latency stays fixed and the recording tee stays ordered.
+        self.workers = max(1, int(workers))
         # EXPERIMENTAL (central/temporal_denoise.py): per-pixel One-Euro
         # low-pass over the raw depth grid, before unprojection — kills the
         # ToF "vibrating points" jitter while staying responsive to real
@@ -1063,6 +1073,53 @@ class PreviewServer:
         self._ray[sensor_id] = (full_w, full_h, rx, ry)
         return rx, ry
 
+    def _finish_frame(self, frame, depth, ns, ray_x, ray_y, cgrid,
+                      extrinsic, rig, gravity):
+        """Heavy STATELESS stage: unproject -> per-sensor rig transform ->
+        CPV1 message bytes. Pure w.r.t. shared mutable state (reads only its
+        args + immutable config), so it runs safely in a --workers thread pool.
+        Returns (out_bytes, npoints, xyz)."""
+        # max_points is enforced INSIDE unproject by coarsening the sampling
+        # stride (grid stays coherent), not a point-wise trim (that punched
+        # periodic holes — gap stripes / an empty mesh in depth_to_color).
+        xyz, rgb, grid = unproject(depth, frame.width, frame.height,
+                                   ray_x, ray_y, self.stride, ns,
+                                   cgrid, extrinsic, max_points=self.max_points)
+        # Rig extrinsic: P_world = R·P + t per sensor, so one canonical world
+        # frame goes out on the wire. Gravity rides the same frame, so it rotates.
+        if rig is not None:
+            R, t = rig
+            xyz = xyz.dot(R.T) + t
+            if gravity is not None:
+                g = R.dot(np.asarray(gravity, dtype=np.float32))
+                gravity = (float(g[0]), float(g[1]), float(g[2]))
+        out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb, gravity,
+                            grid if self.send_grid else None)
+        return out, xyz.shape[0], xyz
+
+    def _emit(self, frame, out, npts, win):
+        """Broadcast one finished CPV1 frame to viewers, tee it to any active
+        recording, and update/print the per-sensor throughput window. Returns
+        the (possibly reset) window dict."""
+        self._broadcast(frame.sensor_id, out)
+        # Scene recording tee: the exact bytes every viewer gets, by reference —
+        # O(1) enqueue when recording, one attribute read when not. Never blocks.
+        self._recorder.add_frame(out)
+        self.frames_relayed += 1
+        win["n"] += 1; win["pts"] += npts; win["bytes"] += len(out)
+        if win["n"] >= 30:
+            dt = max(1e-6, time.time() - win["t"])
+            with self._lock:
+                nclients = len(self._clients)
+            print("[preview] sensor %d: %.1f fps in | %d pts | "
+                  "%.0f KB/f | %d stale skipped | %d viewer(s)" % (
+                      frame.sensor_id, win["n"] / dt,
+                      win["pts"] // win["n"],
+                      win["bytes"] / win["n"] / 1024.0,
+                      win["drop"], nclients))
+            win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}
+        return win
+
     def _handle_node_control(self, kind, payload):
         """Apply a non-frame node->central message (intrinsics / IMU gravity /
         pose keypoints / grid->depth extrinsic). Extracted so BOTH the main read
@@ -1112,6 +1169,9 @@ class PreviewServer:
         with self._lock:
             self._nodes.append(conn)
         win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}   # throughput log
+        pool = (ThreadPoolExecutor(max_workers=self.workers)
+                if self.workers > 1 else None)
+        inflight = collections.deque()   # (frame, future) in submission order
         try:
             while True:
                 msg = read_message(conn)
@@ -1148,26 +1208,19 @@ class PreviewServer:
                             win["drop"] += 1
                             frame = npayload            # newer frame supersedes
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
+                # Decode + denoise stay on THIS thread, in order: the temporal
+                # filter is stateful per pixel over time, and every downstream
+                # consumer (color pairing, unproject grid, pose lift) must read
+                # the SAME filtered depth with the exact same valid-pixel mask.
                 if self._temporal_denoise is not None:
-                    # BEFORE color/pose/unproject: every downstream consumer
-                    # (aligned_color_grid's RGB pairing, unproject's grid
-                    # indices, the central pose lift) reads the SAME filtered
-                    # array, so they all see one consistent, less-jittery
-                    # depth frame with the exact same valid-pixel mask as the
-                    # raw frame (see temporal_denoise.py's module docstring).
                     depth = self._temporal_denoise.filter(
                         frame.sensor_id, depth, frame.width, frame.height)
                 if self._spatial_denoise is not None:
-                    # AFTER temporal, BEFORE color/pose/unproject — same
-                    # contract: one filtered depth frame feeds every downstream
-                    # consumer, with the exact same valid-pixel mask as the raw
-                    # frame (see spatial_denoise.py's module docstring). Returns
-                    # a uint16 (h,w) array; .filter accepts either bytes or the
-                    # temporal filter's array output.
                     depth = self._spatial_denoise.filter(
                         frame.sensor_id, depth, frame.width, frame.height)
                 # the node may have downsampled by frame.stride; the ray table is
-                # full-res, so derive the original dimensions.
+                # full-res, so derive the original dimensions. Build/read it here
+                # so the pool workers only ever READ the cache (no race).
                 ns = frame.stride or 1
                 ray_x, ray_y = self._ray_table(frame.sensor_id,
                                                frame.width * ns, frame.height * ns)
@@ -1178,54 +1231,47 @@ class PreviewServer:
                 if self.pose_model and cgrid is not None:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
-                extrinsic = self._sensor_extrinsic.get(frame.sensor_id)
-                # max_points is enforced INSIDE unproject by coarsening the
-                # sampling stride (grid stays coherent). The old point-wise
-                # linspace trim here punched a periodic hole every N points —
-                # visible gap stripes in the point render, a hole lattice (or
-                # an empty mesh in depth_to_color) in the mesh render.
-                xyz, rgb, grid = unproject(depth, frame.width, frame.height,
-                                           ray_x, ray_y, self.stride, ns,
-                                           cgrid, extrinsic,
-                                           max_points=self.max_points)
-                # An active calibration session consumes the RAW view-frame
-                # cloud (a re-run must not solve on already-transformed points).
-                if self._calib_session is not None:
-                    self._feed_calibration(frame.sensor_id, xyz)
-                gravity = self._sensor_gravity.get(frame.sensor_id)
-                # Rig extrinsic: P_world = R·P + t per sensor, so one canonical
-                # world frame goes out on the wire. The gravity vector rides in
-                # the same frame as the positions, so it rotates too.
-                rig = self._rig.get(frame.sensor_id)
-                if rig is not None:
-                    R, t = rig
-                    xyz = xyz.dot(R.T) + t
-                    if gravity is not None:
-                        g = R.dot(np.asarray(gravity, dtype=np.float32))
-                        gravity = (float(g[0]), float(g[1]), float(g[2]))
-                out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb,
-                                    gravity,
-                                    grid if self.send_grid else None)
-                self._broadcast(frame.sensor_id, out)
-                # Scene recording tee: the exact bytes every viewer gets, by
-                # reference — an O(1) enqueue when recording, one attribute
-                # read when not. Never blocks this node thread.
-                self._recorder.add_frame(out)
-                self.frames_relayed += 1
-
-                win["n"] += 1; win["pts"] += xyz.shape[0]; win["bytes"] += len(out)
-                if win["n"] >= 30:
-                    dt = max(1e-6, time.time() - win["t"])
-                    with self._lock:
-                        nclients = len(self._clients)
-                    print("[preview] sensor %d: %.1f fps in | %d pts | "
-                          "%.0f KB/f | %d stale skipped | %d viewer(s)" % (
-                              frame.sensor_id, win["n"] / dt,
-                              win["pts"] // win["n"],
-                              win["bytes"] / win["n"] / 1024.0,
-                              win["drop"], nclients))
-                    win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}
+                job = (frame, depth, ns, ray_x, ray_y, cgrid,
+                       self._sensor_extrinsic.get(frame.sensor_id),
+                       self._rig.get(frame.sensor_id),
+                       self._sensor_gravity.get(frame.sensor_id))
+                # Sequential path: single-threaded (--workers 1) OR calibrating
+                # (a session consumes the RAW view-frame xyz, so unproject must
+                # happen here). Flush any parallel tail first to keep order.
+                if pool is None or self._calib_session is not None:
+                    while inflight:
+                        f0, fut0 = inflight.popleft()
+                        o0, n0, _ = fut0.result()
+                        win = self._emit(f0, o0, n0, win)
+                    out, npts, xyz = self._finish_frame(*job)
+                    if self._calib_session is not None:
+                        # An active calibration session consumes the RAW
+                        # view-frame cloud (a re-run must not solve on already-
+                        # transformed points — this xyz is pre-rig only when no
+                        # rig is loaded; sessions run before/without a rig).
+                        self._feed_calibration(frame.sensor_id, xyz)
+                    win = self._emit(frame, out, npts, win)
+                else:
+                    # Parallel path: fan the heavy stateless stage (unproject +
+                    # build) across the pool so one sensor uses multiple cores.
+                    # Retire IN ORDER with a bounded window so latency stays
+                    # fixed (drop-stale above keeps the INPUT fresh) and the
+                    # recording tee stays ordered.
+                    inflight.append(
+                        (frame, pool.submit(self._finish_frame, *job)))
+                    while len(inflight) >= self.workers:
+                        f0, fut0 = inflight.popleft()
+                        o0, n0, _ = fut0.result()
+                        win = self._emit(f0, o0, n0, win)
         finally:
+            if pool is not None:
+                for f0, fut0 in inflight:               # drain the pipeline
+                    try:
+                        o0, n0, _ = fut0.result()
+                    except Exception:
+                        continue
+                    win = self._emit(f0, o0, n0, win)
+                pool.shutdown(wait=False)
             with self._lock:
                 if conn in self._nodes:
                     self._nodes.remove(conn)
@@ -1373,6 +1419,12 @@ def main():
                          "(keeps the mesh connected). 0 = uncapped, the "
                          "default — the crypt viewer preallocates ~1M points "
                          "(a full 1280x720 depth_to_color frame)")
+    ap.add_argument("--workers", type=int, default=1,
+                    help="threads for the relay's heavy per-frame stage "
+                         "(unproject + build). 1 = single-threaded (default). "
+                         ">1 lets ONE sensor's stream use multiple cores on a "
+                         "slower central machine — try 4 if full-room fps is "
+                         "CPU-bound (decode/denoise stay ordered on the reader)")
     ap.add_argument("--no-grid", action="store_true",
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "
@@ -1468,7 +1520,11 @@ def main():
                            send_grid=not args.no_grid,
                            recordings_dir=args.recordings_dir,
                            temporal_denoise=denoise,
-                           spatial_denoise=spatial)
+                           spatial_denoise=spatial,
+                           workers=args.workers)
+    if args.workers > 1:
+        print("[preview] per-sensor workers: %d (parallel unproject+build)"
+              % args.workers)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

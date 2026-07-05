@@ -479,6 +479,37 @@ Two repos:
   the bandwidth for 30 fps (Ethernet both hops, or keep background
   subtraction on; JPEG/NVENC color transport remains the deferred lever for
   many viewers).
+- ✅ **Relay ingest freshness + per-sensor CPU parallelism (2026-07-05)** —
+  two fixes for a **relay that can't keep up** (an older/slower central
+  machine on a heavy full-room stream), found debugging an X99 PC running
+  ~10 fps full-room / **playing the cloud in slow motion** while a laptop did
+  22 fps. Root cause was NOT the network (proven clean 746 Mbps by iperf) or
+  the PC's many cores (14% busy) — it was the relay's **single-threaded
+  per-sensor** read loop being CPU-bound on the older core, and TCP delivering
+  the resulting backlog oldest-first. Fixes, both in `_serve_node`:
+  **(1) drop-stale on ingest** — after reading a frame the reader
+  non-blocking-drains any frames already queued on the socket
+  (`select`, 0 timeout), keeps only the FRESHEST and drops the stale ones (the
+  node pipeline's "freshness beats completeness" rule applied to the relay's
+  READ side; control messages in the backlog still applied in order via
+  `_handle_node_control`). A slow relay now renders fewer fps but **always
+  live** — no more growing delay / "slow motion"/catch-up. Disabled while
+  recording/calibrating (they must consume every frame). Stats line adds
+  `N stale skipped`.
+  **(2) `--workers N`** (default 1 = unchanged) — fans the heavy STATELESS
+  stage (unproject + build_message) across a thread pool so ONE sensor's
+  stream can use multiple cores; the stateful/ordered part (decode + temporal/
+  spatial denoise + pose submit + ray-table build) stays on the reader thread.
+  numpy releases the GIL during the big array ops so threads scale; frames
+  retire IN ORDER with a bounded window, so latency stays fixed and the
+  recording tee stays ordered (parallel output is byte-identical to
+  sequential — `tests/test_relay_workers.py`). Use `--workers 4` on a
+  CPU-bound central box for full-room fps. Note: **background subtraction
+  already keeps the subject light enough for 30 fps on a slow relay** — these
+  fixes are for the full-room setup view. Unit-tested
+  (`tests/test_ingest_freshness.py`: freshest-survives + recording-keeps-all;
+  `tests/test_relay_workers.py`: parallel == sequential bytes) + E2E
+  (sim→relay→client with `--workers 4`).
 - ✅ **Scene recording + in-scene playback (2026-07-04)** — the "hit Record on
   a running scene" milestone (`central/recording.py` + relay wiring; spec in
   `docs/preview_protocol.md` "Scene recording"). `record_start`/`record_stop`
@@ -713,7 +744,10 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_recording.py (CPR1 round-trip, non-blocking tee, HTTP endpoint),
             test_xr_pose.py (xr_pose passthrough fanout/sid),
             test_temporal_denoise.py (EXPERIMENTAL per-pixel One-Euro depth filter),
-            test_spatial_denoise.py (EXPERIMENTAL edge-preserving bilateral depth filter)
+            test_spatial_denoise.py (EXPERIMENTAL edge-preserving bilateral depth filter),
+            test_ingest_freshness.py (relay drop-stale-on-ingest: freshest wins,
+            recording keeps all), test_relay_workers.py (--workers parallel
+            unproject+build == sequential bytes)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
