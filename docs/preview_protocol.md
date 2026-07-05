@@ -71,6 +71,44 @@ count*12`; the `gravity` block starts right after it (`20 + count*12`, plus
 `count*3` when rgb is present); the `grid` block is last (add 12 more when
 gravity is present).
 
+## Message: `CPV2` (compact wire format, little-endian)
+
+Selected with `preview_server --wire cpv2` (default is `cpv1`). It carries the
+**same cloud** as `CPV1` — same header, same flag bits, same block order — but
+positions are **uint16-quantised** and the grid is a **valid-mask bitmap**, so a
+full-resolution frame is ~52 % smaller on the wire (19 B/pt → ~9 B/pt). The
+MAGIC (`CPV2` vs `CPV1`) is what tells the viewer how to read positions and the
+grid block; a viewer must dispatch on it. Everything else (control plane, JSON,
+recording) is unchanged.
+
+Header: identical 20-byte layout, `magic = "CPV2"`. Then, in order:
+
+0. **quant** *(always present, right after the header)* — `offset_x, offset_y,
+   offset_z, scale` as `4 × float32` (16 bytes). Dequantise every position as
+   `p = q * scale + offset`. `offset` is the frame's min corner and `scale` is a
+   single uniform metres-per-step = `max_span / 65535`, recomputed per frame.
+1. **positions** — `count × 3 × uint16` (little-endian). Dequantise with the
+   quant block above → the identical view/world-space metres `CPV1` sends.
+   **Why this is lossless in practice:** the step is `max_span/65535` ≈ **0.03 mm**
+   for a ~2 m subject, **0.12 mm** for an ~8 m room — 30–60× below the Azure
+   Kinect's random ToF noise (~2–4 mm best case, worse at range), i.e. far below
+   the jitter the relay's temporal filter is already smoothing. It shrinks bytes
+   below the noise floor, it does not throw away real depth resolution.
+2. **rgb** *(flag bit1)* — `count × 3 × uint8`. **Unchanged from CPV1.**
+3. **gravity** *(flag bit2)* — `3 × float32`. **Unchanged from CPV1.**
+4. **grid** *(flag bit3, last block)* — `u16 grid_w`, `u16 grid_h`, then a
+   **bitmap** of `ceil(grid_w*grid_h/8)` bytes, **LSB-first**: bit
+   `i = v*grid_w + u` (byte `i>>3`, bit `i&7`) is set when that sub-grid cell
+   carried a point. The set bits **in ascending order are 1:1 with the
+   positions**, so the viewer rebuilds the exact CPV1 index list by scanning
+   them (`indices = flatnonzero(unpackbits(bytes, bitorder="little"))`) and
+   meshes exactly as before. This replaces CPV1's `count × u32` indices: on a
+   full frame the bitmap is ~0.13 B/pt vs 4 B/pt.
+
+Offsets are all 2-byte-aligned at most, so (as with CPV1) read multi-byte
+blocks with a `DataView` / copy before viewing as a typed array. `count = 0`
+frames carry the quant block (scale = 1) and no position bytes.
+
 ## Viewer side (sketch, lives in `crypt`)
 
 ```js

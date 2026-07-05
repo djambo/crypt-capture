@@ -543,10 +543,37 @@ Two repos:
   realistic (background-subtracted) mode** — it fits gigabit and scales to 3
   cams trivially; for a full-cloud test add `--no-temporal-denoise` (drops ~7 ms
   NFOV / ~22 ms 720p off the serial chain) and `--workers` on a many-core box.
-  ⏳ The real full-cloud unlock (if ever needed for VR environment capture) is a
-  **CPV2 wire format**: int16-quantized positions (12→6 B) + a valid-mask
-  BITMAP instead of the u32 grid indices (4 B/pt → ~0.13 B/pt on a full frame)
-  ≈ 9 B/pt (−52 %) — a coordinated crypt-viewer change, not yet built.
+  The real full-cloud unlock is the **CPV2 wire format** — BUILT next entry.
+- ✅ **CPV2 compact wire format (2026-07-05, `preview_server --wire cpv2`)** —
+  the ~52 %-smaller point-cloud wire format that halves bandwidth for EVERY mode
+  (a bg-subtracted subject over the VR PC's link: ~114 → ~55 Mbit/s; a full
+  un-subtracted sensor: ~1.6 → ~0.8 Gbit/s). Same 20-byte header, same flag
+  bits, same block order as CPV1 — the MAGIC (`CPV1`/`CPV2`) tells the viewer how
+  to read TWO changed blocks: **positions are uint16-quantised** (a 16-byte
+  per-frame quant block — offset xyz f32 + one uniform scale f32 — right after
+  the header; dequant `p=q*scale+offset`) and **the grid is a valid-mask
+  BITMAP** (`u16 grid_w,grid_h` + `ceil(gw*gh/8)` LSB-first bits; set bits in
+  order are 1:1 with positions, so the viewer rebuilds the exact CPV1 index list
+  and meshes unchanged) instead of `count × u32` indices. rgb/gravity blocks are
+  byte-identical to CPV1. **Not lossy in any meaningful sense:** the per-frame
+  bounding-box scale makes the quantum `max_span/65535` ≈ **0.03 mm** (2 m
+  subject) to **0.12 mm** (8 m room) — 30–60× below the Kinect's ToF noise, i.e.
+  below the jitter temporal-denoise is already smoothing (the user's constraint:
+  compress below the noise floor, never below real sensor resolution). Positions
+  round-trip to <0.07 mm in tests. **DEFAULT stays `cpv1`** so a relay restart
+  never breaks a running viewer; flip to `--wire cpv2` once the crypt viewer
+  ships the decoder (spec + JS reference decoder handed over in
+  `docs/crypt_viewer_updates.md` 2026-07-05, `Status: NEW`; full format in
+  `docs/preview_protocol.md`). Recordings made under cpv2 hold cpv2 frames (the
+  CPR container just wraps CPV messages — the RecordingPlayer uses the same
+  parser). `build_message(fmt=…)` branches; `_quantize_positions` +
+  `_build_message_v2` are the encoder. Unit-tested (`tests/test_cpv2.py`:
+  quantum-below-noise, CPV1-equivalent positions within one quantum, bitmap ==
+  unproject indices, ~49 % size, empty frame) + E2E (relay `--wire cpv2` + sim
+  node → reference decoder gets valid rgb+grid frames). ⏳ Next lever if 3-cam
+  full-cloud is ever needed on <2.5 GbE: per-client format negotiation (mixed
+  old/new viewers) and/or shipping quantised DEPTH + intrinsics so the browser
+  unprojects (≈5 B/pt).
 - ✅ **Scene recording + in-scene playback (2026-07-04)** — the "hit Record on
   a running scene" milestone (`central/recording.py` + relay wiring; spec in
   `docs/preview_protocol.md` "Scene recording"). `record_start`/`record_stop`
@@ -784,7 +811,9 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_spatial_denoise.py (EXPERIMENTAL edge-preserving bilateral depth filter),
             test_ingest_freshness.py (relay drop-stale-on-ingest: freshest wins,
             recording keeps all), test_relay_workers.py (--workers parallel
-            unproject+build == sequential bytes)
+            unproject+build == sequential bytes),
+            test_cpv2.py (CPV2 compact wire: quant-below-noise, CPV1-equivalent
+            positions, bitmap grid == unproject indices, size)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
@@ -889,6 +918,12 @@ python3 -m central.preview_server --spatial-denoise
 #                                    edges, higher smooths harder)
 python3 -m central.preview_server --temporal-denoise --spatial-denoise  # both
 python3 -m tests.test_spatial_denoise
+
+# CPV2 compact wire format (uint16 quantised positions + valid-mask bitmap grid,
+# ~52% smaller, quantum far below ToF noise). Default is cpv1; opt in once the
+# crypt viewer ships the CPV2 decoder (docs/crypt_viewer_updates.md 2026-07-05):
+python3 -m central.preview_server --wire cpv2
+python3 -m tests.test_cpv2
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

@@ -11,6 +11,93 @@
 > Star, base `CPV1` spec, v0 viewer sketch) was delivered separately as your
 > initial `CLAUDE.md`; these entries amend it.
 
+## 2026-07-05 — `CPV2` compact wire format (uint16 positions + bitmap grid)
+**Status: NEW — needs a viewer decoder before the relay can use it.**
+
+A new, ~52 %-smaller point-cloud wire format. The relay picks it with
+`preview_server --wire cpv2`; **default is still `cpv1`, so nothing breaks until
+you ship the decoder** — then the operator flips the flag. This halves the wire
+for EVERY mode (not just full clouds): a background-subtracted subject over the
+VR PC's link drops from ~114 to ~55 Mbit/s, and a full un-subtracted cloud from
+~1.6 to ~0.8 Gbit/s per sensor. The `RecordingPlayer` needs it too, since
+recorded takes just wrap CPV frames (a take recorded under `--wire cpv2` holds
+CPV2 frames).
+
+**Why it's safe / not lossy:** positions are uint16-quantised with a **per-frame
+bounding-box scale** — quantum = `max_span/65535` ≈ **0.03 mm** for a ~2 m
+subject, **0.12 mm** for an ~8 m room. That's 30–60× below the Kinect's ToF
+noise, i.e. below the jitter temporal-denoise already smooths. It shrinks bytes
+below the noise floor; it does not reduce real depth resolution.
+
+**Protocol impact — dispatch on the 4-byte MAGIC** (`CPV1` vs `CPV2`). Header
+(20 bytes), flag bits, block order, rgb block, gravity block, and the whole
+control/JSON/recording plane are all **identical to CPV1**. Only two blocks
+differ:
+
+- **quant block** (NEW, always present, immediately after the 20-byte header):
+  `offset_x, offset_y, offset_z, scale` = `4 × float32` (16 bytes).
+- **positions**: `count × 3 × uint16` (was float32). Dequantise:
+  `p = q * scale + offset`. Result is the identical view/world-space metres.
+- **rgb** (bit1) and **gravity** (bit2): **unchanged** (uint8×3 / float32×3).
+- **grid** (bit3, last): `u16 grid_w`, `u16 grid_h`, then a **valid-mask
+  bitmap** of `ceil(grid_w*grid_h/8)` bytes, **LSB-first** (bit `i=v*grid_w+u`
+  set ⇒ that cell has a point) — replaces CPV1's `count × u32` indices. The set
+  bits in ascending order are 1:1 with the positions, so you rebuild the exact
+  CPV1 index list and mesh unchanged.
+
+**Viewer action** — add a CPV2 branch to the CPV1 parser (`cpv1.js`). Reference
+decoder (matches `crypt-capture/tests/test_cpv2.py`):
+
+```js
+// buf: ArrayBuffer of one WS binary message. dv = new DataView(buf).
+// magic @0..3: "CPV1" -> existing path; "CPV2" -> below.
+function parseCPV2(buf) {
+  const dv = new DataView(buf);
+  const flags = dv.getUint32(4, true);
+  const sensor = dv.getUint32(8, true);
+  const frame  = dv.getUint32(12, true);
+  const count  = dv.getUint32(16, true);
+  let o = 20;
+  const ox = dv.getFloat32(o, true),     oy = dv.getFloat32(o + 4, true);
+  const oz = dv.getFloat32(o + 8, true), scale = dv.getFloat32(o + 12, true);
+  o += 16;
+  // positions: uint16 -> metres. (Copy: offset o may be non-4-aligned.)
+  const q = new Uint16Array(buf.slice(o, o + count * 6));
+  o += count * 6;
+  const pos = new Float32Array(count * 3);
+  for (let i = 0; i < count; i++) {
+    pos[i*3]   = q[i*3]   * scale + ox;
+    pos[i*3+1] = q[i*3+1] * scale + oy;
+    pos[i*3+2] = q[i*3+2] * scale + oz;
+  }
+  let rgb = null;
+  if (flags & 2) { rgb = new Uint8Array(buf.slice(o, o + count * 3)); o += count * 3; }
+  let gravity = null;
+  if (flags & 4) { gravity = [dv.getFloat32(o,true), dv.getFloat32(o+4,true),
+                              dv.getFloat32(o+8,true)]; o += 12; }
+  let grid = null;
+  if (flags & 8) {
+    const gw = dv.getUint16(o, true), gh = dv.getUint16(o + 2, true); o += 4;
+    const nbytes = (gw * gh + 7) >> 3;
+    const bits = new Uint8Array(buf, o, nbytes);
+    const indices = new Uint32Array(count);   // ascending, 1:1 with positions
+    let k = 0;
+    for (let i = 0; i < gw * gh && k < count; i++)
+      if (bits[i >> 3] & (1 << (i & 7))) indices[k++] = i;
+    grid = { grid_w: gw, grid_h: gh, indices };  // same shape MeshCloud expects
+  }
+  return { sensor, frame, count, positions: pos, rgb, gravity, grid };
+}
+```
+
+The dequantised `positions`, `rgb`, `gravity`, and `grid.indices` are drop-in
+identical to what your CPV1 path produces — `PointCloud`, `MeshCloud`, floor
+detection, particle seeding all consume them unchanged. **No other change**
+(HUD, control plane, `MAX_POINTS` sizing all stay). Once shipped, tell the
+operator to add `--wire cpv2` to the relay.
+
+Tests (crypt-capture): `python3 -m tests.test_cpv2`.
+
 ## 2026-07-04 — XR pose passthrough (`xr_pose`)
 **Status: applied 2026-07-04 (both sides built together — viewer already
 consumes this).**

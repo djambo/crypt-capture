@@ -58,11 +58,43 @@ CALIB_STATUS_EVERY_S = 1.0    # progress broadcast cadence during collection
 RECORD_STATUS_EVERY_S = 1.0   # live REC stats broadcast cadence
 
 PREVIEW_MAGIC = b"CPV1"
+PREVIEW_MAGIC_V2 = b"CPV2"                    # compact wire format (--wire cpv2)
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
+_CPV2_QUANT = struct.Struct("<ffff")         # offset xyz + uniform scale (metres)
 FLAG_POSITIONS = 0x1
 FLAG_RGB = 0x2
 FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (down) vec
 FLAG_GRID = 0x8                               # trailing depth-grid index block
+
+# int16 (uint16) positions can't lose real Kinect resolution: with a per-frame
+# bounding-box scale the quantum is span/65535 — ~0.03 mm for a ~2 m subject,
+# ~0.12 mm for an ~8 m room — 30-60x below the Azure Kinect's random ToF noise
+# (~2-4 mm best case, up to ~17 mm at range/edges), i.e. far below the jitter
+# the temporal filter is already smoothing. See _quantize_positions + CPV2 in
+# docs/preview_protocol.md.
+CPV2_QUANT_LEVELS = 65535.0
+
+
+def _quantize_positions(xyz):
+    """CPV2 positions: metres float32 -> uint16 with a per-frame offset (the
+    min corner) and a single uniform scale (isotropic step = max_span/65535, so
+    a physical step is the same size on every axis). Returns (offset f32[3],
+    scale f32, q uint16[n,3]). Dequantise in the viewer as q*scale + offset.
+
+    Uniform (not per-axis) on purpose: it keeps the quantisation lattice cubic
+    (no axis stretched), the step is already vastly below sensor noise, and it
+    needs only one scale float. Empty / zero-span frames get scale=1 (every
+    point maps to the offset, exact)."""
+    n = int(xyz.shape[0])
+    if n == 0:
+        return (np.zeros(3, dtype=np.float32), np.float32(1.0),
+                np.empty((0, 3), dtype=np.uint16))
+    lo = xyz.min(axis=0)
+    span = float((xyz.max(axis=0) - lo).max())
+    scale = span / CPV2_QUANT_LEVELS if span > 0.0 else 1.0
+    q = np.round((xyz - lo) / scale)
+    np.clip(q, 0.0, CPV2_QUANT_LEVELS, out=q)
+    return lo.astype(np.float32), np.float32(scale), q.astype(np.uint16)
 
 
 def gravity_to_view(g_optical):
@@ -205,12 +237,22 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
     return grid
 
 
-def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None):
+def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None,
+                  fmt="cpv1"):
+    """Serialise one point-cloud frame. `fmt` selects the wire format:
+    'cpv1' (float32 positions + u32 grid indices, the original) or 'cpv2'
+    (uint16 quantised positions + a valid-mask bitmap grid — ~52% smaller with
+    no meaningful precision loss; see docs/preview_protocol.md). The flag bits
+    are identical between formats; the MAGIC (CPV1 vs CPV2) tells the viewer how
+    to read positions and the grid block."""
     count = int(xyz.shape[0])
     flags = (FLAG_POSITIONS
              | (FLAG_RGB if rgb is not None else 0)
              | (FLAG_GRAVITY if gravity is not None else 0)
              | (FLAG_GRID if grid is not None else 0))
+    if fmt == "cpv2":
+        return _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb,
+                                 gravity, grid)
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
@@ -232,6 +274,38 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None):
         grid_w, grid_h, indices = grid
         parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
         parts.append(np.ascontiguousarray(indices, dtype="<u4").tobytes())
+    return b"".join(parts)
+
+
+def _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb, gravity,
+                      grid):
+    """CPV2 payload: same 20-byte header (magic CPV2) then a 16-byte quant block
+    (offset xyz f32 + uniform scale f32), uint16 positions, optional rgb
+    (unchanged), optional gravity (unchanged f32), and — if grid — a valid-mask
+    BITMAP instead of u32 indices: u16 grid_w, u16 grid_h, then
+    ceil(grid_w*grid_h/8) bytes, LSB-first (bit v*grid_w+u set = that sub-grid
+    cell carried a point). The set bits in row-major order are 1:1 with the
+    positions, so the viewer rebuilds the CPV1 index list by scanning them —
+    ~0.13 B/pt on a full frame vs 4 B/pt for the u32 indices."""
+    offset, scale, q = _quantize_positions(xyz)
+    header = _PREVIEW_HEADER.pack(
+        PREVIEW_MAGIC_V2, flags, sensor_id & 0xFFFFFFFF,
+        frame_id & 0xFFFFFFFF, count)
+    parts = [header,
+             _CPV2_QUANT.pack(float(offset[0]), float(offset[1]),
+                              float(offset[2]), float(scale)),
+             np.ascontiguousarray(q, dtype="<u2").tobytes()]
+    if rgb is not None:
+        parts.append(np.ascontiguousarray(rgb, dtype=np.uint8).tobytes())
+    if gravity is not None:
+        parts.append(np.asarray(gravity, dtype="<f4").tobytes())
+    if grid is not None:
+        grid_w, grid_h, indices = grid
+        mask = np.zeros(grid_w * grid_h, dtype=np.uint8)
+        mask[indices] = 1
+        packed = np.packbits(mask, bitorder="little")
+        parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
+        parts.append(packed.tobytes())
     return b"".join(parts)
 
 
@@ -320,7 +394,8 @@ class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True, recordings_dir="recordings",
-                 temporal_denoise=None, spatial_denoise=None, workers=1):
+                 temporal_denoise=None, spatial_denoise=None, workers=1,
+                 wire="cpv1"):
         self.calib = calib
         self.stride = stride
         # Per-sensor CPU parallelism for the relay's heavy STATELESS stage
@@ -357,6 +432,12 @@ class PreviewServer:
         # the viewer can re-mesh the points. +4 bytes/point (~27% over the
         # 15 B/pt of xyz+rgb); --no-grid drops it if wire budget matters.
         self.send_grid = send_grid
+        # Wire format for CPV frames: 'cpv1' (float32 xyz + u32 grid indices,
+        # the original — every deployed viewer speaks it) or 'cpv2' (uint16
+        # quantised xyz + valid-mask bitmap grid, ~52% smaller; needs a
+        # CPV2-aware crypt viewer). Default cpv1 so a relay restart never breaks
+        # a running viewer; flip to cpv2 once the viewer ships the parser.
+        self.wire_format = "cpv2" if str(wire).lower() == "cpv2" else "cpv1"
         # Central-side pose fallback: run the SAME MoveNet at the relay for
         # sensors whose node doesn't send CPOS (the weak Nano). None = off.
         self.pose_model = pose_model
@@ -1103,7 +1184,8 @@ class PreviewServer:
                 g = R.dot(np.asarray(gravity, dtype=np.float32))
                 gravity = (float(g[0]), float(g[1]), float(g[2]))
         out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb, gravity,
-                            grid if self.send_grid else None)
+                            grid if self.send_grid else None,
+                            fmt=self.wire_format)
         return out, xyz.shape[0], xyz
 
     def _emit(self, frame, out, npts, win):
@@ -1451,6 +1533,14 @@ def main():
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "
                          "can't render the textured mesh, only points")
+    ap.add_argument("--wire", default="cpv1", choices=("cpv1", "cpv2"),
+                    help="point-cloud wire format. 'cpv1' (default): float32 "
+                         "positions + u32 grid indices, 19 B/pt — every deployed "
+                         "viewer. 'cpv2': uint16 quantised positions (per-frame "
+                         "bbox scale, quantum ~0.03-0.12 mm, far below ToF noise) "
+                         "+ valid-mask bitmap grid, ~9 B/pt (~52%% smaller) — "
+                         "needs a CPV2-aware crypt viewer (see "
+                         "docs/preview_protocol.md)")
     ap.add_argument("--recordings-dir", default="recordings",
                     help="where scene recordings (viewer Record button) are "
                          "written and served from (HTTP GET /recordings on "
@@ -1544,7 +1634,11 @@ def main():
                            recordings_dir=args.recordings_dir,
                            temporal_denoise=denoise,
                            spatial_denoise=spatial,
-                           workers=workers)
+                           workers=workers,
+                           wire=args.wire)
+    print("[preview] wire format: %s%s" % (
+        args.wire, " (uint16 quant + bitmap grid, ~52%% smaller)"
+        if args.wire == "cpv2" else " (float32 + u32 grid)"))
     print("[preview] workers: %d%s (--workers %s, %d CPUs)" % (
         workers,
         " (parallel unproject+build)" if workers > 1 else " (single-threaded)",
