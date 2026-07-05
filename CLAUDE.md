@@ -496,10 +496,14 @@ Two repos:
   live** — no more growing delay / "slow motion"/catch-up. Disabled while
   recording/calibrating (they must consume every frame). Stats line adds
   `N stale skipped`.
-  **(2) `--workers N`** (default 1 = unchanged) — fans the heavy STATELESS
-  stage (unproject + build_message) across a thread pool so ONE sensor's
-  stream can use multiple cores; the stateful/ordered part (decode + temporal/
-  spatial denoise + pose submit + ray-table build) stays on the reader thread.
+  **(2) `--workers`** (default **`auto`** = `cpu_count-2`, capped at 8; an
+  integer forces it, `1` = single-threaded) — fans the heavy STATELESS stage
+  (unproject + build_message) across ONE shared thread pool (relay-wide, not
+  per node connection, so N sensors don't oversubscribe to N*workers threads)
+  so ONE sensor's stream can use multiple cores; the stateful/ordered part
+  (decode + temporal/spatial denoise + pose submit + ray-table build) stays on
+  the reader thread. Scaling is sub-linear (GIL on the Python glue + the
+  un-parallelizable decode/denoise floor), so `auto` caps at 8.
   numpy releases the GIL during the big array ops so threads scale; frames
   retire IN ORDER with a bounded window, so latency stays fixed and the
   recording tee stays ordered (parallel output is byte-identical to

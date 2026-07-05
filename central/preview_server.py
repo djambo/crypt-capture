@@ -327,6 +327,10 @@ class PreviewServer:
         # threads scale here; frames retire in order with a bounded window, so
         # latency stays fixed and the recording tee stays ordered.
         self.workers = max(1, int(workers))
+        # ONE shared heavy-stage pool for the whole relay (not per node
+        # connection), so N sensors don't oversubscribe to N*workers threads.
+        self._pool = (ThreadPoolExecutor(max_workers=self.workers)
+                      if self.workers > 1 else None)
         # EXPERIMENTAL (central/temporal_denoise.py): per-pixel One-Euro
         # low-pass over the raw depth grid, before unprojection — kills the
         # ToF "vibrating points" jitter while staying responsive to real
@@ -1169,8 +1173,7 @@ class PreviewServer:
         with self._lock:
             self._nodes.append(conn)
         win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}   # throughput log
-        pool = (ThreadPoolExecutor(max_workers=self.workers)
-                if self.workers > 1 else None)
+        pool = self._pool                # shared across all node connections
         inflight = collections.deque()   # (frame, future) in submission order
         try:
             while True:
@@ -1265,13 +1268,12 @@ class PreviewServer:
                         win = self._emit(f0, o0, n0, win)
         finally:
             if pool is not None:
-                for f0, fut0 in inflight:               # drain the pipeline
+                for f0, fut0 in inflight:               # drain this conn's tail
                     try:
                         o0, n0, _ = fut0.result()
                     except Exception:
                         continue
-                    win = self._emit(f0, o0, n0, win)
-                pool.shutdown(wait=False)
+                    win = self._emit(f0, o0, n0, win)   # pool is shared; keep it
             with self._lock:
                 if conn in self._nodes:
                     self._nodes.remove(conn)
@@ -1404,6 +1406,20 @@ class PreviewServer:
         self._node_accept_loop(node_host, node_port)   # blocks
 
 
+def _resolve_workers(val):
+    """Resolve --workers. An integer forces the count; 'auto' (default) derives
+    it from the CPU: leave 2 logical cores free (the reader thread + sender/OS,
+    and often a browser/VR viewer on the same box) and cap at 8 — the heavy
+    stage's scaling is GIL-limited and flattens out past a handful of cores, so
+    more just burns cycles. Single-core boxes fall back to 1."""
+    if str(val).strip().lower() == "auto":
+        return max(1, min((os.cpu_count() or 2) - 2, 8))
+    try:
+        return max(1, int(val))
+    except (TypeError, ValueError):
+        return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description="crypt-capture live preview relay")
     ap.add_argument("--node-host", default="0.0.0.0")
@@ -1419,12 +1435,13 @@ def main():
                          "(keeps the mesh connected). 0 = uncapped, the "
                          "default — the crypt viewer preallocates ~1M points "
                          "(a full 1280x720 depth_to_color frame)")
-    ap.add_argument("--workers", type=int, default=1,
+    ap.add_argument("--workers", default="auto",
                     help="threads for the relay's heavy per-frame stage "
-                         "(unproject + build). 1 = single-threaded (default). "
-                         ">1 lets ONE sensor's stream use multiple cores on a "
-                         "slower central machine — try 4 if full-room fps is "
-                         "CPU-bound (decode/denoise stay ordered on the reader)")
+                         "(unproject + build). 'auto' (default) picks from the "
+                         "CPU core count (cpu_count - 2, capped at 8); an "
+                         "integer forces it; 1 = single-threaded. Lets ONE "
+                         "sensor's stream use multiple cores on a slower central "
+                         "machine (decode/denoise stay ordered on the reader)")
     ap.add_argument("--no-grid", action="store_true",
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "
@@ -1494,6 +1511,7 @@ def main():
                          "stay crisp. Lower protects finer steps; higher "
                          "smooths harder")
     args = ap.parse_args()
+    workers = _resolve_workers(args.workers)
     denoise = None
     if args.temporal_denoise:
         from central.temporal_denoise import TemporalDepthFilter
@@ -1521,10 +1539,11 @@ def main():
                            recordings_dir=args.recordings_dir,
                            temporal_denoise=denoise,
                            spatial_denoise=spatial,
-                           workers=args.workers)
-    if args.workers > 1:
-        print("[preview] per-sensor workers: %d (parallel unproject+build)"
-              % args.workers)
+                           workers=workers)
+    print("[preview] workers: %d%s (--workers %s, %d CPUs)" % (
+        workers,
+        " (parallel unproject+build)" if workers > 1 else " (single-threaded)",
+        args.workers, os.cpu_count() or 0))
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.
