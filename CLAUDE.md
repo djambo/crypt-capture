@@ -512,6 +512,38 @@ Two repos:
   space on the viewer's camera rig, all viewer-side). Relay is a stateless
   wire here; ~10 Hz tiny JSON on the ordered TEXT path. Spec entry in
   `docs/crypt_viewer_updates.md`; unit-tested (`tests/test_xr_pose.py`).
+- 🧪 **EXPERIMENTAL — temporal depth denoise (2026-07-05, branch
+  `experimental/temporal-depth-denoise`, NOT merged to main)**:
+  `central/temporal_denoise.py`, a per-pixel One-Euro low-pass filter over
+  the raw depth grid, applied at the relay right after RVL decode and
+  BEFORE unprojection/color-alignment/pose-lift — kills the ToF's per-pixel
+  depth jitter (reads as "every point is vibrating" in the viewer, worst in
+  VR where the eye is close to the surface) while staying responsive to
+  real motion (same adaptive filter already smoothing skeleton joints,
+  `node/pose.py`'s `OneEuro`, vectorized over the whole depth array here).
+  Correct rather than a smear because a depth pixel (u,v) is the SAME
+  physical ray every frame — filtering keyed by pixel, before the valid-set
+  is flattened into a point list, is filtering one signal over time (the
+  flat XYZ list can't do this: index i is a different physical point every
+  frame as the mask shifts). **Relay-only, opt-in, off by default**
+  (`preview_server --temporal-denoise` [+ `--denoise-min-cutoff`
+  `--denoise-beta`]) — no node/protocol change, so it's a one-flag toggle
+  on the laptop while the Jetsons keep running untouched (exactly the
+  "quick swap" this was built for). The critical invariant — the filtered
+  depth's zero/non-zero mask must stay BYTE-IDENTICAL to the raw depth's,
+  or `aligned_color_grid`'s RGB pairing silently breaks — is enforced
+  explicitly and covered by a dedicated test. Unit-tested
+  (`tests/test_temporal_denoise.py`: measured noise reduction on a
+  synthetic static+jitter signal, step-response lag bound, mask
+  preservation across random frames, fresh-seed vs stale-gap reseeding,
+  short-dropout continuity, per-sensor independence, shape-change reset) +
+  E2E (real `preview_server` + real `sim_node` over real sockets, 40
+  frames: identical point counts/fps with the flag on vs off, zero
+  RGB/depth count mismatches). Defaults (`min_cutoff=1.0, beta=0.01`) are a
+  first estimate — no real noisy-Kinect data was available to tune
+  against here, so expect to retune by eye on real hardware. Merge to
+  main once it's been eyeballed on a real Kinect and the constants feel
+  right.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts
@@ -615,7 +647,9 @@ central/    recorder.py (records synced takes), preview_server.py (live ws relay
             calibration.py (rig extrinsics from a tracked marker ball: segment_ball
             [largest spherical cluster] + sphere fit + robust Kabsch [RANSAC];
             BallTracker [continuous] + StationaryBallSampler [stop-and-go, default];
-            + Tier-1 rough solve, rig_calib.json I/O)
+            + Tier-1 rough solve, rig_calib.json I/O),
+            temporal_denoise.py (EXPERIMENTAL, branch experimental/temporal-
+            depth-denoise: per-pixel One-Euro depth low-pass, --temporal-denoise)
 processing/ mesh_take.py (take -> depth-grid PLY mesh)
 scripts/    run_demo.py (hardware-free spine demo), preview_client.py (headless ws test),
             send_command.py (send control commands to the relay),
@@ -628,7 +662,9 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_extrinsic.py, test_discovery.py, test_calibration.py, test_rig.py,
             test_pose.py, test_grid.py (CPV1 grid block / mesh connectivity),
             test_sender.py (per-viewer ClientSender mailbox),
-            test_recording.py (CPR1 round-trip, non-blocking tee, HTTP endpoint)
+            test_recording.py (CPR1 round-trip, non-blocking tee, HTTP endpoint),
+            test_xr_pose.py (xr_pose passthrough fanout/sid),
+            test_temporal_denoise.py (EXPERIMENTAL per-pixel One-Euro depth filter)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
@@ -715,6 +751,13 @@ python3 -m scripts.send_command --port 8080 list-recordings
 curl http://127.0.0.1:8080/recordings                        # same index, HTTP
 curl -O http://127.0.0.1:8080/recordings/<id>                # the CPR1 take
 python3 -m tests.test_recording
+
+# EXPERIMENTAL temporal depth denoise (branch experimental/temporal-depth-
+# denoise, off by default — one flag toggles it, no node change needed):
+python3 -m central.preview_server --temporal-denoise
+#   tune: --denoise-min-cutoff 1.0 (lower = smoother at rest)
+#         --denoise-beta 0.01      (higher = less lag on real motion)
+python3 -m tests.test_temporal_denoise
 
 # Real single-sensor capture (recorder + node, localhost):
 python3 -m central.recorder --port 9000 --sensors 1 --out takes/real1

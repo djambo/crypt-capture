@@ -312,9 +312,15 @@ class ClientSender:
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
-                 send_grid=True, recordings_dir="recordings"):
+                 send_grid=True, recordings_dir="recordings",
+                 temporal_denoise=None):
         self.calib = calib
         self.stride = stride
+        # EXPERIMENTAL (central/temporal_denoise.py): per-pixel One-Euro
+        # low-pass over the raw depth grid, before unprojection — kills the
+        # ToF "vibrating points" jitter while staying responsive to real
+        # motion. None = off (the default; --temporal-denoise enables it).
+        self._temporal_denoise = temporal_denoise
         # 0 = uncapped (the default): full resolution for points AND mesh —
         # meshing is for the SUBJECT (a background-subtracted subject is tens
         # of k points), and a full-environment frame still holds interactive
@@ -1107,6 +1113,15 @@ class PreviewServer:
                 if not frame.depth_rvl:
                     continue
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
+                if self._temporal_denoise is not None:
+                    # BEFORE color/pose/unproject: every downstream consumer
+                    # (aligned_color_grid's RGB pairing, unproject's grid
+                    # indices, the central pose lift) reads the SAME filtered
+                    # array, so they all see one consistent, less-jittery
+                    # depth frame with the exact same valid-pixel mask as the
+                    # raw frame (see temporal_denoise.py's module docstring).
+                    depth = self._temporal_denoise.filter(
+                        frame.sensor_id, depth, frame.width, frame.height)
                 # the node may have downsampled by frame.stride; the ray table is
                 # full-res, so derive the original dimensions.
                 ns = frame.stride or 1
@@ -1342,14 +1357,37 @@ def main():
                     help="prefer the TensorRT provider for --pose-model "
                          "(NVIDIA GPU on the central machine; CPU is fine "
                          "on x86 — ~25 ms/infer)")
+    ap.add_argument("--temporal-denoise", action="store_true",
+                    help="EXPERIMENTAL: per-pixel One-Euro low-pass over the "
+                         "raw depth grid (central/temporal_denoise.py), "
+                         "before unprojection — smooths the ToF's per-pixel "
+                         "'vibrating points' jitter while staying responsive "
+                         "to real motion. Relay-only (no node/protocol "
+                         "change); off by default")
+    ap.add_argument("--denoise-min-cutoff", type=float, default=1.0,
+                    help="temporal denoise: baseline smoothing (Hz) when a "
+                         "pixel is static — lower = smoother at rest")
+    ap.add_argument("--denoise-beta", type=float, default=0.01,
+                    help="temporal denoise: how fast smoothing backs off as "
+                         "a pixel starts moving — higher = less lag, less "
+                         "denoising on slow motion")
     args = ap.parse_args()
+    denoise = None
+    if args.temporal_denoise:
+        from central.temporal_denoise import TemporalDepthFilter
+        denoise = TemporalDepthFilter(min_cutoff=args.denoise_min_cutoff,
+                                      beta=args.denoise_beta)
+        print("[preview] temporal denoise ON (min_cutoff=%.2f beta=%.3f) "
+              "— EXPERIMENTAL, see central/temporal_denoise.py" % (
+                  args.denoise_min_cutoff, args.denoise_beta))
     server = PreviewServer(calib=args.calib, stride=args.stride,
                            max_points=args.max_points,
                            rig_calib=args.rig_calib,
                            pose_model=args.pose_model,
                            pose_trt=args.pose_trt,
                            send_grid=not args.no_grid,
-                           recordings_dir=args.recordings_dir)
+                           recordings_dir=args.recordings_dir,
+                           temporal_denoise=denoise)
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.
