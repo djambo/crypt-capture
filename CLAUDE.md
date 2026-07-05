@@ -576,8 +576,18 @@ Two repos:
   neighbour exclusion, mask preservation across random frames, statelessness,
   array-input from the temporal filter) + E2E (real `preview_server` + real
   `sim_node`: point count identical on vs off, colour pairing intact).
-  Defaults (`radius=1, sigma_depth=30 mm`) are a first estimate — retune by eye
-  against a real noisy Kinect (⏳ open follow-up, same as temporal).
+  **Perf** (it runs inline in the node handler thread, so its ms come straight
+  off relay fps): cost scales with GRID PIXELS SCANNED, not point count. The
+  range weight is computed in-place (reused scratch buffers, no per-offset
+  allocation) and the frame is CROPPED to the valid-pixel bounding box first,
+  so a background-subtracted subject (the intended target) is ~3 ms at
+  1280x720 r=1 — essentially free. A FULL un-subtracted environment frame is
+  the costly case (whole grid valid): ~13 ms at 640x576, ~45 ms at 1280x720
+  (r=2 ≈ 2.3x). So if full-room fps drops: turn on background subtraction
+  (biggest win, and the intended mode), keep r=1, or leave it off for the
+  setup/environment view. Defaults (`radius=1, sigma_depth=30 mm`) are a first
+  estimate — retune by eye against a real noisy Kinect (⏳ open follow-up, same
+  as temporal).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

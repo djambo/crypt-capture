@@ -70,6 +70,22 @@ forced to exactly 0 wherever the RAW input was 0, and every valid pixel keeps
 at least its own (self-weighted) contribution so it can never collapse to 0.
 Covered directly by tests/test_spatial_denoise.py.
 
+Performance: cost is proportional to the number of GRID PIXELS SCANNED, not
+the number of valid points, and the filter runs inline in the node handler
+thread, so every millisecond it adds directly costs relay fps. Two things
+keep that in check: (1) the range weight is computed in-place with reused
+scratch buffers (no per-offset allocation on the full grid every frame), and
+(2) the filter crops to the bounding box of valid pixels first — so a
+BACKGROUND-SUBTRACTED subject (a small blob in a big grid, the mode this
+denoise is really for) is filtered in ~3 ms at 1280x720 radius=1, essentially
+free. The costly case is a FULL, un-subtracted environment frame (every pixel
+valid → the whole grid is scanned): ~13 ms at 640x576 and ~45 ms at 1280x720
+for radius=1 (radius=2 is ~2.3x that). If you're watching the full room and
+fps drops, the fixes in order: turn on background subtraction (biggest win by
+far — it's what makes the subject cheap AND is the intended use), keep
+radius=1, drop to a lower depth FOV mode, or leave the filter off for the
+setup/environment view and only enable it once subtraction is on.
+
 Status: EXPERIMENTAL, opt-in via `preview_server.py --spatial-denoise`
 (default OFF). Relay-only — no node or protocol change, so it toggles by
 restarting the relay on the laptop while the Jetson nodes keep running
@@ -129,36 +145,63 @@ class SpatialDepthFilter:
         only for a uniform call site; both are unused (stateless). Returns a
         numpy uint16 array of shape (h, w), buffer-compatible with every
         downstream `np.frombuffer(depth, ...)` call site."""
-        d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w).astype(np.float32)
-        valid = d != 0
+        d_full = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
+        valid_full = d_full != 0
+        out = np.zeros((h, w), dtype=np.uint16)
+        if not valid_full.any():
+            return out                          # nothing to filter (all holes)
+
+        # Crop to the bounding box of valid pixels and filter only that. Every
+        # pixel outside the box is invalid (a hole), so it would output 0
+        # anyway AND it can never be a kept neighbour of a valid pixel (a valid
+        # pixel on the box edge only borders holes outside) — so cropping is
+        # EXACT, not an approximation. Huge win on a background-subtracted
+        # subject (a small blob in a big grid); a no-op cost on a full frame.
+        rows = np.any(valid_full, axis=1)
+        cols = np.any(valid_full, axis=0)
+        r0, r1 = int(np.argmax(rows)), h - 1 - int(np.argmax(rows[::-1]))
+        c0, c1 = int(np.argmax(cols)), w - 1 - int(np.argmax(cols[::-1]))
+        d = d_full[r0:r1 + 1, c0:c1 + 1].astype(np.float32)
+        valid = valid_full[r0:r1 + 1, c0:c1 + 1]
+        ch, cw = d.shape
 
         r = self.radius
+        inv2sd2 = self._inv2sd2
         # Zero-pad by the radius so a neighbour offset is a plain slice; the
-        # padded border is invalid (valid=False) so out-of-frame neighbours
+        # padded border is invalid (valid=False) so out-of-box neighbours
         # contribute nothing — no wraparound (which np.roll would introduce).
         dp = np.pad(d, r, mode="constant", constant_values=0.0)
         vp = np.pad(valid, r, mode="constant", constant_values=False)
 
-        wsum = np.zeros((h, w), dtype=np.float32)   # sum of neighbour weights
-        dsum = np.zeros((h, w), dtype=np.float32)   # sum of weight * neighbour depth
+        wsum = np.zeros((ch, cw), dtype=np.float32)  # sum of neighbour weights
+        dsum = np.zeros((ch, cw), dtype=np.float32)  # sum of weight*neighbour depth
+        wt = np.empty((ch, cw), dtype=np.float32)    # reused scratch per offset
+        tmp = np.empty((ch, cw), dtype=np.float32)
         for dy, dx, sw in self._offsets:
             # nd[y,x] = d[y+dy, x+dx], nv likewise for validity (0 where OOB).
-            nd = dp[r + dy:r + dy + h, r + dx:r + dx + w]
-            nv = vp[r + dy:r + dy + h, r + dx:r + dx + w]
-            diff = d - nd
-            # Depth-similarity (range) weight: ~1 for same-surface neighbours,
-            # ~0 across a silhouette. Multiplied by nv so INVALID neighbours
-            # (missing measurements, not depth 0) never enter the average.
-            rw = np.exp(-(diff * diff) * self._inv2sd2)
-            wt = sw * rw * nv
+            nd = dp[r + dy:r + dy + ch, r + dx:r + dx + cw]
+            nv = vp[r + dy:r + dy + ch, r + dx:r + dx + cw]
+            # Depth-similarity (range) weight exp(-diff^2/2sigma^2): ~1 for
+            # same-surface neighbours, ~0 across a silhouette. All in-place into
+            # `wt` (no per-offset temporaries — this loop runs on the full grid
+            # every frame, so allocation churn shows up directly as lost fps).
+            np.subtract(d, nd, out=wt)
+            np.multiply(wt, wt, out=wt)          # diff^2
+            np.multiply(wt, -inv2sd2, out=wt)
+            np.exp(wt, out=wt)                    # range weight in place
+            np.multiply(wt, nv, out=wt)          # drop INVALID neighbours
+            if sw != 1.0:
+                np.multiply(wt, sw, out=wt)      # spatial (distance) weight
             wsum += wt
-            dsum += wt * nd
+            np.multiply(wt, nd, out=tmp)
+            dsum += tmp
 
         # A valid centre always includes its own offset (0,0): sw=1, diff=0 ->
         # rw=1, nv=True -> self-weight 1, so wsum > 0 there and it can never
         # collapse to 0. Invalid centres have wsum 0 and are forced to exactly
         # 0 below -> the input mask is preserved.
         keep = valid & (wsum > 0.0)
-        out = np.divide(dsum, wsum, out=np.zeros((h, w), dtype=np.float32),
-                        where=keep)
-        return np.clip(np.round(out), 0, 65535).astype(np.uint16)
+        crop = np.divide(dsum, wsum, out=np.zeros((ch, cw), dtype=np.float32),
+                         where=keep)
+        out[r0:r1 + 1, c0:c1 + 1] = np.clip(np.round(crop), 0, 65535).astype(np.uint16)
+        return out

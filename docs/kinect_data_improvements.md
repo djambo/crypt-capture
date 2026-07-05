@@ -51,7 +51,13 @@ Laplacian `smooth`, but done ONCE at the relay over the depth grid so the
 future recording gets it for free instead of re-deriving it per client.
 Stateless (no per-sensor memory, unlike the temporal One-Euro) and preserves
 the depth zero/non-zero mask BYTE-IDENTICALLY (the `aligned_color_grid` RGB
-pairing invariant). Opt-in: `preview_server.py --spatial-denoise`
+pairing invariant). **Perf note:** it runs inline per frame at the relay and
+its cost scales with grid pixels scanned — so it crops to the valid-pixel
+bounding box first, making a background-subtracted subject ~3 ms at 1280x720
+(essentially free), while a FULL un-subtracted environment frame is the costly
+case (~45 ms at 1280x720 r=1). Run it with background subtraction on (its
+intended mode) for the subject; leave it off for the full-room setup view if
+fps matters there. Opt-in: `preview_server.py --spatial-denoise`
 [`--spatial-radius` 1=3x3 / 2=5x5, `--spatial-sigma-depth` mm]; off by
 default; no node/protocol change. Unit-tested
 (`tests/test_spatial_denoise.py`: noise reduction, edge preservation,
