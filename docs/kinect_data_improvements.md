@@ -30,16 +30,35 @@ while staying responsive to real motion. Opt-in via `--temporal-denoise`;
 defaults (`min_cutoff=1.0`, `beta=0.01`) are a first estimate pending
 eyes-on tuning against a real (not simulated) noisy Kinect.
 
-### 💡 Spatial (within-frame) depth smoothing
-An edge-preserving bilateral filter across NEIGHBOURING pixels in one frame —
-complements the temporal filter above (that one denoises one pixel *over
-time*; this denoises *across pixels* within a single frame), keyed off the
-local depth gradient so it doesn't blur across real silhouette edges. The
-`crypt` viewer's `MeshCloud` already does something in this spirit
-client-side (its edge-preserving Laplacian `smooth`, default 0.5, over grid
-neighbours — see that repo's CLAUDE.md) but only for the **mesh** render;
-doing it at the relay would denoise the **point** render too, and benefit
-every viewer instead of duplicating the work per client.
+### ✅ Spatial (within-frame) depth smoothing (done, opt-in)
+`central/spatial_denoise.py` (`SpatialDepthFilter`) — an edge-preserving
+**bilateral** filter across NEIGHBOURING pixels in one frame, applied at the
+relay right after the temporal filter and before unprojection. Complements
+the temporal filter above (that denoises one pixel *over time* and can't
+touch a single frame's spatial grain; this denoises *across pixels* within a
+frame, so it flattens the pebbled surface even on the first frame / a subject
+that never holds still). Each neighbour is weighted by BOTH spatial closeness
+(a Gaussian on pixel distance — the ordinary blur term) AND depth similarity
+(a Gaussian on depth difference, `sigma_depth` in mm — the "range" term).
+The range term is what makes it edge-preserving: ToF jitter is a few mm →
+same-surface neighbours average together and the grain smooths out, but a
+silhouette (subject 1.2 m vs wall 2.5 m) is a jump of hundreds of mm → those
+across-edge neighbours get ~zero weight and are excluded, so the edge stays
+crisp and no phantom mid-depth bridge points are created. It's the same
+principle as the `crypt` viewer's `MeshCloud` `maxEdge` cut + edge-preserving
+Laplacian `smooth`, but done ONCE at the relay over the depth grid so the
+**point** render benefits too (not only the mesh) and every viewer / every
+future recording gets it for free instead of re-deriving it per client.
+Stateless (no per-sensor memory, unlike the temporal One-Euro) and preserves
+the depth zero/non-zero mask BYTE-IDENTICALLY (the `aligned_color_grid` RGB
+pairing invariant). Opt-in: `preview_server.py --spatial-denoise`
+[`--spatial-radius` 1=3x3 / 2=5x5, `--spatial-sigma-depth` mm]; off by
+default; no node/protocol change. Unit-tested
+(`tests/test_spatial_denoise.py`: noise reduction, edge preservation,
+hole-neighbour exclusion, mask preservation, statelessness) + E2E (sim →
+relay → client: point count identical on vs off, colour pairing intact).
+Defaults (`radius=1`, `sigma_depth=30 mm`) are a first estimate pending
+eyes-on tuning against a real noisy Kinect.
 
 ### 💡 Flying-pixel / edge-artifact removal
 Classic ToF artifact: depth "mixes" between foreground and background right
