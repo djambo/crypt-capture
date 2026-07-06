@@ -177,14 +177,18 @@ Two repos:
   into the color grid → much more color detail / a denser cloud, the "higher-res
   color" win, at more points + some depth holes) vs `color_to_depth` (1 pt/depth
   pixel, color warped into the depth grid — fewer, cleaner points). `color_resolution`/`fps` are also
-  accepted (viewer color-res dropdown handed off 2026-07-06). **Color-resolution
-  is the cheap face-detail lever (2026-07-06):** in `color_to_depth` the color
-  warps into the depth grid, so the streamed cloud stays depth-grid sized at ANY
-  color res → a sharper source improves per-point color for **free** (identical
-  point count/RVL/wire; only USB + the SDK warp cost more). `1536P` (2048×1536,
-  4:3, matches the depth FOV, 30 fps) is the Orin profile default now; in
-  `depth_to_color` it also multiplies the point count. `tests/test_camera.py`
-  pins the invariant. Mode tables are pyk4a-free + unit-tested
+  accepted (viewer color-res dropdown built 2026-07-06). **Color-resolution — WHERE
+  IT HELPS (2026-07-06, corrected):** it adds real face-color DETAIL only in
+  `depth_to_color` (there each color pixel IS a streamed point → more res = more
+  colored points) and the future textured mesh. In `color_to_depth` the cloud is
+  DEPTH-grid sized, so color is capped at the depth resolution — one color per
+  depth point regardless of capture res; a higher source only *marginally*
+  improves each point's color (better filtering/registration + 4:3 covers the
+  depth FOV better than 16:9). It's **free** on that path (identical
+  point count/RVL/wire; only USB + the SDK warp cost more), so `1536P` (2048×1536,
+  4:3, 30 fps) is a safe Orin capture default that pays off in depth_to_color/mesh.
+  `tests/test_camera.py` pins the "grid dims invariant to color res in
+  color_to_depth" property. Mode tables are pyk4a-free + unit-tested
   (`tests/test_camera.py`); `sim_node` resizes its synthetic grid + re-sends
   calib so it's testable headless; verified end-to-end (sim 640×576/98k pts →
   1280×720 color grid → 1024² WFOV, intrinsics rebuilt each switch).
@@ -430,8 +434,9 @@ Two repos:
   sources `deploy/profiles/<class>.env` — orin = `--pose-model
   models/movenet.onnx --pose-trt --color-resolution 1536P --workers 4` (safe
   pre-setup: missing model/runtime → "pose disabled", streaming unaffected;
-  1536P color = free sharper faces in color_to_depth, `--workers 4` = headroom
-  for the heavy depth_to_color close-up), nano = full res, 720P, no pose. The
+  1536P color = high-quality capture for depth_to_color/mesh, ~free on the
+  color_to_depth wire, `--workers 4` = headroom for the heavy depth_to_color
+  close-up), nano = full res, 720P, no pose. The
   env file's `EXTRA_ARGS` is appended AFTER the profile (argparse last-wins)
   so it's per-device overrides only. Profiles being in-repo means new default
   flags roll out via the auto-update; the unit change itself needs ONE
@@ -845,8 +850,6 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
-            crypt_viewer_handoff.md (initial CLAUDE.md for the `crypt` repo),
-            crypt_viewer_updates.md (ongoing one-way change log for the viewer),
             kinect_data_improvements.md (catalog of relay post-processing ideas:
             per-sensor cleanup, seam/fusion quality, recording-only heavy passes —
             come back to it before starting new data-quality work), jetson_setup.md
@@ -856,12 +859,17 @@ The browser **viewer is NOT here** — it lives in the `crypt` repo and consumes
 `docs/preview_protocol.md`. The Jetson pulls this repo and runs only `node/` +
 `protocol/`; it never runs the central server or the viewer.
 
-**Cross-repo handoff workflow.** The user works the `crypt` repo in parallel and
-its `CLAUDE.md` evolves there, so **never ship a replacement `CLAUDE.md`** for
-it. Instead, append a dated entry to `docs/crypt_viewer_updates.md` describing
-any protocol/viewer-facing change (with a concrete snippet), then merge to `main`
-and hand the user that file to upload manually into `crypt`. The viewer agent
-reads the entries and folds them in.
+**Cross-repo work (both repos are in the session).** `crypt` and `crypt-capture`
+are checked out side by side (`/home/user/crypt` + `/home/user/crypt-capture`)
+and editable together in one session, so **make cross-repo changes directly** —
+when a protocol/stream change here needs a viewer change, edit the `crypt` viewer
+in the same pass and keep BOTH `CLAUDE.md` files current. `docs/preview_protocol.md`
+is the shared source of truth for the wire format (`CPV1`/`CPV2`, the control
+plane, recording). *(The old one-way handoff changelog —
+`docs/crypt_viewer_updates.md` here / `docs/capture_updates.md` in `crypt` — and
+the seed `crypt_viewer_handoff.md` were removed 2026-07-06 once both repos became
+directly editable; historical entries mentioning them are just prose.)* Both
+repos develop on the same feature branch.
 
 ## How to run
 

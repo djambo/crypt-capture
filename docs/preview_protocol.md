@@ -164,14 +164,18 @@ change**). Fields:
   grid→depth extrinsic, so switching doesn't tilt/shift the cloud — no viewer
   impact.
 - `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart).
-  **The cheap face-detail lever.** In `color_to_depth` the color is warped into
-  the depth grid, so the streamed cloud stays depth-grid sized at *any* color
-  resolution — a higher-res source just sharpens the per-point color for **free**
-  (identical point count, RVL size and wire bytes; only USB + the SDK warp cost
-  more). `1536P` (2048×1536, 4:3) matches the depth FOV aspect better than 16:9
-  720p and still holds 30 fps; it's the Orin profile default. In `depth_to_color`
-  the point grid **is** the color image, so raising it also multiplies the point
-  count (and the wire) — pair it with the perf knobs below.
+  **Where it adds real face-color detail:** only in `depth_to_color` (there the
+  point grid **is** the color image, so more resolution = more colored points =
+  more detail, at the cost of more points and wire) and the future textured-mesh
+  render (color decoupled from geometry). In `color_to_depth` the streamed cloud
+  is **depth-grid sized**, so color is capped at the depth resolution — one color
+  per depth point no matter the capture res; a higher source only *marginally*
+  improves each point's single color (better filtering/registration, and a 4:3
+  mode covers the depth FOV better than 16:9 720p so fewer edge points come out
+  uncolored). It is **free** on that path (identical point count, RVL size and
+  wire bytes; only USB + the SDK warp cost more). `1536P` (2048×1536, 4:3) is the
+  Orin profile default — a safe high-quality capture default that pays off the
+  moment you switch to `depth_to_color` or the mesh.
 - `fps` — `5`/`15`/`30`, auto-clamped (WFOV-unbinned & 3072p cap at 15) (restart).
 
 **Keeping `depth_to_color` fast.** One point per color pixel is ~2.5× the
