@@ -34,9 +34,13 @@ node (color_to_depth)                relay                         viewer (MeshC
   depth point into the colour camera using colour intrinsics + Brown-Conrady
   distortion + the DEPTH→COLOR extrinsic — all sent once by the node. The Jetson
   stays out of the per-point UV maths (it is CPU-bound).
-- **Colour transport = JPEG per frame**, encoded on the node (Orin has hardware
-  JPEG; `cv2`/`Pillow` fallback), forwarded verbatim by the relay. Codec byte in
-  the wire so NVENC/H.26x can slot in later behind the same block.
+- **Colour transport = JPEG per frame**, encoded on the node **on a dedicated
+  encoder THREAD** (`cv2`/libjpeg-turbo releases the GIL), forwarded verbatim by
+  the relay. Codec byte in the wire so NVENC/H.26x can slot in later.
+  **Hard-won (2026-07-06):** encoding inline on the CAPTURE thread halved node
+  fps (30→15) — the ~15-25 ms encode blocked every capture. It now runs on its
+  own thread; the capture thread only copies the latest colour into a slot
+  (latest-wins) and moves on, so encode overlaps capture on another core.
 - Per-point **rgb is still sent** (additive): the point render and older viewers
   keep working unchanged; textured mesh is a pure add. (Dropping rgb in textured
   mode is a later bandwidth optimisation.)

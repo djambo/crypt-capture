@@ -804,8 +804,12 @@ Two repos:
   only while the subject render is `mesh` (JPEG encode is pure cost otherwise);
   `color_to_depth` only. UVs computed at the RELAY (x86, already unprojects) so
   the CPU-bound Jetson stays out of it; JPEG codec byte on the wire so NVENC can
-  slot in later. **Perf note:** JPEG encode runs on the node's capture thread
-  (libjpeg-turbo releases the GIL); if it caps fps, lower colour res or quality.
+  slot in later. **Perf (hard-won 2026-07-06):** JPEG encode must run on a
+  DEDICATED THREAD, not the capture thread — inline it halved node fps 30→15 (the
+  ~15-25 ms encode blocked every capture; confirmed on hardware). Now the capture
+  thread only copies the latest colour into a slot (latest-wins) and the encoder
+  thread does the work in parallel (`jpeg_encoder` in kinect_node). Still: fewer
+  points / lower colour res / lower `quality` all reduce the cost further.
   Unit-tested (`tests/test_texture.py`: CCLR/CTEX round-trip, UV projection
   recovers pixels, CPV1+CPV2 UV/texture blocks) + socket E2E (relay + `sim_node
   --set_texture` synthetic texture → headless client gets UV in [0,1] + the

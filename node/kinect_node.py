@@ -625,6 +625,40 @@ def run(host, port, sensor_id, frames,
     sender_t = threading.Thread(target=sender, daemon=True)
     sender_t.start()
 
+    # JPEG encoder thread (textured mesh): the ~15-25 ms encode of the full-res
+    # colour image MUST NOT run on the capture thread — inline it halved node fps
+    # (30 -> 15) because the capture loop blocked on it every frame. Here the
+    # capture thread just drops the latest colour into a slot (a cheap copy — the
+    # SDK reuses its buffer on the next capture) and moves on; this thread encodes
+    # in parallel and pushes CTEX. libjpeg-turbo/cv2 releases the GIL, so a thread
+    # (not a process — no 12 MB IPC) gives real parallelism. Latest-wins: a slow
+    # encoder just drops stale colours (the texture is a photo; a frame of skew is
+    # invisible, and the relay pairs the freshest CTEX with the next frame).
+    tex_slot = {"color": None, "fid": 0, "stop": False}
+    tex_cv = threading.Condition()
+
+    def jpeg_encoder():
+        while True:
+            with tex_cv:
+                while tex_slot["color"] is None and not tex_slot["stop"]:
+                    tex_cv.wait()
+                if tex_slot["stop"]:
+                    return
+                color = tex_slot["color"]
+                fid = tex_slot["fid"]
+                tex_slot["color"] = None
+            jpeg = _encode_jpeg(color, texture["quality"])
+            if jpeg is not None:
+                try:
+                    outq.put(("raw", encode_texture(
+                        sensor_id, fid, jpeg,
+                        int(color.shape[1]), int(color.shape[0]))))
+                except Exception:
+                    pass
+
+    encoder_t = threading.Thread(target=jpeg_encoder, daemon=True)
+    encoder_t.start()
+
     # Wire the pose child's keypoints into the ordered sender queue (CPOS
     # rides "raw" like calib/imu, so socket writes stay serialised). NEVER
     # wait on the frame queue: full -> drop this skeleton, another is one
@@ -725,30 +759,29 @@ def run(host, port, sensor_id, frames,
             if pose_proc is not None and csrc is not None:
                 pose_proc.submit(csrc, depth)
 
-            # Textured mesh: ship the full-res colour image (JPEG) + colour
-            # calib so the relay UV-textures the mesh. color_to_depth only — there
-            # geometry is cheap depth-res and the texture carries the colour
-            # detail. Enqueued as "raw" BEFORE the frame item so CTEX arrives
-            # just ahead of its Frame (the relay pairs latest-per-sensor). The
-            # JPEG encode runs on this capture thread (libjpeg-turbo/nvjpeg via
-            # cv2 releases the GIL); if it caps fps, lower colour res or quality.
+            # Textured mesh: hand the full-res colour to the JPEG encoder THREAD
+            # (color_to_depth only) so the encode never blocks capture. The CCLR
+            # colour calib is still sent from here (it reads pyk4a, which is
+            # capture-thread-only) but it's cheap and one-shot.
             if texture["stream"] and align == "color_to_depth":
                 try:
                     full_color = cap.color            # (Hc, Wc, 4) BGRA full res
                 except Exception:
                     full_color = None
                 if full_color is not None:
-                    ch, cw = int(full_color.shape[0]), int(full_color.shape[1])
                     if texture["resend_calib"]:
+                        cw, ch = int(full_color.shape[1]), int(full_color.shape[0])
                         cfx, cfy, ccx, ccy, cdist = _read_color_intrinsics(k4a)
                         cR, ct = _depth_to_color_extrinsic(k4a)
                         outq.put(("raw", encode_color_calib(
                             sensor_id, cw, ch, cfx, cfy, ccx, ccy, cdist, cR, ct)))
                         texture["resend_calib"] = False
-                    jpeg = _encode_jpeg(full_color, texture["quality"])
-                    if jpeg is not None:
-                        outq.put(("raw", encode_texture(
-                            sensor_id, sent, jpeg, cw, ch)))
+                    # Copy (the SDK reuses the buffer next capture) + notify;
+                    # the encode runs off this thread. Latest-wins.
+                    with tex_cv:
+                        tex_slot["color"] = full_color.copy()
+                        tex_slot["fid"] = sent
+                        tex_cv.notify()
 
             # Snapshot the live-tunable knobs (the control reader mutates them)
             # and hand the heavy stage to a worker process; the sender emits
@@ -776,6 +809,10 @@ def run(host, port, sensor_id, frames,
     finally:
         if pose_proc is not None:
             pose_proc.stop()
+        with tex_cv:                          # wake + stop the JPEG encoder
+            tex_slot["stop"] = True
+            tex_cv.notify()
+        encoder_t.join(timeout=2.0)
         outq.put(None)                        # sender exits after the backlog
         sender_t.join(timeout=10.0)
         if sender_t.is_alive():               # wedged mid-sendall (peer stopped
