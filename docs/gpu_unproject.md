@@ -129,7 +129,14 @@ under CPV3 replay through the same GPU path.
 
 1. ✅ **Numba RVL decode** (approach C) — done; ~10× relay decode on full clouds,
    and it stays on A-lite's critical path (the relay still decodes).
-2. **CPV3 relay encoder + calib uniforms** (this doc).
-3. **Viewer GPU unproject shader** (MeshCloud/PointCloud CPV3 path).
+2. ✅ **CPV3 relay encoder + calib message** (2026-07-06) — `preview_server
+   --wire cpv3` ships depth + bitmap + `step`, skipping unproject/UV/rig at the
+   relay; `sensor_calib` JSON carries the depth/colour intrinsics + rig. Proven
+   **lossless** (reconstructs CPV1's exact XYZ, incl. stride + rig) at ~2.5 B/pt
+   vs 19 — `tests/test_cpv3.py` + socket E2E. `build_message_v3` /
+   `extract_depth_grid` in `central/preview_server.py`. Calibration sessions must
+   run in cpv1/cpv2 (they need relay-side XYZ; cpv3 returns none) — a one-time
+   setup step, so switch to cpv3 for streaming after aligning.
+3. **Viewer GPU unproject shader** (MeshCloud/PointCloud CPV3 path) — NEXT.
 4. Later: WebTransport transport (D), then full-A (Wasm RVL + shader denoise) only
    if the relay CPU is measured to bind.

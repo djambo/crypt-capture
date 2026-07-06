@@ -59,6 +59,8 @@ RECORD_STATUS_EVERY_S = 1.0   # live REC stats broadcast cadence
 
 PREVIEW_MAGIC = b"CPV1"
 PREVIEW_MAGIC_V2 = b"CPV2"                    # compact wire format (--wire cpv2)
+PREVIEW_MAGIC_V3 = b"CPV3"                    # GPU-unproject wire (depth + bitmap;
+                                             # the browser unprojects — approach A)
 _PREVIEW_HEADER = struct.Struct("<4sIIII")   # magic, flags, sensor, frame, count
 _CPV2_QUANT = struct.Struct("<ffff")         # offset xyz + uniform scale (metres)
 FLAG_POSITIONS = 0x1
@@ -372,6 +374,61 @@ def _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb, gravity,
     return b"".join(parts)
 
 
+def extract_depth_grid(depth_u16, w, h, stride, node_stride=1, max_points=None):
+    """The FRONT HALF of unproject, without the ray×depth expansion — for CPV3,
+    where the browser unprojects. Applies the SAME stride/max_points coarsening
+    so the emitted (grid_w, grid_h, indices) match unproject's exactly, and
+    returns the valid depth values in grid row-major order plus the per-axis
+    full-res pixel step (so the browser can map grid cell (u,v) -> full-res
+    pixel (u*step_u, v*step_v) to look up its ray). Returns
+    (depth_vals uint16, grid_w, grid_h, indices uint32, step_u, step_v)."""
+    d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
+    su = sv = stride
+    while True:
+        us = np.arange(0, w, su)
+        vs = np.arange(0, h, sv)
+        sub = d[vs][:, us]
+        m = sub != 0
+        if not max_points or int(np.count_nonzero(m)) <= max_points:
+            break
+        if len(us) >= len(vs):
+            su += 1
+        else:
+            sv += 1
+    grid_w, grid_h = len(us), len(vs)
+    depth_vals = sub[m].astype(np.uint16)
+    indices = np.flatnonzero(m).astype(np.uint32)
+    return depth_vals, grid_w, grid_h, indices, su * node_stride, sv * node_stride
+
+
+def build_message_v3(sensor_id, frame_id, depth_vals, grid_w, grid_h, indices,
+                     step_u, step_v, gravity=None, texture=None):
+    """CPV3 payload: the browser unprojects (docs/gpu_unproject.md). Same 20-byte
+    header (magic CPV3), then a 4-byte STEP block (u16 step_u, step_v = full-res
+    pixels per grid cell), the valid-pixel DEPTH (count × uint16 mm, grid
+    row-major), optional gravity (view-frame down, the browser applies the rig),
+    the CPV2-style valid-mask grid BITMAP, and the optional texture block. NO
+    positions/rgb/uv — those are derived on the GPU from depth + the per-sensor
+    calibration (sent as a `sensor_calib` JSON message)."""
+    count = int(len(depth_vals))
+    flags = (FLAG_POSITIONS | FLAG_GRID
+             | (FLAG_GRAVITY if gravity is not None else 0)
+             | (FLAG_TEXTURE if texture is not None else 0))
+    header = _PREVIEW_HEADER.pack(PREVIEW_MAGIC_V3, flags, sensor_id & 0xFFFFFFFF,
+                                  frame_id & 0xFFFFFFFF, count)
+    parts = [header, struct.pack("<HH", int(step_u) & 0xFFFF, int(step_v) & 0xFFFF),
+             np.ascontiguousarray(depth_vals, dtype="<u2").tobytes()]
+    if gravity is not None:
+        parts.append(np.asarray(gravity, dtype="<f4").tobytes())
+    mask = np.zeros(grid_w * grid_h, dtype=np.uint8)
+    mask[indices] = 1
+    parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
+    parts.append(np.packbits(mask, bitorder="little").tobytes())
+    if texture is not None:
+        parts.append(_texture_block(texture))
+    return b"".join(parts)
+
+
 # Central-side pose (docs/skeleton_pose.md): how long after a node's own CPOS
 # message the relay keeps its fallback inference suppressed for that sensor.
 NODE_POSE_QUIET_S = 2.0
@@ -500,7 +557,8 @@ class PreviewServer:
         # quantised xyz + valid-mask bitmap grid, ~52% smaller; needs a
         # CPV2-aware crypt viewer). Default cpv1 so a relay restart never breaks
         # a running viewer; flip to cpv2 once the viewer ships the parser.
-        self.wire_format = "cpv2" if str(wire).lower() == "cpv2" else "cpv1"
+        wl = str(wire).lower()
+        self.wire_format = wl if wl in ("cpv1", "cpv2", "cpv3") else "cpv1"
         # Central-side pose fallback: run the SAME MoveNet at the relay for
         # sensors whose node doesn't send CPOS (the weak Nano). None = off.
         self.pose_model = pose_model
@@ -532,6 +590,7 @@ class PreviewServer:
         # mode (set_texture) — the default path never touches these.
         self._sensor_color_calib = {}       # sensor_id -> dict(fx,fy,cx,cy,dist,R,t,w,h)
         self._pending_texture = {}          # sensor_id -> dict(format,width,height,data)
+        self._sensor_dims = {}              # sensor_id -> (w,h) full-res depth grid (CPV3)
         self.frames_relayed = 0
         # Rig extrinsics (docs/rig_calibration.md): per-sensor (R,t) applied
         # AFTER unprojection so ONE canonical world frame goes out on the wire
@@ -602,6 +661,12 @@ class PreviewServer:
         # populated without asking.
         if self._rig:
             self._send_text(conn, self._rig_poses_message())
+        # CPV3 viewers unproject on the GPU, so hand each known sensor's
+        # calibration up front (harmless to CPV1/CPV2 viewers — unknown type).
+        for sid in list(self._sensor_intr):
+            msg = self._sensor_calib_message(sid)
+            if msg is not None:
+                self._send_text(conn, msg)
         self._send_text(conn, self._recordings_message())
         status = self._recorder.status()
         if status is not None:
@@ -866,6 +931,41 @@ class PreviewServer:
             }
         return {"type": "rig_poses", "tier": meta.get("tier"),
                 "ref": meta.get("ref"), "sensors": sensors}
+
+    def _sensor_calib_message(self, sid):
+        """Everything a CPV3 viewer needs to unproject sensor `sid` on the GPU
+        (docs/gpu_unproject.md): full-res depth intrinsics + Brown-Conrady
+        distortion, the per-sensor rig matrix (view->world; null = identity),
+        and the colour intrinsics + DEPTH->COLOR extrinsic for in-shader UV
+        projection (null until the node sends CCLR). Low-rate: on connect and
+        whenever any of these change. Returns None if the depth intrinsics
+        haven't arrived from the node yet."""
+        intr = self._sensor_intr.get(sid)
+        if intr is None:
+            return None
+        fx, fy, cx, cy, dist = intr
+        w, h = self._sensor_dims.get(sid, (0, 0))
+        rig = self._rig.get(sid)
+        col = self._sensor_color_calib.get(sid)
+        return {
+            "type": "sensor_calib", "sensor": sid,
+            "depth": {"fx": fx, "fy": fy, "cx": cx, "cy": cy,
+                      "dist": [float(c) for c in dist], "w": w, "h": h},
+            "rig": ({"R": np.asarray(rig[0], dtype=float).reshape(9).tolist(),
+                     "t": np.asarray(rig[1], dtype=float).tolist()}
+                    if rig is not None else None),
+            "color": ({"fx": col["fx"], "fy": col["fy"], "cx": col["cx"],
+                       "cy": col["cy"], "dist": [float(c) for c in col["dist"]],
+                       "w": col["width"], "h": col["height"],
+                       "R": [float(v) for v in col["R"]],
+                       "t": [float(v) for v in col["t"]]}
+                      if col is not None else None),
+        }
+
+    def _broadcast_sensor_calib(self, sid):
+        msg = self._sensor_calib_message(sid)
+        if msg is not None:
+            self._broadcast_text(msg)
 
     def _clear_rig_calib(self):
         """Reset alignment: cancel any running calibration session, delete
@@ -1238,6 +1338,21 @@ class PreviewServer:
         CPV1 message bytes. Pure w.r.t. shared mutable state (reads only its
         args + immutable config), so it runs safely in a --workers thread pool.
         Returns (out_bytes, npoints, xyz)."""
+        # CPV3 (approach A): the browser unprojects on the GPU, so the relay
+        # only extracts the valid depth values + bitmap and forwards them — NO
+        # per-point unproject / UV projection / rig transform here (the rig rides
+        # rig_poses; the browser applies it). This is the whole relay-CPU + wire
+        # win. xyz is None (a calibration session, which needs xyz, must run in
+        # cpv1/cpv2 — it's a one-time setup step).
+        if self.wire_format == "cpv3":
+            dvals, gw, gh, idx, su, sv = extract_depth_grid(
+                depth, frame.width, frame.height, self.stride, ns,
+                max_points=self.max_points)
+            out = build_message_v3(frame.sensor_id, frame.frame_id, dvals, gw, gh,
+                                   idx, su, sv, gravity=gravity,
+                                   texture=texture)
+            return out, int(len(dvals)), None
+
         # max_points is enforced INSIDE unproject by coarsening the sampling
         # stride (grid stays coherent), not a point-wise trim (that punched
         # periodic holes — gap stripes / an empty mesh in depth_to_color).
@@ -1301,7 +1416,9 @@ class PreviewServer:
             self._sensor_intr[sid] = (
                 payload["fx"], payload["fy"], payload["cx"],
                 payload["cy"], payload.get("dist", (0.0,) * 8))
+            self._sensor_dims[sid] = (payload["width"], payload["height"])
             self._ray.pop(sid, None)        # rebuild ray table on next frame
+            self._broadcast_sensor_calib(sid)   # CPV3 viewers need it to unproject
             d = payload.get("dist", (0.0,) * 8)
             print("[preview] sensor %d intrinsics from node: "
                   "fx=%.1f fy=%.1f cx=%.1f cy=%.1f dist=[%s]" % (
@@ -1337,6 +1454,7 @@ class PreviewServer:
         elif kind == "color_calib":
             sid = payload["sensor_id"]
             self._sensor_color_calib[sid] = payload
+            self._broadcast_sensor_calib(sid)   # CPV3 in-shader UV needs it
             print("[preview] sensor %d colour calib for textured mesh "
                   "(%dx%d, fx=%.1f)" % (sid, payload["width"],
                                         payload["height"], payload["fx"]))
@@ -1431,7 +1549,7 @@ class PreviewServer:
                         o0, n0, _ = fut0.result()
                         win = self._emit(f0, o0, n0, win)
                     out, npts, xyz = self._finish_frame(*job)
-                    if self._calib_session is not None:
+                    if self._calib_session is not None and xyz is not None:
                         # An active calibration session consumes the RAW
                         # view-frame cloud (a re-run must not solve on already-
                         # transformed points — this xyz is pre-rig only when no
@@ -1643,14 +1761,16 @@ def main():
                     help="don't attach the depth-grid index block (FLAG_GRID) "
                          "to CPV1 frames — saves 4 bytes/point but the viewer "
                          "can't render the textured mesh, only points")
-    ap.add_argument("--wire", default="cpv1", choices=("cpv1", "cpv2"),
+    ap.add_argument("--wire", default="cpv1", choices=("cpv1", "cpv2", "cpv3"),
                     help="point-cloud wire format. 'cpv1' (default): float32 "
                          "positions + u32 grid indices, 19 B/pt — every deployed "
                          "viewer. 'cpv2': uint16 quantised positions (per-frame "
                          "bbox scale, quantum ~0.03-0.12 mm, far below ToF noise) "
                          "+ valid-mask bitmap grid, ~9 B/pt (~52%% smaller) — "
-                         "needs a CPV2-aware crypt viewer (see "
-                         "docs/preview_protocol.md)")
+                         "needs a CPV2-aware crypt viewer. 'cpv3': ship DEPTH + "
+                         "bitmap + calibration and unproject on the browser GPU "
+                         "(~2 B/pt, approach A) — needs a CPV3 GPU-unproject "
+                         "viewer (NOT built yet; see docs/gpu_unproject.md)")
     ap.add_argument("--recordings-dir", default="recordings",
                     help="where scene recordings (viewer Record button) are "
                          "written and served from (HTTP GET /recordings on "
@@ -1747,8 +1867,9 @@ def main():
                            workers=workers,
                            wire=args.wire)
     print("[preview] wire format: %s%s" % (
-        args.wire, " (uint16 quant + bitmap grid, ~52%% smaller)"
-        if args.wire == "cpv2" else " (float32 + u32 grid)"))
+        args.wire, {"cpv2": " (uint16 quant + bitmap grid, ~52% smaller)",
+                    "cpv3": " (depth + bitmap; browser GPU unprojects, ~2 B/pt)"}
+        .get(args.wire, " (float32 + u32 grid)")))
     print("[preview] workers: %d%s (--workers %s, %d CPUs)" % (
         workers,
         " (parallel unproject+build)" if workers > 1 else " (single-threaded)",

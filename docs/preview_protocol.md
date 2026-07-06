@@ -125,6 +125,55 @@ Offsets are all 2-byte-aligned at most, so (as with CPV1) read multi-byte
 blocks with a `DataView` / copy before viewing as a typed array. `count = 0`
 frames carry the quant block (scale = 1) and no position bytes.
 
+## Message: `CPV3` (browser-GPU unproject, little-endian)
+
+Selected with `preview_server --wire cpv3` (default `cpv1`). The relay ships
+**depth + a valid-mask bitmap + per-sensor calibration** and the **browser
+unprojects on the GPU** (approach A, `docs/gpu_unproject.md`) — ~2 B/pt vs CPV1's
+19. No positions/rgb/uv on the wire; those are derived in-shader from depth + the
+`sensor_calib` message (below). Dispatch on the 4-byte MAGIC.
+
+Header: identical 20-byte layout, `magic = "CPV3"`, `count` = valid pixels,
+`flags` bit0 (positions, implied) + bit3 (grid, always) + bit2 (gravity) + bit5
+(texture) as applicable. Then, in order:
+
+0. **step** *(always, right after the header)* — `u16 step_u`, `u16 step_v`: the
+   full-resolution pixels per grid cell (usually 1; >1 when the relay coarsened
+   for `--max-points`). Grid cell `(u,v)` maps to full-res pixel
+   `(u*step_u, v*step_v)` — the browser uses this to look up that cell's ray.
+1. **depth** — `count × uint16` (mm), one per valid pixel, grid row-major (same
+   order as the set bits below).
+2. **gravity** *(flag bit2)* — `3 × float32`, view-frame down (the browser
+   applies the rig, so this is pre-rig; unchanged bytes from CPV1).
+3. **grid** *(flag bit3, always)* — `u16 grid_w`, `u16 grid_h`, then the
+   valid-mask **bitmap** (`ceil(grid_w*grid_h/8)` bytes, LSB-first) — identical
+   to CPV2's grid. Set bits in order are 1:1 with the depth values.
+4. **texture** *(flag bit5, last)* — the JPEG colour image, byte-identical to the
+   textured-mesh block (`u8 format`, `u16 w`, `u16 h`, `u32 len`, bytes).
+
+The browser reconstructs each point: `u,v` from the bitmap → full-res pixel via
+`step` → undistorted ray (from `sensor_calib.depth`) → `pos = ray * depth` →
+view flip → `pos_world = rig * pos` (rig from `rig_poses`). Colour UV is projected
+in-shader from `sensor_calib.color`. This is **lossless** — it reconstructs the
+exact XYZ CPV1 emits (`tests/test_cpv3.py`).
+
+### `sensor_calib` (server → browser JSON, for CPV3)
+
+Sent to each client on connect and whenever the depth/colour intrinsics arrive or
+change. Everything the GPU needs to unproject:
+
+```json
+{"type":"sensor_calib","sensor":0,
+ "depth":{"fx","fy","cx","cy","dist":[8],"w","h"},
+ "rig":{"R":[9],"t":[3]}|null,
+ "color":{"fx","fy","cx","cy","dist":[8],"w","h","R":[9],"t":[3]}|null}
+```
+
+`depth` = full-res depth intrinsics + Brown-Conrady distortion (build the ray
+table). `rig` = view→world (also delivered live via `rig_poses`; null = identity).
+`color` = colour intrinsics + DEPTH→COLOR extrinsic for in-shader UV projection
+(null until the node sends colour calib). Unknown to CPV1/CPV2 viewers — ignored.
+
 ## Viewer side (sketch, lives in `crypt`)
 
 ```js

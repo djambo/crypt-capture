@@ -605,6 +605,19 @@ Two repos:
   A-lite `CPV3` design (the relay still decodes RVL there), so it isn't throwaway.
   Bit-fix hard-won: numba widens `uint32 << n` to signed 64-bit, so the
   reference's `& _U32` wrap needs explicit `uint32()` casts on the shifts.
+- 🟡 **Approach A — CPV3 relay encoder BUILT (2026-07-06), viewer next**:
+  `preview_server --wire cpv3` ships **depth + valid-mask bitmap + a `step`
+  block** and a per-sensor **`sensor_calib`** JSON (depth/colour intrinsics +
+  distortion + rig) instead of unprojecting — the relay does NO per-point
+  unproject/UV/rig (the whole CPU + wire win). `build_message_v3` /
+  `extract_depth_grid` (shares unproject's exact stride/mask logic). Proven
+  **lossless** — reconstructs CPV1's exact XYZ incl. stride + rig — at ~2.5 B/pt
+  vs 19 (`tests/test_cpv3.py` + socket E2E: relay+sim → CPV3 frames +
+  sensor_calib). Default stays cpv1; `--wire cpv3` needs the (not-yet-built)
+  browser GPU-unproject shader, so it's opt-in. Calibration sessions still need
+  cpv1/cpv2 (they consume relay-side XYZ; cpv3 returns none — a one-time setup
+  step). ⏳ NEXT: the viewer CPV3 path (vertex shader: ray×depth → world via the
+  rig, in-shader UV, mesh from the bitmap).
 - 📋 **Approach A — browser-GPU unprojection (design, `docs/gpu_unproject.md`)**:
   the architectural fix for relay CPU + wire on full clouds. Stop shipping XYZ;
   ship compact **depth + grid bitmap + calibration uniforms** and unproject on
@@ -912,7 +925,9 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_cpv2.py (CPV2 compact wire: quant-below-noise, CPV1-equivalent
             positions, bitmap grid == unproject indices, size),
             test_texture.py (textured mesh: CCLR/CTEX round-trip, UV projection,
-            CPV1+CPV2 uv/texture wire blocks)
+            CPV1+CPV2 uv/texture wire blocks),
+            test_cpv3.py (CPV3 GPU-unproject wire: extract==unproject grid,
+            lossless XYZ reconstruction incl. stride+rig, size vs cpv1)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
             per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),
