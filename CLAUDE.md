@@ -177,7 +177,14 @@ Two repos:
   into the color grid → much more color detail / a denser cloud, the "higher-res
   color" win, at more points + some depth holes) vs `color_to_depth` (1 pt/depth
   pixel, color warped into the depth grid — fewer, cleaner points). `color_resolution`/`fps` are also
-  accepted (not in the UI yet). Mode tables are pyk4a-free + unit-tested
+  accepted (viewer color-res dropdown handed off 2026-07-06). **Color-resolution
+  is the cheap face-detail lever (2026-07-06):** in `color_to_depth` the color
+  warps into the depth grid, so the streamed cloud stays depth-grid sized at ANY
+  color res → a sharper source improves per-point color for **free** (identical
+  point count/RVL/wire; only USB + the SDK warp cost more). `1536P` (2048×1536,
+  4:3, matches the depth FOV, 30 fps) is the Orin profile default now; in
+  `depth_to_color` it also multiplies the point count. `tests/test_camera.py`
+  pins the invariant. Mode tables are pyk4a-free + unit-tested
   (`tests/test_camera.py`); `sim_node` resizes its synthetic grid + re-sends
   calib so it's testable headless; verified end-to-end (sim 640×576/98k pts →
   1280×720 color grid → 1024² WFOV, intrinsics rebuilt each switch).
@@ -421,8 +428,10 @@ Two repos:
   `/etc/nv_tegra_release` (L4T R34+ → `orin`, R32/R28 → `nano`, unknown →
   `default`; force with `NODE_PROFILE=` in `/etc/default/kinect-node`) and
   sources `deploy/profiles/<class>.env` — orin = `--pose-model
-  models/movenet.onnx --pose-trt` (safe pre-setup: missing model/runtime →
-  "pose disabled", streaming unaffected), nano = full res, no pose. The
+  models/movenet.onnx --pose-trt --color-resolution 1536P --workers 4` (safe
+  pre-setup: missing model/runtime → "pose disabled", streaming unaffected;
+  1536P color = free sharper faces in color_to_depth, `--workers 4` = headroom
+  for the heavy depth_to_color close-up), nano = full res, 720P, no pose. The
   env file's `EXTRA_ARGS` is appended AFTER the profile (argparse last-wins)
   so it's per-device overrides only. Profiles being in-repo means new default
   flags roll out via the auto-update; the unit change itself needs ONE

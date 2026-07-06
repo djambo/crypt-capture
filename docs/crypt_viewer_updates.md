@@ -11,6 +11,50 @@
 > Star, base `CPV1` spec, v0 viewer sketch) was delivered separately as your
 > initial `CLAUDE.md`; these entries amend it.
 
+## 2026-07-06 — color-resolution control (cheap face-detail lever)
+**Status: NEW — add a `color res` dropdown to the camera panel.**
+
+No protocol change — this is a **UI addition only**. The `set_camera` command
+already accepts `color_resolution` (the relay forwards it, the node restarts the
+sensor and re-sends intrinsics); the viewer's camera section just doesn't expose
+it yet. Add a dropdown next to the existing **depth FOV** / **align** dropdowns.
+
+**Why it matters (the user's ask: sharper faces without going slow).** Facial
+color detail is currently soft because the color is sampled at the geometry
+resolution. Raising `color_resolution` is the cheapest fix:
+
+- In **`color_to_depth`** (the point path — the default) the color is warped into
+  the depth grid, so the streamed cloud stays depth-grid sized at *any* color
+  resolution. A higher-res source **just sharpens the per-point color for free** —
+  identical point count, identical wire size, no fps cost. This directly improves
+  face color on **both** the point render and the mesh render.
+- In **`depth_to_color`** the point grid *is* the color image, so raising it also
+  multiplies the point count and the wire (heavier — the existing perf story).
+
+**Values** (send the string verbatim in `set_camera`):
+`720P` (1280×720, 16:9), `1080P` (1920×1080), `1440P` (2560×1440),
+`1536P` (2048×1536, **4:3 — matches the depth FOV, recommended**),
+`2160P` (3840×2160), `3072P` (4096×3072, 15 fps only). All but `3072P` hold
+30 fps with a 30-fps depth mode.
+
+```js
+// camera panel: color-resolution dropdown -> set_camera
+send(JSON.stringify({ cmd: "set_camera", color_resolution: value })); // e.g. "1536P"
+```
+
+Suggested default in the dropdown: **`1536P`** (Orin capture nodes now default to
+it via `deploy/profiles/orin.env`). Like the other `set_camera` fields there is
+**no ack** — the feedback is the color getting sharper; and a color-res change
+resets the node's background plate (different grid on restart in depth_to_color;
+in color_to_depth the grid is unchanged but re-capture is harmless), so prompt a
+background re-capture as you already do for depth-mode/align changes.
+
+> Heads-up: the deeper fix for face detail — a **textured mesh** (cheap
+> depth-res geometry + a full-res color image + per-vertex UVs, so color
+> resolution is fully decoupled from point count) — is planned next and *will*
+> add a new `CPV1` block + a texture image. That's a separate future entry; this
+> one is just the free win available today.
+
 ## 2026-07-05 — `CPV2` compact wire format (uint16 positions + bitmap grid)
 **Status: NEW — needs a viewer decoder before the relay can use it.**
 

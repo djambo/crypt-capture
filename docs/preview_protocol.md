@@ -163,9 +163,28 @@ change**). Fields:
   alignments are registered to the same (depth) frame relay-side via a node-sent
   grid→depth extrinsic, so switching doesn't tilt/shift the cloud — no viewer
   impact.
-- `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart;
-  mostly matters in `depth_to_color`, where the point grid IS the color image).
+- `color_resolution` — `720P`/`1080P`/`1440P`/`1536P`/`2160P`/`3072P` (restart).
+  **The cheap face-detail lever.** In `color_to_depth` the color is warped into
+  the depth grid, so the streamed cloud stays depth-grid sized at *any* color
+  resolution — a higher-res source just sharpens the per-point color for **free**
+  (identical point count, RVL size and wire bytes; only USB + the SDK warp cost
+  more). `1536P` (2048×1536, 4:3) matches the depth FOV aspect better than 16:9
+  720p and still holds 30 fps; it's the Orin profile default. In `depth_to_color`
+  the point grid **is** the color image, so raising it also multiplies the point
+  count (and the wire) — pair it with the perf knobs below.
 - `fps` — `5`/`15`/`30`, auto-clamped (WFOV-unbinned & 3072p cap at 15) (restart).
+
+**Keeping `depth_to_color` fast.** One point per color pixel is ~2.5× the
+mask/RVL/color work and wire of `color_to_depth`, so if it dips below 30 fps use
+the existing knobs (no protocol change): keep **background subtraction on** (the
+biggest win — a subtracted subject stays point-count-bound at 30 fps in either
+alignment), run the relay with **`--wire cpv2`** (~52 % smaller wire) and
+**`--workers`** on a many-core central box, and give a heavy node more
+**`--workers`** (the Orin profile uses 4). These make `depth_to_color` *usable*
+but never as cheap as `color_to_depth`; the per-vertex color detail is still
+capped by point count, and the holes are inherent — the architectural fix
+(decouple color from geometry via a textured mesh: cheap depth-res geometry + a
+full-res color image + per-vertex UVs) is the deferred "texture-as-video" lever.
 
 No ack is sent — the feedback is the cloud changing resolution/density. A camera
 change also resets the node's background plate (the grid is a different size), so

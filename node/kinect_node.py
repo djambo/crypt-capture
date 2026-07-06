@@ -704,7 +704,13 @@ def main():
                     help="initial depth FOV mode (live-changeable from the UI)")
     ap.add_argument("--color-resolution", default="720P",
                     choices=list(camera_modes.COLOR_RESOLUTIONS),
-                    help="initial color resolution (live-changeable)")
+                    help="initial color resolution (live-changeable). Higher = "
+                         "sharper face colour. In color_to_depth it is FREE "
+                         "(colour warps into the depth grid, so points/RVL/wire "
+                         "are unchanged — only USB + the SDK warp cost more); "
+                         "1536P (2048x1536, 4:3) matches the depth FOV and holds "
+                         "30 fps. In depth_to_color it also raises the point "
+                         "count. Orin nodes default to 1536P (deploy/profiles).")
     ap.add_argument("--camera-fps", type=int, default=30,
                     choices=list(camera_modes.FPS_CHOICES),
                     help="initial fps (auto-clamped per mode)")

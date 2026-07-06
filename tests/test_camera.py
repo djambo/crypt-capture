@@ -38,6 +38,24 @@ def test_grid_dims_follow_alignment():
     assert cm.grid_dims("WFOV_UNBINNED", "1080P", "depth_to_color") == (1920, 1080)
 
 
+def test_color_resolution_free_in_color_to_depth():
+    # The "higher-res colour is free" lever: in color_to_depth the streamed grid
+    # is the DEPTH grid regardless of the colour capture resolution, so raising
+    # colour res leaves the point count / RVL / wire size untouched (only the SDK
+    # warp samples a sharper source). Guard that invariant.
+    base = cm.grid_dims("NFOV_UNBINNED", "720P", "color_to_depth")
+    for res in cm.COLOR_RESOLUTIONS:
+        assert cm.grid_dims("NFOV_UNBINNED", res, "color_to_depth") == base
+    # In depth_to_color the grid IS the colour image, so it DOES track the res.
+    assert (cm.grid_dims("NFOV_UNBINNED", "1536P", "depth_to_color")
+            == cm.COLOR_RESOLUTIONS["1536P"]["dims"] == (2048, 1536))
+    # The higher-detail colour resolutions we recommend for face detail all hold
+    # 30 fps with a 30-fps depth mode (only WFOV-unbinned depth / 3072p colour
+    # drop to 15).
+    for res in ("1080P", "1440P", "1536P"):
+        assert cm.max_fps("NFOV_UNBINNED", res) == 30
+
+
 def test_apply_command_restart_flags():
     cfg = dict(cm.DEFAULTS)
 
@@ -74,6 +92,7 @@ def test_apply_command_restart_flags():
 def run():
     test_fps_clamp()
     test_grid_dims_follow_alignment()
+    test_color_resolution_free_in_color_to_depth()
     test_apply_command_restart_flags()
     print("camera tests: OK")
 
