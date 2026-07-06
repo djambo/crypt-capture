@@ -42,6 +42,16 @@ def _check_case(depth, name):
     assert list(rvl._decompress_np(ref_bytes, n)) == list(depth), name
     assert list(rvl._decompress_py(np_bytes, n)) == list(depth), name
 
+    # Numba decode path (relay hot path): bit-identical to the reference/numpy,
+    # on both reference- and numpy-encoded bytes. Only when numba is installed.
+    if rvl._HAVE_NUMBA and n:
+        words_ref = np.frombuffer(ref_bytes, dtype=np.uint32)
+        words_np = np.frombuffer(np_bytes, dtype=np.uint32)
+        nb_ref = rvl._decompress_numba(words_ref, n)
+        nb_np = rvl._decompress_numba(words_np, n)
+        assert list(nb_ref) == list(depth), "numba != reference: %s" % name
+        assert list(nb_np) == list(depth), "numba != numpy bytes: %s" % name
+
 
 def test_edge_cases():
     cases = {

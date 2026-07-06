@@ -587,7 +587,35 @@ Two repos:
   node → reference decoder gets valid rgb+grid frames). ⏳ Next lever if 3-cam
   full-cloud is ever needed on <2.5 GbE: per-client format negotiation (mixed
   old/new viewers) and/or shipping quantised DEPTH + intrinsics so the browser
-  unprojects (≈5 B/pt).
+  unprojects (≈5 B/pt) — the **`CPV3` / browser-GPU-unproject** plan,
+  `docs/gpu_unproject.md`.
+- ✅ **Numba RVL decode — approach C (2026-07-06)**: RVL decode is inherently
+  SEQUENTIAL (variable-length bit codes — a pointer chase NumPy can't fully
+  vectorize), the one relay stage neither the `--workers` pool nor the GPU
+  helps. `protocol/rvl.py` now has an optional **Numba `@njit`** decode
+  (`_decompress_numba`) behind the same import-guarded fallback as the NumPy
+  path (numba present → JIT, else NumPy, else pure-Python — all **bit-identical**,
+  cross-checked in `tests/test_rvl.py`). Measured (numpy2 box): full 720p decode
+  **96 → 9.4 ms (~10×)**; a subtracted subject is already cheap (~0.2 ms, ~1.5×)
+  — so C is a **full-cloud / setup-view** win, not a subject-path one (the
+  subject was never relay-bound). `@njit(cache=True)` caches the compiled code, so
+  only the first frame after a relay start pays ~1-2 s compile. **Optional relay
+  dep** (`pip install numba`); the Jetson ENCODE path stays on NumPy (already
+  fast, numba on ARM is heavier). This also stays on the critical path of the
+  A-lite `CPV3` design (the relay still decodes RVL there), so it isn't throwaway.
+  Bit-fix hard-won: numba widens `uint32 << n` to signed 64-bit, so the
+  reference's `& _U32` wrap needs explicit `uint32()` casts on the shifts.
+- 📋 **Approach A — browser-GPU unprojection (design, `docs/gpu_unproject.md`)**:
+  the architectural fix for relay CPU + wire on full clouds. Stop shipping XYZ;
+  ship compact **depth + grid bitmap + calibration uniforms** and unproject on
+  the CLIENT GPU (a vertex/compute shader: ray×depth → world via the rig matrix,
+  in-shader UV projection, mesh from the bitmap). **A-lite** (relay keeps
+  RVL-decode+denoise, only stops the per-point XYZ expansion) is the chosen
+  variant — ~9× smaller wire (~2 B/pt), big relay-CPU drop, no Wasm-RVL/shader-
+  denoise needed; **full-A** (RVL+denoise in-browser) deferred until measured
+  necessary. New additive `CPV3` magic (default stays cpv1); the viewer already
+  dispatches on magic. Sequencing: C ✅ → CPV3 relay encoder → viewer GPU shader
+  → WebTransport (approach D). NOT YET BUILT.
 - ✅ **Relay latency-adaptive frame retirement (2026-07-05)** — the parallel
   `--workers` path used to hold `workers-1` frames in flight before emitting the
   oldest, so on `--workers auto` (4-8) it added **~100-260 ms of pure latency**
@@ -882,6 +910,8 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
             per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),
+            gpu_unproject.md (approach A: ship depth+calib, unproject on the
+            client GPU — CPV3 wire + shader plan; approach C = Numba RVL decode),
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
             kinect_data_improvements.md (catalog of relay post-processing ideas:

@@ -38,6 +38,19 @@ try:
 except ImportError:                                   # keep the spine dep-free
     _np = None
 
+# Optional Numba JIT for the DECODE hot path on the relay. RVL decode is
+# inherently SEQUENTIAL (variable-length bit codes — a pointer chase the NumPy
+# path can't fully vectorize), which is exactly where a JIT-compiled scalar loop
+# beats NumPy: near-C speed with no build step. Import-guarded like NumPy, so a
+# box without numba just uses the NumPy path (both bit-identical to the
+# reference). The node's ENCODE path is left on NumPy (it's already fast enough
+# on the Jetson, and numba on ARM is heavier to install).
+try:
+    from numba import njit as _njit
+    _HAVE_NUMBA = True
+except ImportError:
+    _HAVE_NUMBA = False
+
 _U32 = 0xFFFFFFFF
 
 
@@ -312,7 +325,68 @@ def _decompress_np(data, num_pixels):
 
 
 # ---------------------------------------------------------------------------
-# Public dispatch: NumPy when available, else the pure-Python reference.
+# Numba-JIT decode (relay hot path). One tight sequential pass — the same
+# algorithm as `_decompress_py`, compiled to near-C. Bit-identical to both
+# other paths (cross-checked in tests/test_rvl.py).
+# ---------------------------------------------------------------------------
+
+if _HAVE_NUMBA:
+
+    @_njit(cache=True)
+    def _decode_vle_nb(words, idx, word, nibbles):
+        # Mirrors _Reader.decode_vle. uint32 wraparound in numba == the
+        # reference's `& _U32` masks; `value` is uint64 (fits any RVL value).
+        value = _np.uint64(0)
+        bits = 29
+        while True:
+            if nibbles == 0:
+                word = words[idx]
+                idx += 1
+                nibbles = 8
+            nibble = word & _np.uint32(0xF0000000)
+            # Explicit uint32() casts force the 32-bit wrap the reference gets
+            # via `& _U32` — numba widens `uint32 << n` to a signed 64-bit type,
+            # which would otherwise leak high bits into the next nibble read.
+            shifted = _np.uint32(nibble << _np.uint32(1))
+            if bits >= 0:
+                value |= _np.uint64(shifted) >> _np.uint64(bits)
+            else:
+                value |= _np.uint64(shifted) << _np.uint64(-bits)
+            word = _np.uint32(word << _np.uint32(4))
+            nibbles -= 1
+            bits -= 3
+            if (nibble & _np.uint32(0x80000000)) == 0:
+                break
+        return value, idx, word, nibbles
+
+    @_njit(cache=True)
+    def _decompress_numba(words, num_pixels):
+        out = _np.zeros(num_pixels, dtype=_np.uint16)
+        idx = 0
+        word = _np.uint32(0)
+        nibbles = 0
+        pos = 0
+        previous = _np.int64(0)
+        while pos < num_pixels:
+            zeros, idx, word, nibbles = _decode_vle_nb(words, idx, word, nibbles)
+            for _z in range(_np.int64(zeros)):
+                if pos >= num_pixels:                    # guard malformed streams
+                    break
+                pos += 1                                 # out already zero-filled
+            nonzeros, idx, word, nibbles = _decode_vle_nb(words, idx, word, nibbles)
+            for _n in range(_np.int64(nonzeros)):
+                if pos >= num_pixels:
+                    break
+                zz, idx, word, nibbles = _decode_vle_nb(words, idx, word, nibbles)
+                delta = _np.int64(zz >> _np.uint64(1)) ^ -_np.int64(zz & _np.uint64(1))
+                previous = (previous + delta) & 0xFFFF
+                out[pos] = _np.uint16(previous)
+                pos += 1
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Public dispatch: Numba (decode) / NumPy when available, else pure Python.
 # ---------------------------------------------------------------------------
 
 def compress(depth):
@@ -323,7 +397,13 @@ def compress(depth):
 
 
 def decompress(data, num_pixels):
-    """Inverse of compress(); returns an array('H') of length num_pixels."""
+    """Inverse of compress(); returns an array('H') of length num_pixels.
+
+    Prefers the Numba JIT path (near-C sequential decode) on the relay, else the
+    vectorized NumPy path, else the pure-Python reference — all bit-identical."""
+    if _HAVE_NUMBA and num_pixels and _np is not None:
+        words = _np.frombuffer(data, dtype=_np.uint32)
+        return array("H", _decompress_numba(words, num_pixels).tobytes())
     if _np is not None:
         return _decompress_np(data, num_pixels)
     return _decompress_py(data, num_pixels)
