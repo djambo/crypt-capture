@@ -615,7 +615,13 @@ Two repos:
   denoise needed; **full-A** (RVL+denoise in-browser) deferred until measured
   necessary. New additive `CPV3` magic (default stays cpv1); the viewer already
   dispatches on magic. Sequencing: C ✅ → CPV3 relay encoder → viewer GPU shader
-  → WebTransport (approach D). NOT YET BUILT.
+  → WebTransport (approach D). NOT YET BUILT. **PCVR vs standalone = ONE
+  architecture + per-client LOD, not a branch** (doc "Tiers" section): GPU
+  unproject is cheap even on a mobile Adreno; standalone's real limits are Wi-Fi
+  bandwidth + mobile-CPU parse, both of which A-lite *reduces* (~9× wire). Tier
+  by payload — grid density, fps, subject-only, and the texture codec byte
+  (PCVR→JPEG, standalone→H.264/H.265 via WebCodecs HW decode); the textured mesh
+  is the standalone-friendly render. Same shader for both.
 - ✅ **Relay latency-adaptive frame retirement (2026-07-05)** — the parallel
   `--workers` path used to hold `workers-1` frames in flight before emitting the
   oldest, so on `--workers auto` (4-8) it added **~100-260 ms of pure latency**

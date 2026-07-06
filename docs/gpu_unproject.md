@@ -70,6 +70,33 @@ extrinsic (for in-shader UV projection), and the per-sensor **rig matrix** (view
 - Denoise (temporal/spatial) stays on the relay for A-lite; can become a
   ping-pong depth-texture pass later (full-A).
 
+## Tiers: PCVR vs standalone — one architecture, per-client LOD
+
+Standalone headsets (Quest 3, Pico) are the reason to do A-lite, **not** a reason
+to fear it. Unprojecting a depth map on the GPU is trivially cheap even on a
+mobile Adreno; what actually binds standalone is (1) **Wi-Fi bandwidth**, (2)
+**mobile-CPU JS parse**, (3) **stereo-90 Hz fill rate**. A-lite *reduces* (1) and
+(2) directly (~9× smaller wire, no XYZ-float handling), and the CPU-unproject
+alternative would be far worse on a mobile CPU. So the tier difference is
+**payload level-of-detail, negotiated per client — NOT a second architecture.**
+Keep one A-lite pipeline (source-agnostic, recorded == live) and vary the data:
+
+- **Geometry density** — coarser grid stride ⇒ fewer points/vertices (the grid
+  block already carries the effective stride).
+- **Texture codec + resolution** — the texture block's `format` byte is the tier
+  hinge: **PCVR → JPEG; standalone → H.264/H.265 via WebCodecs** (Quest decodes
+  video in a dedicated HW block, far cheaper than per-frame JPEG), at a smaller
+  resolution.
+- **fps cap** and **subject-only** (background subtraction) for standalone.
+- **Render**: the **textured mesh** is the standalone-friendly render (a
+  ~25k-vertex mesh + one texture draws easily at stereo 90 Hz — cheaper than
+  millions of points); add foveated rendering. Same shader as PCVR.
+
+Negotiated at connect (the relay already gives each viewer its own sender), so a
+Quest and a gaming PC watch the *same scene* at different densities — no forked
+render path. Needs on-device measurement (Quest browser WebGL2 perf, WebCodecs
+decode cost, IR coexistence with the Kinect) before the tier numbers are trusted.
+
 ## What stays on the relay
 
 RVL decode (Numba, ~10× faster now), temporal/spatial denoise, background
