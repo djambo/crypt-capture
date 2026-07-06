@@ -729,6 +729,36 @@ Two repos:
   supports `--host auto`; unit-tested (`tests/test_discovery.py`, loopback +
   broadcast round-trip). Falls back to a fixed host/mDNS/DHCP-reservation where
   Wi-Fi blocks broadcast (AP isolation) — see `docs/jetson_setup.md` §9.
+- ✅ **Textured mesh — full-res colour on cheap geometry (2026-07-06, design:
+  `docs/textured_mesh.md`)**: the real fix for soft facial colour. Colour was
+  carried **per point**, so colour detail was bolted to geometry resolution —
+  `color_to_depth` caps it at the depth grid, `depth_to_color` lifts it only by
+  exploding the point count (heavy at every stage, tested UNUSABLE close-up).
+  Now the subject **mesh** keeps cheap `color_to_depth` geometry but carries
+  colour as **one full-resolution JPEG per frame + per-vertex UVs**, sampled
+  per-fragment in the viewer → colour at the colour camera's full resolution on
+  a ~640×576 mesh, at 30 fps. Only helps the mesh (a point is one fragment).
+  **Pipeline:** node (`kinect_node`) JPEG-encodes `cap.color` (cv2/nvjpeg, else
+  Pillow) and sends it as `CTEX` + colour intrinsics/distortion + DEPTH→COLOR
+  extrinsic as `CCLR` (`protocol/frame.py`, additive messages); the **relay**
+  projects each depth point into the colour image for its UV
+  (`preview_server._project_color_uv`, forward Brown-Conrady — the inverse of
+  the ray table) and adds `FLAG_UV`(0x10) + `FLAG_TEXTURE`(0x20) blocks to the
+  `CPV1`/`CPV2` frame (rgb still sent → old viewers/point render unchanged); the
+  **viewer** (`MeshCloud`) uploads a UV attribute + async-decodes the JPEG
+  (`createImageBitmap`, latest-wins) into the mesh albedo, dropping vertexColours
+  while textured. Off by default end-to-end — the viewer sends `set_texture`
+  only while the subject render is `mesh` (JPEG encode is pure cost otherwise);
+  `color_to_depth` only. UVs computed at the RELAY (x86, already unprojects) so
+  the CPU-bound Jetson stays out of it; JPEG codec byte on the wire so NVENC can
+  slot in later. **Perf note:** JPEG encode runs on the node's capture thread
+  (libjpeg-turbo releases the GIL); if it caps fps, lower colour res or quality.
+  Unit-tested (`tests/test_texture.py`: CCLR/CTEX round-trip, UV projection
+  recovers pixels, CPV1+CPV2 UV/texture blocks) + socket E2E (relay + `sim_node
+  --set_texture` synthetic texture → headless client gets UV in [0,1] + the
+  texture block) + viewer parse validated for both wire formats. ⏳ next:
+  hardware tuning (encode cost, quality); optionally drop rgb in textured mode
+  for bandwidth; NVENC/H.26x colour transport for many viewers.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -846,8 +876,12 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             recording keeps all), test_relay_workers.py (--workers parallel
             unproject+build == sequential bytes),
             test_cpv2.py (CPV2 compact wire: quant-below-noise, CPV1-equivalent
-            positions, bitmap grid == unproject indices, size)
+            positions, bitmap grid == unproject indices, size),
+            test_texture.py (textured mesh: CCLR/CTEX round-trip, UV projection,
+            CPV1+CPV2 uv/texture wire blocks)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
+            textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
+            per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),
             rig_calibration.md (marker-ball extrinsic calibration: procedure + wiring plan),
             skeleton_pose.md (2D pose -> 3D joints: model choice, CPOS wire format, skeleton align),
             kinect_data_improvements.md (catalog of relay post-processing ideas:

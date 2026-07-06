@@ -26,7 +26,7 @@ from array import array
 
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
-                            encode_pose)
+                            encode_pose, encode_color_calib, encode_texture)
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
@@ -271,6 +271,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
     cfg = dict(camera_modes.DEFAULTS)
     state = {"w": width, "h": height, "resend_calib": True}
     imu_state = {"stream": False}              # live orientation toggle (set_imu)
+    tex_state = {"stream": False, "resend": False}   # textured mesh (set_texture)
     cfg_lock = threading.Lock()
 
     def on_command(cmd):
@@ -284,12 +285,19 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                         cfg["depth_mode"], cfg["color_resolution"], cfg["align"])
                     state["w"], state["h"] = w, h
                     state["resend_calib"] = True
+                    tex_state["resend"] = True     # colour calib tracks the grid
                     print("sensor %d: set_camera %s -> grid %dx%d (align=%s)"
                           % (sensor_id, changed, w, h, cfg["align"]))
         elif c == "set_imu":
             imu_state["stream"] = bool(cmd.get("enabled", False))
             print("sensor %d: imu streaming -> %s"
                   % (sensor_id, imu_state["stream"]))
+        elif c == "set_texture":
+            tex_state["stream"] = bool(cmd.get("enabled", False))
+            if tex_state["stream"]:
+                tex_state["resend"] = True
+            print("sensor %d: textured mesh -> %s"
+                  % (sensor_id, tex_state["stream"]))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -331,6 +339,22 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 depth, color, gw, gh = synth_frame(
                     width, height, sent, sensor_id, s)
             comp = rvl.compress(depth)
+            # Textured mesh (docs/textured_mesh.md): synthetic colour calib +
+            # a fake "JPEG" (opaque bytes the relay forwards verbatim), sent
+            # BEFORE the frame like the real node's CCLR/CTEX. The colour calib
+            # matches the grid pinhole with an identity DEPTH->COLOR extrinsic, so
+            # the relay's projected UVs come back as the grid coords in [0,1].
+            if tex_state["stream"]:
+                if tex_state["resend"] or resend:
+                    fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
+                    sock.sendall(encode_color_calib(
+                        sensor_id, width, height, fx, fx, width / 2.0,
+                        height / 2.0, (0.0,) * 8,
+                        (1, 0, 0, 0, 1, 0, 0, 0, 1), (0, 0, 0)))
+                    tex_state["resend"] = False
+                fake_jpeg = b"\xff\xd8SIMTEX" + bytes((sent & 0xFF,) * 32) + b"\xff\xd9"
+                sock.sendall(encode_texture(
+                    sensor_id, sent, fake_jpeg, width, height))
             frame = Frame(
                 sensor_id=sensor_id, frame_id=sent,
                 timestamp_ns=int(time.time() * 1e9), width=gw, height=gh,

@@ -45,7 +45,7 @@ from protocol.frame import read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
-                       "set_denoise", "set_camera", "set_imu")
+                       "set_denoise", "set_camera", "set_imu", "set_texture")
 # Browser→RELAY commands, handled here (rig calibration + scene recording;
 # nothing goes to nodes).
 _RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "calibrate_floor",
@@ -65,6 +65,8 @@ FLAG_POSITIONS = 0x1
 FLAG_RGB = 0x2
 FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (down) vec
 FLAG_GRID = 0x8                               # trailing depth-grid index block
+FLAG_UV = 0x10                                # trailing count×2 uint16 texture UVs
+FLAG_TEXTURE = 0x20                           # trailing JPEG colour image (last block)
 
 # int16 (uint16) positions can't lose real Kinect resolution: with a per-frame
 # bounding-box scale the quantum is span/65535 — ~0.03 mm for a ~2 m subject,
@@ -151,8 +153,35 @@ def compute_ray_table(w, h, fx, fy, cx, cy, dist, iters=8):
     return x.astype(np.float32), y.astype(np.float32)
 
 
+def _project_color_uv(xo, yo, zo, calib):
+    """Project depth-frame optical points into the COLOUR image → normalised UVs
+    (count×2 float32 in [0,1], top-left origin), for the textured mesh. Applies
+    the DEPTH->COLOR extrinsic then the colour intrinsics + Brown-Conrady
+    (rational) forward distortion — the inverse of the ray table's undistortion.
+    """
+    fx, fy, cx, cy = calib["fx"], calib["fy"], calib["cx"], calib["cy"]
+    k1, k2, p1, p2, k3, k4, k5, k6 = calib["dist"]
+    R = np.asarray(calib["R"], dtype=np.float64).reshape(3, 3)
+    t = np.asarray(calib["t"], dtype=np.float64)
+    W = float(calib["width"]) or 1.0
+    H = float(calib["height"]) or 1.0
+    P = np.column_stack((xo, yo, zo)).astype(np.float64) @ R.T + t
+    z = np.where(P[:, 2] != 0.0, P[:, 2], 1e-9)
+    x = P[:, 0] / z
+    y = P[:, 1] / z
+    r2 = x * x + y * y
+    radial = ((1 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3)
+              / (1 + k4 * r2 + k5 * r2 ** 2 + k6 * r2 ** 3))
+    xd = x * radial + 2 * p1 * x * y + p2 * (r2 + 2 * x * x)
+    yd = y * radial + p1 * (r2 + 2 * y * y) + 2 * p2 * x * y
+    u = (fx * xd + cx) / W
+    v = (fy * yd + cy) / H
+    return np.clip(np.column_stack((u, v)), 0.0, 1.0).astype(np.float32)
+
+
 def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
-              color_grid=None, extrinsic=None, max_points=None):
+              color_grid=None, extrinsic=None, max_points=None,
+              color_calib=None):
     """Depth grid -> (xyz, rgb, grid) for the valid (non-zero) pixels, using the
     distortion-aware full-res ray table. The grid may be node-downsampled
     (`node_stride`): grid pixel (u,v) maps to ray_table[v*node_stride, u*node_stride].
@@ -196,10 +225,13 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
             sv += 1
     grid_w, grid_h = len(us), len(vs)
     if not m.any():
-        return (np.empty((0, 3), dtype=np.float32),
-                np.empty((0, 3), dtype=np.uint8) if color_grid is not None
-                else None,
-                (grid_w, grid_h, np.empty(0, dtype=np.uint32)))
+        empty = (np.empty((0, 3), dtype=np.float32),
+                 np.empty((0, 3), dtype=np.uint8) if color_grid is not None
+                 else None,
+                 (grid_w, grid_h, np.empty(0, dtype=np.uint32)))
+        if color_calib is not None:
+            return empty + (np.empty((0, 2), dtype=np.float32),)
+        return empty
     rx = ray_x[np.ix_(vs * node_stride, us * node_stride)]
     ry = ray_y[np.ix_(vs * node_stride, us * node_stride)]
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
@@ -210,6 +242,10 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
         R, t = extrinsic
         opt = np.column_stack((xo, yo, zo)) @ R.T + t   # P_depth = R·P + t
         xo, yo, zo = opt[:, 0], opt[:, 1], opt[:, 2]
+    # UVs are projected from the DEPTH-frame optical points (post-extrinsic,
+    # pre-view-flip) — only in color_to_depth (identity extrinsic), the textured
+    # path. Computed here so it shares unproject's exact valid mask + point order.
+    uv = _project_color_uv(xo, yo, zo, color_calib) if color_calib is not None else None
     xyz = np.column_stack((xo, -yo, -zo)).astype(np.float32)  # optical->view flip
     rgb = None
     if color_grid is not None:
@@ -217,6 +253,8 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     # Row-major flatten order of `sub[m]` == flatnonzero order, so index k here
     # is point k in xyz/rgb.
     grid = (grid_w, grid_h, np.flatnonzero(m).astype(np.uint32))
+    if color_calib is not None:
+        return xyz, rgb, grid, uv
     return xyz, rgb, grid
 
 
@@ -237,8 +275,23 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
     return grid
 
 
+def _uv_block(uv):
+    """Serialise the texture-UV block: count×2 uint16, normalised [0,1]×65535."""
+    q = np.clip(np.asarray(uv, dtype=np.float32), 0.0, 1.0) * 65535.0
+    return np.ascontiguousarray(np.rint(q), dtype="<u2").tobytes()
+
+
+def _texture_block(texture):
+    """Serialise the texture block (LAST): u8 format, u16 w, u16 h, u32 len,
+    then the encoded image bytes. `texture` = dict(format,width,height,data)."""
+    data = texture["data"]
+    return (struct.pack("<BHHI", int(texture.get("format", 0)) & 0xFF,
+                        int(texture["width"]) & 0xFFFF,
+                        int(texture["height"]) & 0xFFFF, len(data)) + data)
+
+
 def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None,
-                  fmt="cpv1"):
+                  fmt="cpv1", uv=None, texture=None):
     """Serialise one point-cloud frame. `fmt` selects the wire format:
     'cpv1' (float32 positions + u32 grid indices, the original) or 'cpv2'
     (uint16 quantised positions + a valid-mask bitmap grid — ~52% smaller with
@@ -249,10 +302,12 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None,
     flags = (FLAG_POSITIONS
              | (FLAG_RGB if rgb is not None else 0)
              | (FLAG_GRAVITY if gravity is not None else 0)
-             | (FLAG_GRID if grid is not None else 0))
+             | (FLAG_GRID if grid is not None else 0)
+             | (FLAG_UV if uv is not None else 0)
+             | (FLAG_TEXTURE if texture is not None else 0))
     if fmt == "cpv2":
         return _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb,
-                                 gravity, grid)
+                                 gravity, grid, uv, texture)
     header = _PREVIEW_HEADER.pack(
         PREVIEW_MAGIC, flags, sensor_id & 0xFFFFFFFF,
         frame_id & 0xFFFFFFFF, count)
@@ -274,11 +329,15 @@ def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None,
         grid_w, grid_h, indices = grid
         parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
         parts.append(np.ascontiguousarray(indices, dtype="<u4").tobytes())
+    if uv is not None:                       # texture UVs (after grid)
+        parts.append(_uv_block(uv))
+    if texture is not None:                  # JPEG colour image (LAST block)
+        parts.append(_texture_block(texture))
     return b"".join(parts)
 
 
 def _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb, gravity,
-                      grid):
+                      grid, uv=None, texture=None):
     """CPV2 payload: same 20-byte header (magic CPV2) then a 16-byte quant block
     (offset xyz f32 + uniform scale f32), uint16 positions, optional rgb
     (unchanged), optional gravity (unchanged f32), and — if grid — a valid-mask
@@ -306,6 +365,10 @@ def _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb, gravity,
         packed = np.packbits(mask, bitorder="little")
         parts.append(struct.pack("<HH", grid_w & 0xFFFF, grid_h & 0xFFFF))
         parts.append(packed.tobytes())
+    if uv is not None:                       # UV/texture blocks are byte-identical
+        parts.append(_uv_block(uv))          # to CPV1 (only positions+grid differ)
+    if texture is not None:
+        parts.append(_texture_block(texture))
     return b"".join(parts)
 
 
@@ -463,6 +526,12 @@ class PreviewServer:
         self._ray = {}                      # sensor_id -> (w,h,ray_x,ray_y)
         self._sensor_gravity = {}           # sensor_id -> (gx,gy,gz) view-frame
         self._sensor_extrinsic = {}         # sensor_id -> (R 3x3, t 3) or None
+        # Textured mesh (docs/textured_mesh.md): per-sensor COLOUR calibration
+        # (for UV projection) + the latest JPEG texture stashed from the CTEX
+        # message that precedes each frame. Empty until a node enables textured
+        # mode (set_texture) — the default path never touches these.
+        self._sensor_color_calib = {}       # sensor_id -> dict(fx,fy,cx,cy,dist,R,t,w,h)
+        self._pending_texture = {}          # sensor_id -> dict(format,width,height,data)
         self.frames_relayed = 0
         # Rig extrinsics (docs/rig_calibration.md): per-sensor (R,t) applied
         # AFTER unprojection so ONE canonical world frame goes out on the wire
@@ -1164,7 +1233,7 @@ class PreviewServer:
         return rx, ry
 
     def _finish_frame(self, frame, depth, ns, ray_x, ray_y, cgrid,
-                      extrinsic, rig, gravity):
+                      extrinsic, rig, gravity, texture=None, ccalib=None):
         """Heavy STATELESS stage: unproject -> per-sensor rig transform ->
         CPV1 message bytes. Pure w.r.t. shared mutable state (reads only its
         args + immutable config), so it runs safely in a --workers thread pool.
@@ -1172,9 +1241,18 @@ class PreviewServer:
         # max_points is enforced INSIDE unproject by coarsening the sampling
         # stride (grid stays coherent), not a point-wise trim (that punched
         # periodic holes — gap stripes / an empty mesh in depth_to_color).
-        xyz, rgb, grid = unproject(depth, frame.width, frame.height,
-                                   ray_x, ray_y, self.stride, ns,
-                                   cgrid, extrinsic, max_points=self.max_points)
+        # Textured mesh: when a JPEG + colour calib are present, unproject also
+        # projects each point into the colour image for its UV (docs/textured_mesh.md).
+        uv = None
+        want_uv = texture is not None and ccalib is not None
+        if want_uv:
+            xyz, rgb, grid, uv = unproject(
+                depth, frame.width, frame.height, ray_x, ray_y, self.stride, ns,
+                cgrid, extrinsic, max_points=self.max_points, color_calib=ccalib)
+        else:
+            xyz, rgb, grid = unproject(depth, frame.width, frame.height,
+                                       ray_x, ray_y, self.stride, ns,
+                                       cgrid, extrinsic, max_points=self.max_points)
         # Rig extrinsic: P_world = R·P + t per sensor, so one canonical world
         # frame goes out on the wire. Gravity rides the same frame, so it rotates.
         if rig is not None:
@@ -1185,7 +1263,9 @@ class PreviewServer:
                 gravity = (float(g[0]), float(g[1]), float(g[2]))
         out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb, gravity,
                             grid if self.send_grid else None,
-                            fmt=self.wire_format)
+                            fmt=self.wire_format,
+                            uv=uv if want_uv else None,
+                            texture=texture if want_uv else None)
         return out, xyz.shape[0], xyz
 
     def _emit(self, frame, out, npts, win):
@@ -1254,6 +1334,16 @@ class PreviewServer:
             print("[preview] sensor %d grid->depth extrinsic %s" % (
                 sid, "identity" if self._sensor_extrinsic[sid] is None
                 else "set (registers to depth frame)"))
+        elif kind == "color_calib":
+            sid = payload["sensor_id"]
+            self._sensor_color_calib[sid] = payload
+            print("[preview] sensor %d colour calib for textured mesh "
+                  "(%dx%d, fx=%.1f)" % (sid, payload["width"],
+                                        payload["height"], payload["fx"]))
+        elif kind == "texture":
+            # Stash the latest JPEG for this sensor; the next frame picks it up
+            # (the node sends CTEX immediately before its Frame).
+            self._pending_texture[payload["sensor_id"]] = payload
 
     def _serve_node(self, conn, addr):
         print("[preview] node connected %s" % (addr[0],))
@@ -1321,10 +1411,17 @@ class PreviewServer:
                 if self.pose_model and cgrid is not None:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
+                # Textured mesh: pair this frame with the JPEG the node sent
+                # just before it (pop — one texture per frame) + the colour
+                # calib for UV projection. Both None on the default path.
+                texture = self._pending_texture.pop(frame.sensor_id, None)
+                ccalib = (self._sensor_color_calib.get(frame.sensor_id)
+                          if texture is not None else None)
                 job = (frame, depth, ns, ray_x, ray_y, cgrid,
                        self._sensor_extrinsic.get(frame.sensor_id),
                        self._rig.get(frame.sensor_id),
-                       self._sensor_gravity.get(frame.sensor_id))
+                       self._sensor_gravity.get(frame.sensor_id),
+                       texture, ccalib)
                 # Sequential path: single-threaded (--workers 1) OR calibrating
                 # (a session consumes the RAW view-frame xyz, so unproject must
                 # happen here). Flush any parallel tail first to keep order.

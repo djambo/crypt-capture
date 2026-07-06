@@ -151,6 +151,27 @@ _POSE_KP = struct.Struct("<Bffff")       # joint_id, u, v, z_m, conf
 EXTRINSIC_MAGIC = b"CEXT"
 _EXTRINSIC = struct.Struct("<4sI" + "f" * 12)   # magic, sensor, R(9), t(3)
 
+# --- colour-camera calibration (for textured mesh, docs/textured_mesh.md) -----
+# For the textured-mesh render the relay projects each depth point into the
+# COLOUR image to get its UV. That needs the colour camera's intrinsics +
+# Brown-Conrady distortion (OpenCV order k1,k2,p1,p2,k3,k4,k5,k6) AND the
+# DEPTH->COLOR rigid extrinsic (P_color = R·P_depth + t, R row-major 3x3, t
+# metres) — none of which the relay has in color_to_depth (there it only gets
+# the depth intrinsics). Sent once per (re)connect/reconfig alongside CCAL,
+# keyed by sensor_id. w,h are the colour capture resolution the intrinsics are
+# defined at (so the relay normalises UV = pixel / (w,h)).
+COLOR_CALIB_MAGIC = b"CCLR"
+_COLOR_CALIB = struct.Struct("<4sIHH" + "ffff" + "ffffffff" + "ffffffffffff")
+
+# --- per-frame colour texture (JPEG) -----------------------------------------
+# One full-resolution colour image per frame for the textured mesh, sent
+# IMMEDIATELY BEFORE its Frame so the relay can attach it (stash latest per
+# sensor). format 0 = JPEG. Only sent when textured mode is enabled (set_texture)
+# — off by default, so nodes/relays that don't use it never see it.
+TEXTURE_MAGIC = b"CTEX"
+_TEXTURE_HEAD = struct.Struct("<4sIQBHHI")  # magic, sensor, frame_id, fmt, w, h, len
+TEXTURE_JPEG = 0
+
 
 def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
     d = tuple(dist) + (0.0,) * (8 - len(dist))
@@ -168,6 +189,22 @@ def encode_extrinsic(sensor_id, R, t):
     t: 3 floats (metres). P_depth = R·P_grid + t."""
     vals = list(R)[:9] + list(t)[:3]
     return _EXTRINSIC.pack(EXTRINSIC_MAGIC, sensor_id, *vals)
+
+
+def encode_color_calib(sensor_id, width, height, fx, fy, cx, cy, dist, R, t):
+    """Encode the colour-camera calibration for UV projection (CCLR). dist: 8
+    Brown-Conrady coeffs (k1,k2,p1,p2,k3,k4,k5,k6); R: 9 floats row-major
+    (DEPTH->COLOR rotation); t: 3 floats metres. w,h = colour capture res."""
+    d = tuple(dist) + (0.0,) * (8 - len(dist))
+    vals = list(R)[:9] + list(t)[:3]
+    return _COLOR_CALIB.pack(COLOR_CALIB_MAGIC, sensor_id, width, height,
+                             fx, fy, cx, cy, *(d[:8] + tuple(vals)))
+
+
+def encode_texture(sensor_id, frame_id, data, width, height, fmt=TEXTURE_JPEG):
+    """Encode one colour texture image (CTEX). data = encoded bytes (JPEG)."""
+    return _TEXTURE_HEAD.pack(TEXTURE_MAGIC, sensor_id, frame_id, fmt,
+                              width, height, len(data)) + data
 
 
 def encode_pose(sensor_id, timestamp_ns, keypoints):
@@ -212,6 +249,26 @@ def read_message(sock):
         vals = struct.unpack("<I" + "f" * 12, rest)
         return ("extrinsic", {"sensor_id": vals[0],
                               "R": vals[1:10], "t": vals[10:13]})
+    if magic == COLOR_CALIB_MAGIC:
+        rest = _recv_exactly(sock, _COLOR_CALIB.size - 4)
+        if not rest:
+            return None
+        vals = struct.unpack("<IHH" + "ffff" + "ffffffff" + "ffffffffffff", rest)
+        sid, w, h, fx, fy, cx, cy = vals[:7]
+        return ("color_calib", {"sensor_id": sid, "width": w, "height": h,
+                                "fx": fx, "fy": fy, "cx": cx, "cy": cy,
+                                "dist": vals[7:15],
+                                "R": vals[15:24], "t": vals[24:27]})
+    if magic == TEXTURE_MAGIC:
+        rest = _recv_exactly(sock, _TEXTURE_HEAD.size - 4)
+        if not rest:
+            return None
+        sid, fid, fmt, w, h, tlen = struct.unpack("<IQBHHI", rest)
+        data = _recv_exactly(sock, tlen) if tlen else b""
+        if tlen and not data:
+            return None
+        return ("texture", {"sensor_id": sid, "frame_id": fid, "format": fmt,
+                            "width": w, "height": h, "data": data})
     if magic == POSE_MAGIC:
         rest = _recv_exactly(sock, _POSE_HEAD.size - 4)
         if not rest:

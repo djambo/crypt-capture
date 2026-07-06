@@ -25,7 +25,7 @@ can stay source-agnostic (see the North Star in `CLAUDE.md`).
 | field | type | meaning |
 |---|---|---|
 | magic | `4s` | `CPV1` |
-| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present; bit3 = `grid` present |
+| flags | `u32` | bit0 = positions present (always 1); bit1 = `rgb` present; bit2 = `gravity` present; bit3 = `grid` present; bit4 = `uv` present; bit5 = `texture` present |
 | sensor_id | `u32` | source sensor (0..N-1) |
 | frame_id | `u32` | capture frame index (low 32 bits) |
 | count | `u32` | number of points |
@@ -59,6 +59,19 @@ Then the payload blocks, in order:
    by default; `preview_server --no-grid` drops it (−4 bytes/point). Same
    alignment caveat as gravity: with rgb present the offset is not 4-aligned —
    copy the bytes before viewing as `Uint32Array`.
+
+5. **uv** *(only if flag bit4 set)* — `count × 2 × uint16`, each `u,v` normalised
+   to `[0,1]` (`× 65535`, texture top-left origin), one pair per point (same
+   order as positions). The **textured mesh** (docs/textured_mesh.md): the relay
+   projects each depth point into the colour image, so the viewer can sample the
+   full-resolution colour texture per fragment instead of using the depth-res
+   per-vertex `rgb`. After the grid block.
+6. **texture** *(only if flag bit5 set, LAST block)* — `u8 format` (0 = JPEG),
+   `u16 tex_w`, `u16 tex_h`, `u32 len`, then `len` bytes of the encoded colour
+   image. **One image per frame**, shared by all the frame's UVs. Decode it
+   (`createImageBitmap`) into a texture and set it as the mesh albedo; drop
+   vertex colours while textured (the texture is the colour). These two blocks
+   are emitted only while a viewer has requested `set_texture` (mesh render).
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The `--max-points` cap (default **0 = uncapped**,
@@ -96,6 +109,9 @@ Header: identical 20-byte layout, `magic = "CPV2"`. Then, in order:
    below the noise floor, it does not throw away real depth resolution.
 2. **rgb** *(flag bit1)* — `count × 3 × uint8`. **Unchanged from CPV1.**
 3. **gravity** *(flag bit2)* — `3 × float32`. **Unchanged from CPV1.**
+   The **uv** (bit4) and **texture** (bit5) blocks, when present, are also
+   **byte-identical to CPV1** and come last, in that order (only positions and
+   the grid block differ between the formats).
 4. **grid** *(flag bit3, last block)* — `u16 grid_w`, `u16 grid_h`, then a
    **bitmap** of `ceil(grid_w*grid_h/8)` bytes, **LSB-first**: bit
    `i = v*grid_w + u` (byte `i>>3`, bit `i&7`) is set when that sub-grid cell
@@ -138,6 +154,7 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | `{"cmd":"set_denoise","min_neighbors":<n>}` | speckle filter strength (0 = off). |
 | `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
 | `{"cmd":"set_imu","enabled":<bool>}` | **stream live IMU orientation.** When enabled, the node re-reads the accelerometer every ~10 frames and re-sends a fresh gravity (down) vector, so the cloud reorients live as the camera is physically turned. Off by default (one gravity vector is still sent at connect). The gravity rides in the `CPV1` gravity block (bit2). |
+| `{"cmd":"set_texture","enabled":<bool>,"quality":<1-100>}` | **textured mesh** (docs/textured_mesh.md). When enabled (the viewer sends it while the subject render is `mesh`, `color_to_depth` only), the node ships the full-resolution colour image as JPEG + colour calibration, and the relay adds the `uv` (bit4) + `texture` (bit5) blocks to each `CPV1` frame so the mesh is textured at the colour camera's full resolution on cheap depth-res geometry. Off by default (zero cost in point mode). |
 | `{"cmd":"calibrate_fine","seconds":30,"ball_radius":0.05}` | **rig calibration, Tier-2 wand pass — handled AT THE RELAY** (not forwarded). Collects per-sensor ball centers off the raw clouds for `seconds`, solves the rig (Kabsch), writes `rig_calib.json` and starts registering all sensors on the wire. Optional gate overrides: `min_points`, `max_points`, `max_fit_rms`, `min_pairs`. Progress/results stream back as `calib_status` (below). See `docs/rig_calibration.md`. |
 | `{"cmd":"calibrate_rough","seconds":10}` | **rig calibration, Tier-1 rough — relay-handled.** When the nodes stream pose keypoints, the session **auto-upgrades to the skeleton solve** (named joints → full 3D Kabsch, ~2–5 cm, `"tier":"skeleton"`; see docs/skeleton_pose.md; optional `min_conf`, `min_joint_pairs`). Fallback with no pose data: per-sensor IMU leveling + the operator's body-centroid track for yaw/XY (~5–10 cm, `"tier":"rough"`; optional `min_points`, `min_pairs`). Either way: walk a slow "L", visible to every camera. |
 | `{"cmd":"calibrate_floor","seconds":3}` | **per-sensor floor leveling — relay-handled** (`"tier":"floor"`). Fits each camera's floor plane in its OWN raw cloud (floor must be in view: background subtraction off; empty scene is fine) and composes a per-sensor correction (floor normal → +Y about the floor centroid, common height) onto the current rig transforms (identity if uncalibrated) — every camera's floor comes out flat and coplanar even when each cloud has its own tilt. One rigid viewer-side correction can't do this; that's why it's per-sensor at the relay. Meant for uncalibrated/rough rigs (a fine wand calib is already mm-coplanar — re-leveling it per sensor only degrades registration). The viewer's **Detect Floor** button sends this automatically on multi-camera rigs. |

@@ -51,8 +51,45 @@ from pyk4a import (
 
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
-                            encode_pose)
+                            encode_pose, encode_color_calib, encode_texture)
 from node import camera_modes
+
+
+_JPEG = {"fn": None, "tried": False}
+
+
+def _encode_jpeg(bgra, quality=85):
+    """Encode a BGRA image to JPEG bytes for the textured mesh. Uses OpenCV
+    (libjpeg-turbo / nvjpeg on the Orin) if available, else Pillow; returns None
+    if neither is installed (texture just stays off, streaming unaffected).
+    Resolved once and cached."""
+    if not _JPEG["tried"]:
+        _JPEG["tried"] = True
+        try:
+            import cv2
+            _JPEG["fn"] = ("cv2", cv2)
+        except Exception:
+            try:
+                from PIL import Image
+                _JPEG["fn"] = ("pil", Image)
+            except Exception:
+                print("texture: no cv2 or Pillow — install one for the textured "
+                      "mesh; streaming continues without it")
+                _JPEG["fn"] = None
+    fn = _JPEG["fn"]
+    if fn is None:
+        return None
+    kind, mod = fn
+    if kind == "cv2":
+        # cv2 wants BGR; our buffer is BGRA (drop alpha, already BGR order).
+        ok, buf = mod.imencode(".jpg", bgra[..., :3],
+                               [mod.IMWRITE_JPEG_QUALITY, int(quality)])
+        return buf.tobytes() if ok else None
+    rgb = np.ascontiguousarray(bgra[..., 2::-1])     # BGRA -> RGB for Pillow
+    import io
+    b = io.BytesIO()
+    mod.fromarray(rgb, "RGB").save(b, format="JPEG", quality=int(quality))
+    return b.getvalue()
 
 _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
                        (0.0, 0.0, 0.0))
@@ -267,6 +304,50 @@ def _grid_to_depth_extrinsic(k4a, align):
         return _IDENTITY_EXTRINSIC
 
 
+def _read_color_intrinsics(k4a):
+    """COLOR-camera intrinsics + Brown-Conrady distortion, for the textured-mesh
+    UV projection at the relay. Returns (fx, fy, cx, cy, dist8)."""
+    ctype = pyk4a.CalibrationType.COLOR
+    mat = k4a.calibration.get_camera_matrix(ctype)
+    fx, fy, cx, cy = mat[0][0], mat[1][1], mat[0][2], mat[1][2]
+    try:
+        dist = tuple(float(c) for c in
+                     k4a.calibration.get_distortion_coefficients(ctype))
+    except Exception:
+        dist = (0.0,) * 8
+    return fx, fy, cx, cy, dist
+
+
+def _depth_to_color_extrinsic(k4a):
+    """The DEPTH->COLOR rigid transform (P_color = R·P_depth + t; R row-major 3x3,
+    t metres) so the relay can project depth points into the colour image. Uses
+    pyk4a's factory extrinsic, with a basis-vector fallback via the public 3D
+    converter; identity if neither works (UVs then only right at zero baseline)."""
+    cal = k4a.calibration
+    color = pyk4a.CalibrationType.COLOR
+    depth = pyk4a.CalibrationType.DEPTH
+    try:
+        R_mat, t_vec = cal.get_extrinsic_parameters(depth, color)
+        R = tuple(float(v) for v in np.asarray(R_mat, dtype=float).reshape(9))
+        t = tuple(float(v) for v in np.asarray(t_vec, dtype=float).reshape(3))
+        return R, t
+    except Exception:
+        pass
+    try:                                                # basis vectors (mm)
+        o = cal.depth_to_color_3d((0.0, 0.0, 0.0))
+        ex = cal.depth_to_color_3d((1000.0, 0.0, 0.0))
+        ey = cal.depth_to_color_3d((0.0, 1000.0, 0.0))
+        ez = cal.depth_to_color_3d((0.0, 0.0, 1000.0))
+        c0 = [(ex[i] - o[i]) / 1000.0 for i in range(3)]
+        c1 = [(ey[i] - o[i]) / 1000.0 for i in range(3)]
+        c2 = [(ez[i] - o[i]) / 1000.0 for i in range(3)]
+        R = (c0[0], c1[0], c2[0], c0[1], c1[1], c2[1], c0[2], c1[2], c2[2])
+        t = (o[0] / 1000.0, o[1] / 1000.0, o[2] / 1000.0)
+        return R, t
+    except Exception:
+        return (1.0, 0, 0, 0, 1.0, 0, 0, 0, 1.0), (0.0, 0.0, 0.0)
+
+
 def _read_intrinsics(k4a, align):
     """Intrinsics for the camera the streamed grid lives in: the COLOR camera in
     depth_to_color, else the DEPTH camera. Returns (fx, fy, cx, cy, dist8)."""
@@ -389,6 +470,11 @@ def run(host, port, sensor_id, frames,
     bg = BackgroundSubtractor()
     # IMU orientation streaming, toggled live from the UI ("camera orientation").
     imu = {"stream": False}
+    # Textured mesh (docs/textured_mesh.md): when on, ship the full-res colour
+    # image as JPEG (CTEX) + colour calib (CCLR) so the relay can texture the
+    # mesh. Off by default; only color_to_depth (the cheap-geometry path). Toggled
+    # live by set_texture; resend_calib re-sends CCLR on (re)enable/reconfig.
+    texture = {"stream": False, "resend_calib": False, "quality": 85}
 
     # Live camera reconfig (set_camera): the reader thread only *records* the
     # request under a lock; the capture loop performs the (re)start so pyk4a is
@@ -415,6 +501,17 @@ def run(host, port, sensor_id, frames,
         elif c == "set_imu":
             imu["stream"] = bool(cmd.get("enabled", False))
             print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
+        elif c == "set_texture":
+            texture["stream"] = bool(cmd.get("enabled", False))
+            if "quality" in cmd:
+                try:
+                    texture["quality"] = max(1, min(100, int(cmd["quality"])))
+                except (TypeError, ValueError):
+                    pass
+            if texture["stream"]:
+                texture["resend_calib"] = True     # (re)send CCLR before frames
+            print("sensor %d: textured mesh -> %s (q=%d)"
+                  % (sensor_id, texture["stream"], texture["quality"]))
         elif c == "set_camera":
             with cfg_lock:
                 changed = camera_modes.apply_camera_command(cfg, cmd)
@@ -563,6 +660,7 @@ def run(host, port, sensor_id, frames,
                 bg.clear()                          # plate is wrong-shaped now
                 ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
                 calib_sent = False
+                texture["resend_calib"] = True      # colour intrinsics changed
                 print("sensor %d: camera reconfigured (restart=%s) -> %s"
                       % (sensor_id, do_restart, cur))
 
@@ -626,6 +724,31 @@ def run(host, port, sensor_id, frames,
             # the worker infers at its own rate on whatever is freshest).
             if pose_proc is not None and csrc is not None:
                 pose_proc.submit(csrc, depth)
+
+            # Textured mesh: ship the full-res colour image (JPEG) + colour
+            # calib so the relay UV-textures the mesh. color_to_depth only — there
+            # geometry is cheap depth-res and the texture carries the colour
+            # detail. Enqueued as "raw" BEFORE the frame item so CTEX arrives
+            # just ahead of its Frame (the relay pairs latest-per-sensor). The
+            # JPEG encode runs on this capture thread (libjpeg-turbo/nvjpeg via
+            # cv2 releases the GIL); if it caps fps, lower colour res or quality.
+            if texture["stream"] and align == "color_to_depth":
+                try:
+                    full_color = cap.color            # (Hc, Wc, 4) BGRA full res
+                except Exception:
+                    full_color = None
+                if full_color is not None:
+                    ch, cw = int(full_color.shape[0]), int(full_color.shape[1])
+                    if texture["resend_calib"]:
+                        cfx, cfy, ccx, ccy, cdist = _read_color_intrinsics(k4a)
+                        cR, ct = _depth_to_color_extrinsic(k4a)
+                        outq.put(("raw", encode_color_calib(
+                            sensor_id, cw, ch, cfx, cfy, ccx, ccy, cdist, cR, ct)))
+                        texture["resend_calib"] = False
+                    jpeg = _encode_jpeg(full_color, texture["quality"])
+                    if jpeg is not None:
+                        outq.put(("raw", encode_texture(
+                            sensor_id, sent, jpeg, cw, ch)))
 
             # Snapshot the live-tunable knobs (the control reader mutates them)
             # and hand the heavy stage to a worker process; the sender emits
