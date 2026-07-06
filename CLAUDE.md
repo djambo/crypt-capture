@@ -575,10 +575,10 @@ Two repos:
   below the jitter temporal-denoise is already smoothing (the user's constraint:
   compress below the noise floor, never below real sensor resolution). Positions
   round-trip to <0.07 mm in tests. **DEFAULT stays `cpv1`** so a relay restart
-  never breaks a running viewer; flip to `--wire cpv2` once the crypt viewer
-  ships the decoder (spec + JS reference decoder handed over in
-  `docs/crypt_viewer_updates.md` 2026-07-05, `Status: NEW`; full format in
-  `docs/preview_protocol.md`). Recordings made under cpv2 hold cpv2 frames (the
+  never breaks a running viewer; **the crypt viewer now decodes CPV2**
+  (`cpv1.js` `parseFrame` dispatches on the magic, 2026-07-06), so `--wire cpv2`
+  is safe to flip once relay+viewer are both current. Full format in
+  `docs/preview_protocol.md`. Recordings made under cpv2 hold cpv2 frames (the
   CPR container just wraps CPV messages — the RecordingPlayer uses the same
   parser). `build_message(fmt=…)` branches; `_quantize_positions` +
   `_build_message_v2` are the encoder. Unit-tested (`tests/test_cpv2.py`:
