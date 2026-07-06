@@ -616,8 +616,14 @@ Two repos:
   sensor_calib). Default stays cpv1; `--wire cpv3` needs the (not-yet-built)
   browser GPU-unproject shader, so it's opt-in. Calibration sessions still need
   cpv1/cpv2 (they consume relay-side XYZ; cpv3 returns none — a one-time setup
-  step). ⏳ NEXT: the viewer CPV3 path (vertex shader: ray×depth → world via the
-  rig, in-shader UV, mesh from the bitmap).
+  step). ✅ **Viewer CPV3 path BUILT (2026-07-06)** in `crypt` (`cpv3.js` +
+  `LivePointCloud`): parses CPV3, consumes `sensor_calib`, and unprojects into
+  the CPV1 frame shape the existing renderers consume — so cpv3 renders like
+  cpv1 (math validated headlessly). Runs in JS on the CPU for now (fine for
+  desktop/PCVR; wire win already helps standalone); the **GPU-shader swap** to
+  relieve a weak mobile CPU is the remaining optimization. Gaps: cpv3 point
+  render is uncoloured (use the mesh — colour is the texture); RecordingPlayer
+  skips cpv3 takes; calibrate in cpv1/cpv2.
 - 📋 **Approach A — browser-GPU unprojection (design, `docs/gpu_unproject.md`)**:
   the architectural fix for relay CPU + wire on full clouds. Stop shipping XYZ;
   ship compact **depth + grid bitmap + calibration uniforms** and unproject on

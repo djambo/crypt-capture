@@ -137,6 +137,15 @@ under CPV3 replay through the same GPU path.
    `extract_depth_grid` in `central/preview_server.py`. Calibration sessions must
    run in cpv1/cpv2 (they need relay-side XYZ; cpv3 returns none) — a one-time
    setup step, so switch to cpv3 for streaming after aligning.
-3. **Viewer GPU unproject shader** (MeshCloud/PointCloud CPV3 path) — NEXT.
+3. 🟡 **Viewer CPV3 path BUILT (2026-07-06, CPU unproject)** — `crypt` `cpv3.js`
+   (`buildRayTable` + `unprojectCPV3`) + `LivePointCloud`: parses CPV3, consumes
+   `sensor_calib`, and unprojects into the CPV1 frame shape the existing
+   PointCloud/MeshCloud render — so cpv3 renders identically to cpv1 (math
+   validated headlessly). Runs in JS on the CPU today (fine for desktop/PCVR;
+   the wire win already helps standalone). ⏳ **GPU-shader swap** (move
+   ray×depth+rig+UV into a vertex shader to relieve a weak mobile CPU) is the
+   remaining optimization — isolated to `unprojectCPV3`'s inputs/outputs. Known
+   gaps: cpv3 point render is uncoloured (colour is the texture → use the mesh);
+   `RecordingPlayer` skips cpv3 takes; calibrate in cpv1/cpv2.
 4. Later: WebTransport transport (D), then full-A (Wasm RVL + shader denoise) only
    if the relay CPU is measured to bind.
