@@ -142,10 +142,15 @@ under CPV3 replay through the same GPU path.
    `sensor_calib`, and unprojects into the CPV1 frame shape the existing
    PointCloud/MeshCloud render — so cpv3 renders identically to cpv1 (math
    validated headlessly). Runs in JS on the CPU today (fine for desktop/PCVR;
-   the wire win already helps standalone). ⏳ **GPU-shader swap** (move
-   ray×depth+rig+UV into a vertex shader to relieve a weak mobile CPU) is the
-   remaining optimization — isolated to `unprojectCPV3`'s inputs/outputs. Known
-   gaps: cpv3 point render is uncoloured (colour is the texture → use the mesh);
-   `RecordingPlayer` skips cpv3 takes; calibrate in cpv1/cpv2.
+   the wire win already helps standalone). 🟡 **GPU-shader PROTOTYPE
+   (2026-07-07, `?gpu=1`)** — `crypt` `GpuPointCloud.js` unprojects a CPV3 frame
+   in a VERTEX SHADER (ray×depth + forward-distortion colour UV + rig) and
+   samples the texture for colour, so it also COLOURS cpv3 points. CPU only
+   gathers `(ray,ray,depth)` (`cpv3.packRaysDepth`). Shader math validated
+   headlessly vs `unprojectCPV3` (~1e-8); GLSL/three binding untested-in-browser
+   (the "test on the Quest" piece). Prototype: points only, `?gpu=1` (reload),
+   relay `--wire cpv3`; A/B = viewer with/without `?gpu=1` (same wire, different
+   unproject location). Gaps: no impostor lighting/particles/floor/mesh in gpu
+   mode; `RecordingPlayer` skips cpv3; calibrate in cpv1/cpv2.
 4. Later: WebTransport transport (D), then full-A (Wasm RVL + shader denoise) only
    if the relay CPU is measured to bind.
