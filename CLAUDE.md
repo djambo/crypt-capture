@@ -813,9 +813,38 @@ Two repos:
   Unit-tested (`tests/test_texture.py`: CCLR/CTEX round-trip, UV projection
   recovers pixels, CPV1+CPV2 UV/texture blocks) + socket E2E (relay + `sim_node
   --set_texture` synthetic texture → headless client gets UV in [0,1] + the
-  texture block) + viewer parse validated for both wire formats. ⏳ next:
-  hardware tuning (encode cost, quality); optionally drop rgb in textured mode
-  for bandwidth; NVENC/H.26x colour transport for many viewers.
+  texture block) + viewer parse validated for both wire formats.
+  **Colour↔depth sync fix (2026-07-07):** the texture was visibly LAGGING the
+  geometry — on a hand wave the mesh moved fast and the colour bled/smeared as
+  it caught up. Cause: the node encodes JPEGs on a SEPARATE latest-wins thread,
+  so a `CTEX` no longer arrives right before its `Frame` (it lags by the
+  ~15-25 ms encode + transport), yet the relay paired each frame with the
+  **latest received** texture and `pop`ped it — so most geometry frames got a
+  stale texture or NONE (the viewer then froze the last one), and the skew GREW
+  under drop-stale ingest (which drops depth frames while `CTEX`s pile up). Fix:
+  both messages already carry the same capture `frame_id` (depth `sent`, texture
+  `tex_slot["fid"]=sent`), so the relay now **buffers recent textures keyed by
+  fid** (`_pending_texture` = per-sensor deque, `TEXTURE_BUFFER=16`) and pairs
+  each geometry frame with its **nearest-fid** texture (`_take_texture`, prunes
+  forward-only) instead of "latest received" — colour and depth shown together
+  are the same capture instant (residual ≤~1 frame because depth's pool latency
+  can outrun its own texture's arrival; bounded, not the old growing smear). No
+  node/wire change; unit-checked (nearest-fid + forward-prune) + all texture/
+  cpv2/cpv3/grid/recording tests green. ⏳ next: hardware tuning (encode cost,
+  quality); optionally drop rgb in textured mode for bandwidth; NVENC/H.26x
+  colour transport for many viewers.
+- ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
+  --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
+  `/recordings` endpoint), so a standalone headset on an https:// page (the
+  `npm run dev:https` viewer — WebXR needs a secure context) connects without a
+  mixed-content block, no `adb reverse` needed. TLS is terminated per-client in
+  `_serve_client` (`ssl.SSLContext(PROTOCOL_TLS_SERVER)` wraps each accepted
+  socket, off the accept loop) so a slow handshake never stalls other viewers;
+  plain ws:// is unchanged when the flags are absent. A self-signed cert works
+  (`openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem
+  -days 365 -subj '/CN=<relay-ip>'`; accept it once in the headset browser).
+  Verified live: HTTPS `/recordings` 200 + a full wss upgrade (101 Switching
+  Protocols) over TLS; non-TLS to the port is refused.
 
 ## The big technical decisions (and WHY) — from a deep-research pass
 
@@ -986,6 +1015,12 @@ python3 -m scripts.preview_client --frames 30
 # Auto-find central by rig id (no fixed IP; survives the laptop's DHCP changing):
 #   python3 -m central.preview_server                       # answers discovery by default
 #   python3 -m node.kinect_node --host auto --sensor 0 --frames 0
+# Serve the browser port over wss:// (for a standalone headset on an https://
+# viewer page — `npm run dev:https` in crypt; no adb needed):
+#   openssl req -x509 -newkey rsa:2048 -nodes -keyout key.pem -out cert.pem \
+#       -days 365 -subj '/CN=<relay-ip>'
+#   python3 -m central.preview_server --tls-cert cert.pem --tls-key key.pem
+#   # viewer: https://<pc-ip>:5173/?ws=wss://<relay-ip>:8080  (accept both certs once)
 # Discovery tests (query/reply encode + loopback round-trip):
 python3 -m tests.test_discovery
 

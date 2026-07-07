@@ -31,6 +31,7 @@ import math
 import select
 from concurrent.futures import ThreadPoolExecutor
 import socket
+import ssl
 import struct
 import threading
 import time
@@ -69,6 +70,11 @@ FLAG_GRAVITY = 0x4                            # trailing 3×float32 gravity (dow
 FLAG_GRID = 0x8                               # trailing depth-grid index block
 FLAG_UV = 0x10                                # trailing count×2 uint16 texture UVs
 FLAG_TEXTURE = 0x20                           # trailing JPEG colour image (last block)
+
+# How many recent JPEG textures to keep per sensor for fid-pairing with geometry
+# frames. The node's JPEG encoder lags depth by ~1-2 frames (+ transport), and
+# drop-stale ingest can skip a few depth frames, so a handful covers the skew.
+TEXTURE_BUFFER = 16
 
 # int16 (uint16) positions can't lose real Kinect resolution: with a per-frame
 # bounding-box scale the quantum is span/65535 — ~0.03 mm for a ~2 m subject,
@@ -515,9 +521,18 @@ class PreviewServer:
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True, recordings_dir="recordings",
                  temporal_denoise=None, spatial_denoise=None, workers=1,
-                 wire="cpv1"):
+                 wire="cpv1", tls_cert=None, tls_key=None):
         self.calib = calib
         self.stride = stride
+        # Optional TLS for the browser port: serve wss:// (+ https:// for the
+        # recordings endpoint) so a standalone headset on an https:// page can
+        # connect without a mixed-content block. None = plain ws:// (default).
+        # The handshake runs per-client (in _serve_client), off the accept loop.
+        self._ssl_ctx = None
+        if tls_cert and tls_key:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ctx.load_cert_chain(certfile=tls_cert, keyfile=tls_key)
+            self._ssl_ctx = ctx
         # Per-sensor CPU parallelism for the relay's heavy STATELESS stage
         # (unproject + build_message). 1 = the classic single-threaded reader
         # (default, unchanged). >1 fans that stage across a thread pool so ONE
@@ -585,11 +600,17 @@ class PreviewServer:
         self._sensor_gravity = {}           # sensor_id -> (gx,gy,gz) view-frame
         self._sensor_extrinsic = {}         # sensor_id -> (R 3x3, t 3) or None
         # Textured mesh (docs/textured_mesh.md): per-sensor COLOUR calibration
-        # (for UV projection) + the latest JPEG texture stashed from the CTEX
-        # message that precedes each frame. Empty until a node enables textured
-        # mode (set_texture) — the default path never touches these.
+        # (for UV projection) + recent JPEG textures. The node encodes JPEGs on a
+        # SEPARATE latest-wins thread, so a CTEX no longer arrives right before
+        # its Frame — it lags by the encode+transport time. Keying textures by
+        # frame_id and pairing each geometry frame with its OWN-capture texture
+        # (nearest fid) keeps colour and depth in sync; using "latest received"
+        # made colour smear behind fast motion (worse under drop-stale ingest,
+        # which drops depth frames while textures pile up). Empty until a node
+        # enables textured mode (set_texture) — the default path never touches it.
         self._sensor_color_calib = {}       # sensor_id -> dict(fx,fy,cx,cy,dist,R,t,w,h)
-        self._pending_texture = {}          # sensor_id -> dict(format,width,height,data)
+        # sensor_id -> deque[(frame_id, texture)], recent-first-pruned, fid-paired
+        self._pending_texture = {}
         self._sensor_dims = {}              # sensor_id -> (w,h) full-res depth grid (CPV3)
         self.frames_relayed = 0
         # Rig extrinsics (docs/rig_calibration.md): per-sensor (R,t) applied
@@ -618,8 +639,10 @@ class PreviewServer:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((host, port))
         srv.listen(8)
-        print("[preview] browser WebSocket on ws://%s:%d/ (+ HTTP "
-              "/recordings)" % (host, port))
+        scheme = "wss" if self._ssl_ctx is not None else "ws"
+        print("[preview] browser WebSocket on %s://%s:%d/ (+ HTTP%s "
+              "/recordings)" % (scheme, host, port,
+                                "S" if self._ssl_ctx is not None else ""))
         while True:
             conn, addr = srv.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -633,6 +656,13 @@ class PreviewServer:
         plain HTTP request hits the recordings endpoint (same port, so the
         viewer — and the future playback web app — derive it straight from
         the ws:// URL)."""
+        # TLS: complete the handshake here (off the accept loop) so wss:// works.
+        if self._ssl_ctx is not None:
+            try:
+                conn = self._ssl_ctx.wrap_socket(conn, server_side=True)
+            except (OSError, ssl.SSLError):
+                conn.close()
+                return
         try:
             parsed = websocket.read_http_request(conn)
         except OSError:
@@ -1459,9 +1489,31 @@ class PreviewServer:
                   "(%dx%d, fx=%.1f)" % (sid, payload["width"],
                                         payload["height"], payload["fx"]))
         elif kind == "texture":
-            # Stash the latest JPEG for this sensor; the next frame picks it up
-            # (the node sends CTEX immediately before its Frame).
-            self._pending_texture[payload["sensor_id"]] = payload
+            # Stash this JPEG keyed by its capture frame_id; the matching
+            # geometry frame pairs with it by fid (_take_texture), NOT by
+            # arrival order — the encoder thread makes CTEX lag its Frame.
+            buf = self._pending_texture.get(payload["sensor_id"])
+            if buf is None:
+                buf = collections.deque(maxlen=TEXTURE_BUFFER)
+                self._pending_texture[payload["sensor_id"]] = buf
+            buf.append((payload.get("frame_id", 0), payload))
+
+    def _take_texture(self, sensor_id, frame_id):
+        """Pick the buffered JPEG whose capture frame_id is nearest this geometry
+        frame's, so colour and depth shown together are the SAME capture instant
+        (the encoder thread makes CTEX lag its Frame, so "latest" would smear).
+        Prunes textures older than the chosen one — geometry only moves forward,
+        so they're dead. Returns the texture dict, or None if none buffered."""
+        buf = self._pending_texture.get(sensor_id)
+        if not buf:
+            return None
+        best_fid, best_tex = min(buf, key=lambda ft: abs(ft[0] - frame_id))
+        # Drop everything captured before the paired texture; keep it and newer
+        # (a slightly-later texture may still be the nearest for the next frame
+        # if this frame ran ahead of its own texture).
+        while buf and buf[0][0] < best_fid:
+            buf.popleft()
+        return best_tex
 
     def _serve_node(self, conn, addr):
         print("[preview] node connected %s" % (addr[0],))
@@ -1529,10 +1581,12 @@ class PreviewServer:
                 if self.pose_model and cgrid is not None:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
-                # Textured mesh: pair this frame with the JPEG the node sent
-                # just before it (pop — one texture per frame) + the colour
-                # calib for UV projection. Both None on the default path.
-                texture = self._pending_texture.pop(frame.sensor_id, None)
+                # Textured mesh: pair this frame with the JPEG of the SAME
+                # capture (nearest frame_id — the encoder thread makes CTEX lag
+                # its Frame, so pairing by arrival order smeared colour behind
+                # motion) + the colour calib for UV projection. Both None on the
+                # default path.
+                texture = self._take_texture(frame.sensor_id, frame.frame_id)
                 ccalib = (self._sensor_color_calib.get(frame.sensor_id)
                           if texture is not None else None)
                 job = (frame, depth, ns, ray_x, ray_y, cgrid,
@@ -1835,7 +1889,18 @@ def main():
                          "this are excluded from the average, so silhouettes "
                          "stay crisp. Lower protects finer steps; higher "
                          "smooths harder")
+    ap.add_argument("--tls-cert",
+                    help="PEM certificate for the browser port -> serve wss:// "
+                         "(+ https:// /recordings), so a standalone headset on "
+                         "an https:// page connects without a mixed-content "
+                         "block. Pair with --tls-key. A self-signed cert works: "
+                         "openssl req -x509 -newkey rsa:2048 -nodes -keyout "
+                         "key.pem -out cert.pem -days 365 -subj '/CN=<relay-ip>'")
+    ap.add_argument("--tls-key",
+                    help="PEM private key for --tls-cert")
     args = ap.parse_args()
+    if bool(args.tls_cert) != bool(args.tls_key):
+        ap.error("--tls-cert and --tls-key must be given together")
     workers = _resolve_workers(args.workers)
     denoise = None
     if args.temporal_denoise:
@@ -1865,7 +1930,10 @@ def main():
                            temporal_denoise=denoise,
                            spatial_denoise=spatial,
                            workers=workers,
-                           wire=args.wire)
+                           wire=args.wire,
+                           tls_cert=args.tls_cert, tls_key=args.tls_key)
+    if args.tls_cert:
+        print("[preview] TLS ON — browser port serves wss:// + https://")
     print("[preview] wire format: %s%s" % (
         args.wire, {"cpv2": " (uint16 quant + bitmap grid, ~52% smaller)",
                     "cpv3": " (depth + bitmap; browser GPU unprojects, ~2 B/pt)"}
