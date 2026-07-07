@@ -143,14 +143,20 @@ under CPV3 replay through the same GPU path.
    PointCloud/MeshCloud render — so cpv3 renders identically to cpv1 (math
    validated headlessly). Runs in JS on the CPU today (fine for desktop/PCVR;
    the wire win already helps standalone). 🟡 **GPU-shader PROTOTYPE
-   (2026-07-07, `?gpu=1`)** — `crypt` `GpuPointCloud.js` unprojects a CPV3 frame
-   in a VERTEX SHADER (ray×depth + forward-distortion colour UV + rig) and
-   samples the texture for colour, so it also COLOURS cpv3 points. CPU only
-   gathers `(ray,ray,depth)` (`cpv3.packRaysDepth`). Shader math validated
-   headlessly vs `unprojectCPV3` (~1e-8); GLSL/three binding untested-in-browser
-   (the "test on the Quest" piece). Prototype: points only, `?gpu=1` (reload),
-   relay `--wire cpv3`; A/B = viewer with/without `?gpu=1` (same wire, different
-   unproject location). Gaps: no impostor lighting/particles/floor/mesh in gpu
-   mode; `RecordingPlayer` skips cpv3; calibrate in cpv1/cpv2.
+   (2026-07-07, LIVE toggle)** — `crypt` `GpuPointCloud.js` unprojects a CPV3
+   frame in a VERTEX SHADER (ray×depth + forward-distortion colour UV + rig) and
+   samples the texture for colour, so it also COLOURS cpv3 points. Point size is
+   perspective-scaled (`gl_PointSize·300/-z`, matching the CPU path — not a 1px
+   dot). CPU only gathers `(ray,ray,depth)` (`cpv3.packRaysDepth`). Shader math
+   validated headlessly vs `unprojectCPV3` (~1e-8); GLSL/three binding
+   untested-in-browser (the "test on the Quest" piece). **LIVE toggle** (panel
+   "gpu unproject" checkbox / `g` key / `?gpu=1` initial state, no reload → the
+   floor/rig calibration survives): `LivePointCloud.setGpuMode` swaps the
+   per-sensor renderer and a sensor only switches once a CPV3 frame has fed it,
+   so on a cpv1/cpv2 relay the toggle is a no-op (not a blank screen). Relay
+   `--wire cpv3`; A/B = toggle GPU on vs off (same wire, different unproject
+   location). Gaps: points only — impostor lighting/particles/floor/mesh are the
+   CPU path (toggle GPU off for them); `RecordingPlayer` skips cpv3; calibrate in
+   cpv1/cpv2.
 4. Later: WebTransport transport (D), then full-A (Wasm RVL + shader denoise) only
    if the relay CPU is measured to bind.
