@@ -40,14 +40,16 @@ UPDATE_BRANCH=main
 
 # Azure Kinect depth engine needs a GPU/OpenGL context. A bare systemd service
 # has no DISPLAY, so the depth engine fails with "error code: 204" — even though
-# launching by hand from the desktop works. Point these at the running X session
-# (run `echo $DISPLAY` and `echo ${XAUTHORITY:-$HOME/.Xauthority}` in a desktop
-# terminal to get the right values) so the service can borrow its GL context.
-# Required while the desktop (graphical.target) is up; the depth engine can't run
-# truly headless on this hardware. Uncomment + adjust (XAUTHORITY is often
-# /run/user/1000/gdm/Xauthority under GDM, or ~/.Xauthority under lightdm):
-#DISPLAY=:0
-#XAUTHORITY=/run/user/1000/gdm/Xauthority
+# launching by hand from the desktop works. These point the service at the
+# running X session so it can borrow its GL context, and are REQUIRED on the
+# JetPack 6 Xorg + GDM autologin setup (docs/jetson_orin_node_setup.md §3) — so
+# they ship enabled. The values below are correct for the first user (uid 1000)
+# under GDM autologin; verify against your session and only change if they differ:
+#   DISPLAY:    `echo $DISPLAY` in a desktop terminal (usually :0)
+#   XAUTHORITY: `ps -C Xorg -o args= | grep -o '\-auth [^ ]*'`
+#               (/run/user/1000/gdm/Xauthority under GDM, ~/.Xauthority under lightdm)
+DISPLAY=:0
+XAUTHORITY=/run/user/1000/gdm/Xauthority
 
 # Extra kinect_node flags, whitespace-separated, appended AFTER the profile's
 # flags (so a flag repeated here overrides the profile). The device-class

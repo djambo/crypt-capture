@@ -124,7 +124,10 @@ k4arecorder -l 3 /tmp/test.mkv && echo "CAPTURE OK"
   cold-boot enumeration** issue — power-cycle the Kinect's 5 V adapter; see §11.
 
 ## 8. Python + pyk4a
+`pip3` is **not** preinstalled on a fresh JetPack 6.2 (`pip3: command not found`)
+— install it first:
 ```bash
+sudo apt-get install -y python3-pip
 pip3 install --user numpy pyk4a
 python3 -c "import pyk4a; print('pyk4a OK')"
 # if the build can't find the SDK:
