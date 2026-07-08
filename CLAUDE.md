@@ -621,9 +621,19 @@ Two repos:
   the CPV1 frame shape the existing renderers consume — so cpv3 renders like
   cpv1 (math validated headlessly). Runs in JS on the CPU for now (fine for
   desktop/PCVR; wire win already helps standalone); the **GPU-shader swap** to
-  relieve a weak mobile CPU is the remaining optimization. Gaps: cpv3 point
-  render is uncoloured (use the mesh — colour is the texture); RecordingPlayer
-  skips cpv3 takes; calibrate in cpv1/cpv2.
+  relieve a weak mobile CPU is the remaining optimization. ✅ **CPV3 per-point
+  rgb (2026-07-07):** CPV3 now ships an rgb block (`FLAG_RGB`, same order as
+  depth — `extract_depth_grid(color_grid=…)` + `build_message_v3(rgb=…)`), so the
+  cpv3 POINT render (CPU and GPU) is coloured **frame-locked** to the geometry
+  like cpv1/cpv2. This fixes "colour lags/swims behind depth" on the GPU point
+  path: the JPEG texture is an async-decoded separate stream (fine for the mesh,
+  where colour interpolates across triangles, but on discrete points a 1-frame
+  texture lag reads as colour sliding off the moving surface); per-point rgb has
+  none of that. The viewer's GPU mode no longer requests the texture at all
+  (`syncTexture` = mesh-only), so it also drops the node JPEG-encode cost + the
+  set_texture flip-flop. rgb adds ~3 B/pt (cpv3+rgb ≈ 29 % of cpv1 vs 13 %
+  without — still ~3.4× smaller than cpv1). `tests/test_cpv3.py::test_cpv3_carries_rgb`.
+  Remaining gaps: RecordingPlayer skips cpv3 takes; calibrate in cpv1/cpv2.
 - 📋 **Approach A — browser-GPU unprojection (design, `docs/gpu_unproject.md`)**:
   the architectural fix for relay CPU + wire on full clouds. Stop shipping XYZ;
   ship compact **depth + grid bitmap + calibration uniforms** and unproject on

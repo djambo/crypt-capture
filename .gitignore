@@ -11,3 +11,8 @@ calib.json
 rig_calib.json
 .DS_Store
 models/
+
+# Self-signed TLS cert/key for --tls-cert (wss:// dev; never commit private keys)
+cert.pem
+key.pem
+*.pem

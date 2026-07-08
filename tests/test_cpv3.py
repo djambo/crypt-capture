@@ -38,6 +38,10 @@ def _parse_cpv3(buf):
     o = 20
     step_u, step_v = struct.unpack_from("<HH", buf, o); o += 4
     depth = np.frombuffer(buf, dtype="<u2", count=count, offset=o).copy(); o += count * 2
+    rgb = None
+    if flags & ps.FLAG_RGB:
+        rgb = np.frombuffer(buf, dtype=np.uint8, count=count * 3, offset=o).reshape(-1, 3).copy()
+        o += count * 3
     gravity = None
     if flags & ps.FLAG_GRAVITY:
         gravity = struct.unpack_from("<3f", buf, o); o += 12
@@ -52,7 +56,7 @@ def _parse_cpv3(buf):
                    "data": buf[o:o + tlen]}
     return {"count": count, "step_u": step_u, "step_v": step_v, "depth": depth,
             "grid_w": grid_w, "grid_h": grid_h, "indices": indices,
-            "gravity": gravity, "texture": texture}
+            "rgb": rgb, "gravity": gravity, "texture": texture}
 
 
 def _reconstruct(f, ray_x, ray_y, rig=None):
@@ -76,7 +80,7 @@ def test_extract_matches_unproject():
     rx, ry = _rays(w, h, 40.0, 40.0, w / 2.0, h / 2.0)
     depth = _blob_depth(w, h)
     xyz_ref, _, (gw, gh, idx_ref) = ps.unproject(depth.tobytes(), w, h, rx, ry, 1)
-    dvals, gw2, gh2, idx, su, sv = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
+    dvals, gw2, gh2, idx, su, sv, _rgb = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
     assert (gw2, gh2) == (gw, gh) and su == 1 and sv == 1
     assert np.array_equal(idx, idx_ref)
     assert dvals.size == xyz_ref.shape[0]
@@ -88,7 +92,7 @@ def test_cpv3_reconstructs_cpv1_points():
     depth = _blob_depth(w, h)
     xyz_ref, _, _ = ps.unproject(depth.tobytes(), w, h, rx, ry, 1)
 
-    dvals, gw, gh, idx, su, sv = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
+    dvals, gw, gh, idx, su, sv, _rgb = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
     buf = ps.build_message_v3(2, 9, dvals, gw, gh, idx, su, sv,
                               gravity=(0.0, -1.0, 0.0))
     f = _parse_cpv3(buf)
@@ -109,12 +113,35 @@ def test_cpv3_reconstructs_with_stride_and_rig():
     xyz_ref, _, _ = ps.unproject(depth.tobytes(), w, h, rx, ry, 2)
     xyz_ref = xyz_ref.dot(R.T) + t
 
-    dvals, gw, gh, idx, su, sv = ps.extract_depth_grid(depth.tobytes(), w, h, 2)
+    dvals, gw, gh, idx, su, sv, _rgb = ps.extract_depth_grid(depth.tobytes(), w, h, 2)
     assert su == 2 and sv == 2
     f = _parse_cpv3(ps.build_message_v3(0, 0, dvals, gw, gh, idx, su, sv))
     xyz_v3 = _reconstruct(f, rx, ry, rig=(R, t))
     assert np.allclose(xyz_v3, xyz_ref, atol=1e-4), \
         np.abs(xyz_v3 - xyz_ref).max()
+
+
+def test_cpv3_carries_rgb():
+    # Per-point rgb rides the CPV3 wire in the SAME order as depth, so the
+    # browser colours the point render frame-locked (no texture). It must match
+    # the rgb unproject() emits from the same aligned colour grid.
+    w, h = 64, 48
+    rx, ry = _rays(w, h, 40.0, 40.0, w / 2.0, h / 2.0)
+    depth = _blob_depth(w, h)
+    # A deterministic colour grid, only meaningful where depth is valid.
+    yy, xx = np.mgrid[0:h, 0:w]
+    cgrid = np.stack([(xx * 3) & 0xFF, (yy * 5) & 0xFF, (xx + yy) & 0xFF],
+                     axis=-1).astype(np.uint8)
+    _, rgb_ref, _ = ps.unproject(depth.tobytes(), w, h, rx, ry, 1, color_grid=cgrid)
+    dvals, gw, gh, idx, su, sv, rgb = ps.extract_depth_grid(
+        depth.tobytes(), w, h, 1, color_grid=cgrid)
+    assert np.array_equal(rgb, rgb_ref)          # same order/values as unproject
+    f = _parse_cpv3(ps.build_message_v3(1, 3, dvals, gw, gh, idx, su, sv, rgb=rgb))
+    assert f["rgb"] is not None and f["rgb"].shape[0] == f["count"]
+    assert np.array_equal(f["rgb"], rgb_ref)     # survives the wire, in order
+    # And the geometry still reconstructs with the rgb block present.
+    xyz_ref, _, _ = ps.unproject(depth.tobytes(), w, h, rx, ry, 1)
+    assert np.allclose(_reconstruct(f, rx, ry), xyz_ref, atol=1e-4)
 
 
 def test_cpv3_size_vs_cpv1():
@@ -123,7 +150,7 @@ def test_cpv3_size_vs_cpv1():
     depth = _blob_depth(w, h)
     xyz, rgb, grid = ps.unproject(depth.tobytes(), w, h, rx, ry, 1)
     cpv1 = ps.build_message(0, 0, xyz, np.zeros((xyz.shape[0], 3), np.uint8), None, grid)
-    dvals, gw, gh, idx, su, sv = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
+    dvals, gw, gh, idx, su, sv, _rgb = ps.extract_depth_grid(depth.tobytes(), w, h, 1)
     cpv3 = ps.build_message_v3(0, 0, dvals, gw, gh, idx, su, sv)
     ratio = len(cpv3) / len(cpv1)
     assert ratio < 0.25, ratio            # depth+bitmap ≪ xyz+rgb+u32 grid
@@ -135,6 +162,7 @@ def run():
     test_extract_matches_unproject()
     test_cpv3_reconstructs_cpv1_points()
     test_cpv3_reconstructs_with_stride_and_rig()
+    test_cpv3_carries_rgb()
     test_cpv3_size_vs_cpv1()
     print("cpv3 tests: OK")
 

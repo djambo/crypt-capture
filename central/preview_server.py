@@ -380,14 +380,21 @@ def _build_message_v2(sensor_id, frame_id, count, flags, xyz, rgb, gravity,
     return b"".join(parts)
 
 
-def extract_depth_grid(depth_u16, w, h, stride, node_stride=1, max_points=None):
+def extract_depth_grid(depth_u16, w, h, stride, node_stride=1, max_points=None,
+                       color_grid=None):
     """The FRONT HALF of unproject, without the ray×depth expansion — for CPV3,
     where the browser unprojects. Applies the SAME stride/max_points coarsening
     so the emitted (grid_w, grid_h, indices) match unproject's exactly, and
     returns the valid depth values in grid row-major order plus the per-axis
     full-res pixel step (so the browser can map grid cell (u,v) -> full-res
     pixel (u*step_u, v*step_v) to look up its ray). Returns
-    (depth_vals uint16, grid_w, grid_h, indices uint32, step_u, step_v)."""
+    (depth_vals uint16, grid_w, grid_h, indices uint32, step_u, step_v, rgb).
+
+    `color_grid` (the aligned_color_grid, or None): when present, `rgb` is the
+    per-point colour in the SAME grid row-major order as depth_vals — so CPV3
+    can carry frame-locked per-point colour (like CPV1/CPV2), which the browser
+    colours the point render with directly. No texture / JPEG needed for points;
+    the texture is only for the mesh. `rgb` is None when no color_grid."""
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     su = sv = stride
     while True:
@@ -404,26 +411,34 @@ def extract_depth_grid(depth_u16, w, h, stride, node_stride=1, max_points=None):
     grid_w, grid_h = len(us), len(vs)
     depth_vals = sub[m].astype(np.uint16)
     indices = np.flatnonzero(m).astype(np.uint32)
-    return depth_vals, grid_w, grid_h, indices, su * node_stride, sv * node_stride
+    rgb = color_grid[vs][:, us][m] if color_grid is not None else None
+    return (depth_vals, grid_w, grid_h, indices,
+            su * node_stride, sv * node_stride, rgb)
 
 
 def build_message_v3(sensor_id, frame_id, depth_vals, grid_w, grid_h, indices,
-                     step_u, step_v, gravity=None, texture=None):
+                     step_u, step_v, gravity=None, texture=None, rgb=None):
     """CPV3 payload: the browser unprojects (docs/gpu_unproject.md). Same 20-byte
     header (magic CPV3), then a 4-byte STEP block (u16 step_u, step_v = full-res
     pixels per grid cell), the valid-pixel DEPTH (count × uint16 mm, grid
-    row-major), optional gravity (view-frame down, the browser applies the rig),
-    the CPV2-style valid-mask grid BITMAP, and the optional texture block. NO
-    positions/rgb/uv — those are derived on the GPU from depth + the per-sensor
-    calibration (sent as a `sensor_calib` JSON message)."""
+    row-major), the optional per-point RGB block (count × u8×3, FLAG_RGB — same
+    order as depth, so the browser colours the POINT render frame-locked with no
+    texture at all), optional gravity (view-frame down, the browser applies the
+    rig), the CPV2-style valid-mask grid BITMAP, and the optional texture block
+    (MESH only). XYZ/UV are still derived on the GPU from depth + the per-sensor
+    calibration (`sensor_calib` JSON). Block order mirrors CPV1
+    (positions→rgb→gravity→grid→texture) so the browser parser stays uniform."""
     count = int(len(depth_vals))
     flags = (FLAG_POSITIONS | FLAG_GRID
+             | (FLAG_RGB if rgb is not None else 0)
              | (FLAG_GRAVITY if gravity is not None else 0)
              | (FLAG_TEXTURE if texture is not None else 0))
     header = _PREVIEW_HEADER.pack(PREVIEW_MAGIC_V3, flags, sensor_id & 0xFFFFFFFF,
                                   frame_id & 0xFFFFFFFF, count)
     parts = [header, struct.pack("<HH", int(step_u) & 0xFFFF, int(step_v) & 0xFFFF),
              np.ascontiguousarray(depth_vals, dtype="<u2").tobytes()]
+    if rgb is not None:
+        parts.append(np.ascontiguousarray(rgb, dtype=np.uint8).tobytes())
     if gravity is not None:
         parts.append(np.asarray(gravity, dtype="<f4").tobytes())
     mask = np.zeros(grid_w * grid_h, dtype=np.uint8)
@@ -1375,12 +1390,15 @@ class PreviewServer:
         # win. xyz is None (a calibration session, which needs xyz, must run in
         # cpv1/cpv2 — it's a one-time setup step).
         if self.wire_format == "cpv3":
-            dvals, gw, gh, idx, su, sv = extract_depth_grid(
+            # Carry per-point rgb (frame-locked colour for the POINT render, same
+            # as cpv1/cpv2 — no texture/JPEG needed for points); the texture is
+            # attached for the MESH render only.
+            dvals, gw, gh, idx, su, sv, rgb = extract_depth_grid(
                 depth, frame.width, frame.height, self.stride, ns,
-                max_points=self.max_points)
+                max_points=self.max_points, color_grid=cgrid)
             out = build_message_v3(frame.sensor_id, frame.frame_id, dvals, gw, gh,
                                    idx, su, sv, gravity=gravity,
-                                   texture=texture)
+                                   texture=texture, rgb=rgb)
             return out, int(len(dvals)), None
 
         # max_points is enforced INSIDE unproject by coarsening the sampling

@@ -128,14 +128,16 @@ frames carry the quant block (scale = 1) and no position bytes.
 ## Message: `CPV3` (browser-GPU unproject, little-endian)
 
 Selected with `preview_server --wire cpv3` (default `cpv1`). The relay ships
-**depth + a valid-mask bitmap + per-sensor calibration** and the **browser
-unprojects on the GPU** (approach A, `docs/gpu_unproject.md`) — ~2 B/pt vs CPV1's
-19. No positions/rgb/uv on the wire; those are derived in-shader from depth + the
-`sensor_calib` message (below). Dispatch on the 4-byte MAGIC.
+**depth + per-point rgb + a valid-mask bitmap + per-sensor calibration** and the
+**browser unprojects on the GPU** (approach A, `docs/gpu_unproject.md`) — positions
+(~2 B/pt) and UV are derived in-shader from depth + the `sensor_calib` message
+(below), but **rgb IS on the wire** so the point render is coloured frame-locked
+(no texture needed for points — see the rgb block). Dispatch on the 4-byte MAGIC.
 
 Header: identical 20-byte layout, `magic = "CPV3"`, `count` = valid pixels,
-`flags` bit0 (positions, implied) + bit3 (grid, always) + bit2 (gravity) + bit5
-(texture) as applicable. Then, in order:
+`flags` bit0 (positions, implied) + bit3 (grid, always) + bit1 (rgb) + bit2
+(gravity) + bit5 (texture) as applicable. Then, in order (mirroring CPV1's
+positions→rgb→gravity→grid→texture so the browser parser is uniform):
 
 0. **step** *(always, right after the header)* — `u16 step_u`, `u16 step_v`: the
    full-resolution pixels per grid cell (usually 1; >1 when the relay coarsened
@@ -143,19 +145,26 @@ Header: identical 20-byte layout, `magic = "CPV3"`, `count` = valid pixels,
    `(u*step_u, v*step_v)` — the browser uses this to look up that cell's ray.
 1. **depth** — `count × uint16` (mm), one per valid pixel, grid row-major (same
    order as the set bits below).
-2. **gravity** *(flag bit2)* — `3 × float32`, view-frame down (the browser
+2. **rgb** *(flag bit1)* — `count × 3 × uint8`, same order as depth, one per
+   valid pixel. The POINT render's colour (frame-locked to the geometry, exactly
+   like CPV1/CPV2) — added 2026-07-07 to fix "colour lags depth" on the GPU point
+   path (the texture is an async-decoded separate stream; per-point rgb is not).
+   The texture stays for the MESH only. Byte-identical to CPV1's rgb block.
+3. **gravity** *(flag bit2)* — `3 × float32`, view-frame down (the browser
    applies the rig, so this is pre-rig; unchanged bytes from CPV1).
-3. **grid** *(flag bit3, always)* — `u16 grid_w`, `u16 grid_h`, then the
+4. **grid** *(flag bit3, always)* — `u16 grid_w`, `u16 grid_h`, then the
    valid-mask **bitmap** (`ceil(grid_w*grid_h/8)` bytes, LSB-first) — identical
-   to CPV2's grid. Set bits in order are 1:1 with the depth values.
-4. **texture** *(flag bit5, last)* — the JPEG colour image, byte-identical to the
-   textured-mesh block (`u8 format`, `u16 w`, `u16 h`, `u32 len`, bytes).
+   to CPV2's grid. Set bits in order are 1:1 with the depth/rgb values.
+5. **texture** *(flag bit5, last)* — the JPEG colour image, byte-identical to the
+   textured-mesh block (`u8 format`, `u16 w`, `u16 h`, `u32 len`, bytes). Used by
+   the MESH render; the POINT render uses the rgb block instead.
 
 The browser reconstructs each point: `u,v` from the bitmap → full-res pixel via
 `step` → undistorted ray (from `sensor_calib.depth`) → `pos = ray * depth` →
-view flip → `pos_world = rig * pos` (rig from `rig_poses`). Colour UV is projected
-in-shader from `sensor_calib.color`. This is **lossless** — it reconstructs the
-exact XYZ CPV1 emits (`tests/test_cpv3.py`).
+view flip → `pos_world = rig * pos` (rig from `rig_poses`); colour is the per-point
+rgb (points) or the texture sampled at the in-shader UV from `sensor_calib.color`
+(mesh). Geometry is **lossless** — it reconstructs the exact XYZ CPV1 emits
+(`tests/test_cpv3.py`).
 
 ### `sensor_calib` (server → browser JSON, for CPV3)
 
