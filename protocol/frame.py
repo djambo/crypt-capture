@@ -164,10 +164,13 @@ COLOR_CALIB_MAGIC = b"CCLR"
 _COLOR_CALIB = struct.Struct("<4sIHH" + "ffff" + "ffffffff" + "ffffffffffff")
 
 # --- per-frame colour texture (JPEG) -----------------------------------------
-# One full-resolution colour image per frame for the textured mesh, sent
-# IMMEDIATELY BEFORE its Frame so the relay can attach it (stash latest per
-# sensor). format 0 = JPEG. Only sent when textured mode is enabled (set_texture)
-# — off by default, so nodes/relays that don't use it never see it.
+# One full-resolution colour image per frame for the textured mesh. It carries
+# the same capture frame_id as its Frame, and the relay buffers recent textures
+# per sensor and pairs each geometry frame with its NEAREST-fid texture
+# (preview_server._take_texture) — the JPEG is encoded on a separate latest-wins
+# thread on the node, so it no longer arrives strictly before its Frame. format
+# 0 = JPEG. Only sent when textured mode is enabled (set_texture) — off by
+# default, so nodes/relays that don't use it never see it.
 TEXTURE_MAGIC = b"CTEX"
 _TEXTURE_HEAD = struct.Struct("<4sIQBHHI")  # magic, sensor, frame_id, fmt, w, h, len
 TEXTURE_JPEG = 0
