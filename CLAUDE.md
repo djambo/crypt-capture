@@ -913,6 +913,37 @@ Two repos:
   (intermittent `sat N%` without true saturation). Unit changes need one
   `sudo deploy/install-node-service.sh` re-run per device; the flags roll out
   via EXTRA_ARGS (or a future profile default).
+- ✅ **Scene-coherent broadcast + capture-time timestamps (2026-07-09, the
+  "sync track" first half)** — the multi-camera body used to refresh in
+  pieces: each sensor's frame was broadcast the moment it finished, so parts
+  repainted at each camera's own arrival phase. Now (1) `kinect_node` stamps
+  `Frame.timestamp_ns` at CAPTURE (`tc`), not send — send time was biased by
+  per-frame queue/worker latency; and (2) the relay's **`SceneBundler`**
+  (default ON, `--no-scene-sync` to disable) holds each sensor's freshest
+  finished frame and releases ALL sensors' frames TOGETHER — barrier with
+  timeout (`--scene-sync-timeout`, default 45 ms > one frame period so
+  legitimate phase spread between UNSYNCED cameras doesn't split bundles): a
+  bundle flushes the instant every ACTIVE sensor contributed (zero added
+  latency beyond the cameras' own phase spread), a stalled camera only
+  delays a bundle up to the timeout, a sensor silent >1.5 s leaves the
+  barrier, single-sensor rigs flush per frame (old behaviour), newer frames
+  overwrite pending slots (freshness rule). Bundles go to each viewer as one
+  atomic `ClientSender.put_frames` batch → back-to-back WS messages → the
+  viewer (which already applies its whole stash per rAF) repaints the whole
+  scene in one rendered frame — NO viewer change needed. Recording still
+  tees every frame per-sensor in `_emit` (not bundled). The relay logs a
+  sync-quality line every 5 s: bundles/s, % complete, ARRIVAL spread
+  (relay clock — reliable) and CAPTURE spread (node clocks — meaningful once
+  the Jetsons share NTP/chrony). **Without sync cables** capture instants
+  still differ by up to ~16 ms (physics) but presentation is coherent — the
+  "good result without cables" mode; **with the 3.5 mm cables**
+  (`--sync master/sub --sub-delay-us 160*i`, which also removes inter-Kinect
+  ToF interference) captures become simultaneous and the logged capture
+  spread drops to ~0 — same code path, no reconfig, the operator SEES the
+  cables working. `tests/test_scene_sync.py` (complete-flush latency,
+  timeout flush, freshest-wins overwrite, single-sensor immediacy, dead-
+  sensor barrier decay); `test_relay_workers` pins the compute path with
+  scene_sync=False (byte equivalence is orthogonal to delivery timing).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

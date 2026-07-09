@@ -502,12 +502,27 @@ class ClientSender:
         with self._cv:
             if self._closed:
                 return
-            if sensor_id in self._frames:
-                self.dropped += 1
-            else:
-                self._frame_order.append(sensor_id)
-            self._frames[sensor_id] = ws_frame
+            self._put_frame_locked(sensor_id, ws_frame)
             self._cv.notify()
+
+    def put_frames(self, frames):
+        """Queue a BUNDLE of (sensor_id, ws_frame) under one lock, so the
+        sender thread picks them up as a unit (one batch → one back-to-back
+        TCP burst → the viewer stashes them within the same event-loop turn
+        and repaints all sensors in the same rendered frame)."""
+        with self._cv:
+            if self._closed:
+                return
+            for sensor_id, ws_frame in frames:
+                self._put_frame_locked(sensor_id, ws_frame)
+            self._cv.notify()
+
+    def _put_frame_locked(self, sensor_id, ws_frame):
+        if sensor_id in self._frames:
+            self.dropped += 1
+        else:
+            self._frame_order.append(sensor_id)
+        self._frames[sensor_id] = ws_frame
 
     def put_text(self, ws_frame):
         """Queue a TEXT frame; ordered, never dropped."""
@@ -541,12 +556,136 @@ class ClientSender:
                 return
 
 
+class SceneBundler:
+    """Presentation-coherent broadcast: hold each sensor's freshest finished
+    frame and release ALL sensors' frames TOGETHER, so every part of the
+    multi-camera body refreshes in the same viewer render frame instead of
+    each camera repainting at its own arrival phase.
+
+    Without hardware sync the cameras free-run at ~30 Hz with drifting phase,
+    so a bundle's frames may still be captured up to ~16 ms apart — that skew
+    is physics (only the 3.5 mm sync cables remove it) — but the VIEWER now
+    repaints the whole scene as one unit, which is what reads as "a single
+    capture". With sync cables the same code path tightens automatically:
+    captures become simultaneous, the barrier completes in ~1 ms, and the
+    logged capture spread drops to ~0 — the operator SEES the cables working.
+
+    Flush policy (barrier with timeout): a bundle flushes the moment every
+    ACTIVE sensor has contributed a frame newer than the last flush (zero
+    added latency beyond the cameras' own phase spread), or when `timeout`
+    passes since the bundle's first frame (a stalled/slow camera never holds
+    the scene hostage; it just misses that bundle). `timeout` must exceed one
+    frame period (~33 ms at 30 fps) or legitimate phase spread would split
+    bundles. A sensor silent for ACTIVE_TTL drops out of the barrier, so a
+    dead node degrades latency for at most a second. Single-sensor rigs
+    degenerate to immediate per-frame flush (exactly the old behaviour).
+
+    A newer frame from the same sensor overwrites its pending slot (freshness
+    beats completeness, as everywhere else in the pipeline). TEXT messages
+    and the recording tee are NOT bundled — recording captures every frame in
+    _emit as before.
+    """
+
+    ACTIVE_TTL = 1.5          # s without frames -> sensor leaves the barrier
+    REPORT_EVERY_S = 5.0      # sync-quality log cadence
+
+    def __init__(self, flush_fn, timeout=0.045, label="scene sync"):
+        self._flush_fn = flush_fn      # callable(list[(sensor_id, payload)])
+        self.timeout = timeout
+        self.label = label
+        self._cv = threading.Condition()
+        self._pending = {}             # sid -> (payload, capture_ns, arrival_t)
+        self._last_seen = {}           # sid -> monotonic time of last add
+        self._first_pending_t = None   # arrival of the current bundle's first frame
+        self._closed = False
+        # Sync-quality stats (reset every report): arrival spread is measured
+        # on the RELAY's clock (reliable); capture spread uses the nodes'
+        # capture timestamps (meaningful once the Jetsons share NTP/chrony).
+        self._stat = {"n": 0, "complete": 0, "arr": 0.0, "arr_max": 0.0,
+                      "cap": 0.0, "cap_max": 0.0}
+        self._last_report = time.monotonic()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def add(self, sensor_id, payload, capture_ns):
+        now = time.monotonic()
+        with self._cv:
+            if self._closed:
+                return
+            self._pending[sensor_id] = (payload, capture_ns, now)
+            self._last_seen[sensor_id] = now
+            if self._first_pending_t is None:
+                self._first_pending_t = now
+            self._cv.notify()
+
+    def close(self):
+        with self._cv:
+            self._closed = True
+            self._cv.notify()
+
+    def _active(self, now):
+        return [s for s, t in self._last_seen.items()
+                if now - t < self.ACTIVE_TTL]
+
+    def _run(self):
+        while True:
+            with self._cv:
+                while True:
+                    if self._closed:
+                        return
+                    now = time.monotonic()
+                    if self._pending:
+                        due = self._first_pending_t + self.timeout
+                        if (all(s in self._pending for s in self._active(now))
+                                or now >= due):
+                            break
+                        self._cv.wait(due - now)
+                    else:
+                        self._cv.wait()
+                batch = sorted(self._pending.items())
+                self._pending = {}
+                self._first_pending_t = None
+                n_active = len(self._active(time.monotonic()))
+            items = [(sid, p) for sid, (p, _c, _a) in batch]
+            self._record_stats(batch, n_active)
+            self._flush_fn(items)
+
+    def _record_stats(self, batch, n_active):
+        s = self._stat
+        s["n"] += 1
+        if len(batch) >= n_active:
+            s["complete"] += 1
+        if len(batch) > 1:
+            arrs = [a for _sid, (_p, _c, a) in batch]
+            arr = (max(arrs) - min(arrs)) * 1000.0
+            s["arr"] += arr
+            s["arr_max"] = max(s["arr_max"], arr)
+            caps = [c for _sid, (_p, c, _a) in batch if c]
+            if len(caps) == len(batch):
+                cap = (max(caps) - min(caps)) / 1e6
+                s["cap"] += cap
+                s["cap_max"] = max(s["cap_max"], cap)
+        now = time.monotonic()
+        if now - self._last_report >= self.REPORT_EVERY_S and s["n"]:
+            print("[preview] %s: %.1f bundles/s | %d%% complete | arrival "
+                  "spread avg %.1f max %.1f ms | capture spread avg %.1f max "
+                  "%.1f ms (node clocks)" % (
+                      self.label, s["n"] / (now - self._last_report),
+                      100 * s["complete"] // s["n"],
+                      s["arr"] / s["n"], s["arr_max"],
+                      s["cap"] / s["n"], s["cap_max"]))
+            self._stat = {"n": 0, "complete": 0, "arr": 0.0, "arr_max": 0.0,
+                          "cap": 0.0, "cap_max": 0.0}
+            self._last_report = now
+
+
 class PreviewServer:
     def __init__(self, calib=None, stride=2, max_points=0,
                  rig_calib="rig_calib.json", pose_model=None, pose_trt=False,
                  send_grid=True, recordings_dir="recordings",
                  temporal_denoise=None, spatial_denoise=None, workers=1,
-                 wire="cpv1", tls_cert=None, tls_key=None):
+                 wire="cpv1", tls_cert=None, tls_key=None,
+                 scene_sync=True, scene_sync_timeout=0.045):
         self.calib = calib
         self.stride = stride
         # Optional TLS for the browser port: serve wss:// (+ https:// for the
@@ -656,6 +795,13 @@ class PreviewServer:
         # recording never slows the live path.
         self.recordings_dir = recordings_dir
         self._recorder = recording.TakeRecorder(recordings_dir)
+        # Scene-coherent broadcast (SceneBundler): all sensors' frames are
+        # released together so the multi-camera body refreshes as ONE unit in
+        # the viewer. Default on; scene_sync=False restores per-frame
+        # broadcast. Recording is teed per frame in _emit either way.
+        self._bundler = (SceneBundler(self._flush_bundle,
+                                      timeout=scene_sync_timeout)
+                         if scene_sync else None)
         if self.rig_calib_path:
             self._load_rig_calib(announce=False)
 
@@ -915,6 +1061,15 @@ class PreviewServer:
         frame = websocket.encode_frame(payload, opcode=websocket.OP_BINARY)
         for sender in self._senders():
             sender.put_frame(sensor_id, frame)
+
+    def _flush_bundle(self, items):
+        """SceneBundler flush: hand ALL sensors' frames to every viewer as one
+        atomic batch (per-sender lock held once), so the whole scene repaints
+        in the same viewer render frame."""
+        frames = [(sid, websocket.encode_frame(p, opcode=websocket.OP_BINARY))
+                  for sid, p in items]
+        for sender in self._senders():
+            sender.put_frames(frames)
 
     def _send_text(self, conn, obj):
         with self._lock:
@@ -1498,7 +1653,13 @@ class PreviewServer:
         """Broadcast one finished CPV1 frame to viewers, tee it to any active
         recording, and update/print the per-sensor throughput window. Returns
         the (possibly reset) window dict."""
-        self._broadcast(frame.sensor_id, out)
+        if self._bundler is not None:
+            # Scene-coherent path: the bundler releases every sensor's frame
+            # together (barrier w/ timeout). Capture timestamp rides along for
+            # the sync-quality stats (and future hardware-synced pairing).
+            self._bundler.add(frame.sensor_id, out, frame.timestamp_ns)
+        else:
+            self._broadcast(frame.sensor_id, out)
         # Scene recording tee: the exact bytes every viewer gets, by reference —
         # O(1) enqueue when recording, one attribute read when not. Never blocks.
         self._recorder.add_frame(out)
@@ -2016,6 +2177,22 @@ def main():
                          "this are excluded from the average, so silhouettes "
                          "stay crisp. Lower protects finer steps; higher "
                          "smooths harder")
+    ap.add_argument("--no-scene-sync", dest="scene_sync", action="store_false",
+                    help="disable scene-coherent broadcast (SceneBundler) and "
+                         "send each sensor's frame the moment it's ready. "
+                         "Default ON: all sensors' frames are released "
+                         "TOGETHER so the multi-camera body refreshes as one "
+                         "unit in the viewer (a stalled camera is dropped "
+                         "from a bundle after --scene-sync-timeout, and a "
+                         "single-sensor rig flushes immediately — no cost)")
+    ap.set_defaults(scene_sync=True)
+    ap.add_argument("--scene-sync-timeout", type=float, default=45.0,
+                    help="ms to wait for a bundle to complete before flushing "
+                         "without the missing camera(s). Must exceed one "
+                         "frame period (33 ms at 30 fps) or normal phase "
+                         "spread between UNSYNCED cameras would split "
+                         "bundles; with hardware sync cables bundles "
+                         "complete in ~1 ms and this never fires")
     ap.add_argument("--tls-cert",
                     help="PEM certificate for the browser port -> serve wss:// "
                          "(+ https:// /recordings), so a standalone headset on "
@@ -2058,7 +2235,9 @@ def main():
                            spatial_denoise=spatial,
                            workers=workers,
                            wire=args.wire,
-                           tls_cert=args.tls_cert, tls_key=args.tls_key)
+                           tls_cert=args.tls_cert, tls_key=args.tls_key,
+                           scene_sync=args.scene_sync,
+                           scene_sync_timeout=args.scene_sync_timeout / 1000.0)
     if args.tls_cert:
         print("[preview] TLS ON — browser port serves wss:// + https://")
     print("[preview] wire format: %s%s" % (
@@ -2075,6 +2254,10 @@ def main():
     print("[preview] rvl decode: %s%s" % (
         dec, "" if dec == "numba"
         else " — pip install numba here for the ~10x JIT decode"))
+    print("[preview] scene sync: %s" % (
+        "ON — all sensors' frames released together (timeout %.0f ms; "
+        "--no-scene-sync to disable)" % args.scene_sync_timeout
+        if args.scene_sync else "OFF (--no-scene-sync)"))
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

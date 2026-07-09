@@ -38,8 +38,11 @@ def _capture(workers, frames, w, h):
     of broadcast CPV1 payloads."""
     recdir = tempfile.mkdtemp()
     try:
+        # scene_sync off: this test asserts BYTE EQUIVALENCE of the compute
+        # path via per-frame _broadcast calls; the SceneBundler (a delivery-
+        # timing feature) would coalesce/batch them.
         server = PreviewServer(rig_calib="", workers=workers,
-                               recordings_dir=recdir)
+                               recordings_dir=recdir, scene_sync=False)
         got = []
         server._broadcast = lambda sid, payload: got.append(bytes(payload))
         server._recorder.start(name="eq")     # keep every frame, in order

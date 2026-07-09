@@ -624,12 +624,17 @@ def run(host, port, sensor_id, frames,
                 if item[0] == "raw":              # calib/extrinsic/imu blobs
                     sock.sendall(item[1])
                     continue
-                _, fut, fid, fstride, t_cap = item
+                _, fut, fid, fstride, t_cap, tc = item
                 comp, color, color_aligned, w, h, pts, ms_d, ms_c = fut.result()
                 t_send = time.time()
+                # timestamp_ns = the CAPTURE instant (tc, taken right before
+                # get_capture returned), NOT send time: send time is biased by
+                # per-frame queue/worker latency, which is exactly the noise a
+                # cross-sensor sync consumer (relay scene bundling / hardware-
+                # synced pairing) must not see.
                 frame = Frame(
                     sensor_id=sensor_id, frame_id=fid,
-                    timestamp_ns=int(time.time() * 1e9), width=w, height=h,
+                    timestamp_ns=int(tc * 1e9), width=w, height=h,
                     depth=comp, color=color, depth_rvl=True,
                     color_aligned=color_aligned, stride=fstride,
                 )
@@ -841,7 +846,7 @@ def run(host, port, sensor_id, frames,
             # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s)
-            outq.put(("frame", fut, sent, s, td - tc))
+            outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 
             # Live orientation: while streaming is on, re-read the IMU (freshest
