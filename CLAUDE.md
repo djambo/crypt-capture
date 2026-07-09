@@ -920,14 +920,18 @@ Two repos:
   `Frame.timestamp_ns` at CAPTURE (`tc`), not send — send time was biased by
   per-frame queue/worker latency; and (2) the relay's **`SceneBundler`**
   (default ON, `--no-scene-sync` to disable) holds each sensor's freshest
-  finished frame and releases ALL sensors' frames TOGETHER — barrier with
-  timeout (`--scene-sync-timeout`, default 45 ms > one frame period so
-  legitimate phase spread between UNSYNCED cameras doesn't split bundles): a
-  bundle flushes the instant every ACTIVE sensor contributed (zero added
-  latency beyond the cameras' own phase spread), a stalled camera only
-  delays a bundle up to the timeout, a sensor silent >1.5 s leaves the
-  barrier, single-sensor rigs flush per frame (old behaviour), newer frames
-  overwrite pending slots (freshness rule). Bundles go to each viewer as one
+  finished frame and releases ALL sensors' frames TOGETHER — barrier with a
+  METRONOME deadline (`--scene-sync-timeout`, default 36 ms, anchored to the
+  PREVIOUS FLUSH = a hard floor on the scene rate): a bundle flushes the
+  instant every ACTIVE sensor contributed (zero added latency beyond the
+  cameras' own phase spread) or at last_flush+timeout — a late camera then
+  just misses that bundle instead of dragging the scene rate down (the
+  first-frame-anchored 45 ms version measured ~24 bundles/s @ 75% on the
+  healthy 3×30 fps rig: every late frame stretched the cycle while punctual
+  cameras' waiting frames were overwritten). A sensor silent >1.5 s leaves
+  the barrier, single-sensor rigs flush per frame (old behaviour), newer
+  frames overwrite pending slots (freshness rule), 3 ms grace after a
+  bundle's first frame covers resume-from-idle. Bundles go to each viewer as one
   atomic `ClientSender.put_frames` batch → back-to-back WS messages → the
   viewer (which already applies its whole stash per rAF) repaints the whole
   scene in one rendered frame — NO viewer change needed. Recording still

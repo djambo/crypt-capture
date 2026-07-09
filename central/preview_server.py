@@ -570,15 +570,22 @@ class SceneBundler:
     captures become simultaneous, the barrier completes in ~1 ms, and the
     logged capture spread drops to ~0 — the operator SEES the cables working.
 
-    Flush policy (barrier with timeout): a bundle flushes the moment every
-    ACTIVE sensor has contributed a frame newer than the last flush (zero
-    added latency beyond the cameras' own phase spread), or when `timeout`
-    passes since the bundle's first frame (a stalled/slow camera never holds
-    the scene hostage; it just misses that bundle). `timeout` must exceed one
-    frame period (~33 ms at 30 fps) or legitimate phase spread would split
-    bundles. A sensor silent for ACTIVE_TTL drops out of the barrier, so a
-    dead node degrades latency for at most a second. Single-sensor rigs
-    degenerate to immediate per-frame flush (exactly the old behaviour).
+    Flush policy (barrier with a METRONOME deadline): a bundle flushes the
+    moment every ACTIVE sensor has contributed a frame newer than the last
+    flush (zero added latency beyond the cameras' own phase spread), or at
+    `last_flush + timeout`, whichever comes first. Anchoring the deadline to
+    the PREVIOUS FLUSH (not the bundle's first frame) puts a hard floor
+    under the scene rate: with `timeout` just above one frame period the
+    scene repaints at ~1/timeout even when one camera keeps arriving late —
+    the first-frame-anchored version measured ~24 bundles/s on a healthy
+    30 fps rig because every late camera stretched the whole cycle to
+    first+45 ms while the punctual cameras' waiting frames were overwritten.
+    A stalled camera just misses bundles (its slot stays empty); a sensor
+    silent for ACTIVE_TTL drops out of the barrier, so a dead node degrades
+    completeness for at most a second. Single-sensor rigs degenerate to
+    immediate per-frame flush (exactly the old behaviour). A tiny grace
+    (3 ms) after the first pending frame stops a resume-from-idle from
+    flushing a lone frame whose siblings are milliseconds behind.
 
     A newer frame from the same sensor overwrites its pending slot (freshness
     beats completeness, as everywhere else in the pipeline). TEXT messages
@@ -588,8 +595,9 @@ class SceneBundler:
 
     ACTIVE_TTL = 1.5          # s without frames -> sensor leaves the barrier
     REPORT_EVERY_S = 5.0      # sync-quality log cadence
+    GRACE_S = 0.003           # min wait after a bundle's first frame
 
-    def __init__(self, flush_fn, timeout=0.045, label="scene sync"):
+    def __init__(self, flush_fn, timeout=0.036, label="scene sync"):
         self._flush_fn = flush_fn      # callable(list[(sensor_id, payload)])
         self.timeout = timeout
         self.label = label
@@ -597,6 +605,7 @@ class SceneBundler:
         self._pending = {}             # sid -> (payload, capture_ns, arrival_t)
         self._last_seen = {}           # sid -> monotonic time of last add
         self._first_pending_t = None   # arrival of the current bundle's first frame
+        self._last_flush = time.monotonic()   # metronome anchor
         self._closed = False
         # Sync-quality stats (reset every report): arrival spread is measured
         # on the RELAY's clock (reliable); capture spread uses the nodes'
@@ -635,7 +644,11 @@ class SceneBundler:
                         return
                     now = time.monotonic()
                     if self._pending:
-                        due = self._first_pending_t + self.timeout
+                        # Metronome deadline: at most `timeout` between
+                        # flushes (rate floor), never less than GRACE after
+                        # the bundle's first frame (resume-from-idle).
+                        due = max(self._last_flush + self.timeout,
+                                  self._first_pending_t + self.GRACE_S)
                         if (all(s in self._pending for s in self._active(now))
                                 or now >= due):
                             break
@@ -645,7 +658,8 @@ class SceneBundler:
                 batch = sorted(self._pending.items())
                 self._pending = {}
                 self._first_pending_t = None
-                n_active = len(self._active(time.monotonic()))
+                self._last_flush = time.monotonic()
+                n_active = len(self._active(self._last_flush))
             items = [(sid, p) for sid, (p, _c, _a) in batch]
             self._record_stats(batch, n_active)
             self._flush_fn(items)
@@ -685,7 +699,7 @@ class PreviewServer:
                  send_grid=True, recordings_dir="recordings",
                  temporal_denoise=None, spatial_denoise=None, workers=1,
                  wire="cpv1", tls_cert=None, tls_key=None,
-                 scene_sync=True, scene_sync_timeout=0.045):
+                 scene_sync=True, scene_sync_timeout=0.036):
         self.calib = calib
         self.stride = stride
         # Optional TLS for the browser port: serve wss:// (+ https:// for the
@@ -2186,13 +2200,16 @@ def main():
                          "from a bundle after --scene-sync-timeout, and a "
                          "single-sensor rig flushes immediately — no cost)")
     ap.set_defaults(scene_sync=True)
-    ap.add_argument("--scene-sync-timeout", type=float, default=45.0,
-                    help="ms to wait for a bundle to complete before flushing "
-                         "without the missing camera(s). Must exceed one "
-                         "frame period (33 ms at 30 fps) or normal phase "
-                         "spread between UNSYNCED cameras would split "
-                         "bundles; with hardware sync cables bundles "
-                         "complete in ~1 ms and this never fires")
+    ap.add_argument("--scene-sync-timeout", type=float, default=36.0,
+                    help="MAX ms between bundle flushes (the scene-rate "
+                         "floor, anchored to the previous flush): a bundle "
+                         "still flushes EARLY the instant every camera has "
+                         "contributed, so this only bites when a camera is "
+                         "late — it then misses that bundle instead of "
+                         "dragging the scene rate down. Just above one frame "
+                         "period (33 ms at 30 fps) keeps the scene at "
+                         "~28-30 repaints/s; with hardware sync cables "
+                         "bundles complete in ~1 ms and this never fires")
     ap.add_argument("--tls-cert",
                     help="PEM certificate for the browser port -> serve wss:// "
                          "(+ https:// /recordings), so a standalone headset on "
