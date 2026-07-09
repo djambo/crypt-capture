@@ -896,11 +896,17 @@ Two repos:
   facing the dim side of the room flips between 30 ms/40 ms as the scene
   brightness wobbles (the 24↔30 fps signature). Nothing in the pipeline set
   exposure before. New `kinect_node` flags (applied after every sensor
-  (re)start, best-effort): **`--exposure <µs>`** (manual; 33330 = the longest
-  30 fps-safe step; also equalises colour across the rig — a fusion win) and
-  **`--powerline 50|60`** (anti-flicker mains frequency; Europe = 50, SDK
-  default 60). Recommended EXTRA_ARGS for this rig: `--powerline 50
-  --exposure 33330` (raise room light/gain rather than exposure if too dark).
+  (re)start, best-effort): **`--exposure <µs>`** (manual; also equalises
+  colour across the rig — a fusion win) and **`--powerline 50|60`**
+  (anti-flicker mains frequency; Europe = 50, SDK default 60). **The firmware
+  snaps exposure to a step table that DEPENDS on the powerline frequency**
+  (60 Hz: …16670, 33330; 50 Hz: 10 ms multiples …20000, 30000, 40000) — the
+  node logs the ACTUAL value chosen and warns when it lands above 33.3 ms
+  (sub-30 fps). Longest 30 fps-safe step: **30000 at 50 Hz**, 33330 at 60 Hz.
+  Recommended EXTRA_ARGS for this rig: `--powerline 50 --exposure 30000`
+  (raise room light rather than exposure if too dark — hit on hardware:
+  requesting 33330 at 50 Hz snapped up to 40 ms and pinned that camera at a
+  consistent ~25 fps).
   Companion: the systemd unit now runs **`jetson_clocks`** as a root
   ExecStartPre (non-fatal) — the default schedutil governor parked cores at
   729 MHz–1.2 GHz between bursts, slowing the worker stage mid-frame

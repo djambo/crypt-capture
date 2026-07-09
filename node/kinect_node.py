@@ -423,8 +423,23 @@ def _apply_color_controls(k4a, exposure, powerline, sensor_id):
     if exposure:
         try:
             k4a.exposure = int(exposure)      # pyk4a switches to MANUAL mode
-            print("sensor %d: colour exposure -> manual %d us"
-                  % (sensor_id, int(exposure)))
+            # The firmware only supports a FIXED TABLE of exposure steps that
+            # DEPENDS ON THE POWERLINE FREQUENCY (60 Hz: ...16670, 33330;
+            # 50 Hz: 10 ms multiples — ...20000, 30000, 40000) and snaps the
+            # request to a table entry. Read back what it actually chose: a
+            # snap ABOVE 33.3 ms silently caps the whole synchronized capture
+            # below 30 fps (e.g. requesting 33330 at 50 Hz can land on
+            # 40000 = 25 fps — at 50 Hz mains ask for 30000 instead).
+            try:
+                actual = int(k4a.exposure)
+            except Exception:
+                actual = int(exposure)
+            print("sensor %d: colour exposure -> manual %d us (requested %d)"
+                  % (sensor_id, actual, int(exposure)))
+            if actual > 33330:
+                print("sensor %d: WARNING exposure %d us > 33.3 ms — the "
+                      "colour camera cannot reach 30 fps; request a shorter "
+                      "step (50 Hz mains: 30000)" % (sensor_id, actual))
         except Exception as exc:
             print("sensor %d: manual exposure not applied (%s)"
                   % (sensor_id, exc))
@@ -956,15 +971,16 @@ def main():
                          "~1-3 min; later starts are instant). Use when the "
                          "CUDA provider underperforms")
     ap.add_argument("--exposure", type=int, default=None,
-                    help="MANUAL colour-camera exposure in µs (SDK-supported "
-                         "steps; 33330 = the longest that still allows 30 fps). "
-                         "Default = auto exposure — which in a dim view picks "
-                         "the next flicker-safe step ABOVE 33.3 ms (40 ms at "
-                         "50 Hz mains) and drops the WHOLE synchronized "
-                         "capture to 25 fps; a camera facing the dim side of "
-                         "the room then wanders 24-30 fps while the rest of "
-                         "the rig holds 30. Manual exposure on every node "
-                         "also equalises colour across cameras")
+                    help="MANUAL colour-camera exposure in µs. The firmware "
+                         "snaps this to a step table that DEPENDS ON "
+                         "--powerline: the longest 30 fps-safe step is 30000 "
+                         "at 50 Hz mains, 33330 at 60 Hz (anything above "
+                         "33.3 ms caps the whole synchronized capture below "
+                         "30 fps — the node logs the actual value chosen). "
+                         "Default = auto exposure, which in a dim view picks "
+                         "a step above 33.3 ms and the camera wanders "
+                         "24-30 fps. Manual exposure on every node also "
+                         "equalises colour across cameras")
     ap.add_argument("--powerline", type=int, choices=(50, 60), default=None,
                     help="mains anti-flicker frequency for the colour camera "
                          "(Europe = 50; SDK default is 60). Sets which "
