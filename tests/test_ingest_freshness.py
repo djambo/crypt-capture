@@ -5,8 +5,11 @@ The relay's node-reader must show NOW, not a growing backlog. When it can't
 keep up, frames pile in the socket buffer and reading them oldest-first plays
 an ever-growing delay ("slow motion"/time dilation) even at a healthy recv
 fps. `_serve_node` therefore drains the socket to the FRESHEST queued frame and
-drops the stale ones (freshness beats completeness) — EXCEPT while recording or
-calibrating, which must consume every frame.
+drops the stale ones (freshness beats completeness) — EXCEPT while recording,
+which must tee every frame. (A calibration session KEEPS drop-stale on: the ball
+segmentation is per-frame heavy, so consuming every frame let the backlog grow
+without bound and fine align fell seconds behind; the stationary sampler is
+window/velocity based, so fresh-but-sparse frames sample it fine.)
 
 This test pre-queues several frames on a socketpair, runs the reader to EOF,
 and asserts only the newest survived; then repeats with recording active and

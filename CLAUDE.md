@@ -285,6 +285,23 @@ Two repos:
   clear-rig-calib`). Sessions collect off the RAW pre-transform clouds so
   re-runs are correct; `clear_rig_calib` (the viewer's **Reset** button)
   cancels a running session, deletes the file and returns to raw frames.
+  **Works under `--wire cpv3` — by emitting CPV2 during the session (2026-07-08,
+  perf-fixed 2026-07-09):** cpv3 ships NO relay-side XYZ (the browser unprojects),
+  so a calibration session got nothing to segment the ball / track the body from
+  → Fine/Rough Align silently did nothing on a cpv3 relay (no captures, no LOCK
+  markers). The first fix unprojected the XYZ IN ADDITION to building the cpv3
+  payload while a session was active — but that ~2x per-frame work, single-
+  threaded and un-drop-stale as a session is, made **fine align lag badly**
+  (much worse than the old cpv1/cpv2 path). Fixed properly: while a session is
+  active a cpv3 relay **does NOT take the cpv3 branch** — it falls through to the
+  normal unproject path and emits **CPV2** (`_finish_frame`, `fmt = "cpv2" if
+  wire=="cpv3"`), so ONE unproject feeds BOTH the wire and the ball segmentation
+  (the fast pre-cpv3 cost, half the wire of cpv1). The crypt viewer renders those
+  CPV2 frames on the CPU **per-frame** (it dispatches on the magic; `gpuSeen`
+  tracks the freshest frame's format) and flips straight back to the GPU shader
+  when cpv3 resumes at session end — so this is transparent, no reload, no manual
+  wire switch. The viewer's default ball radius is **10 cm** (a 20 cm-diameter
+  sphere).
   Rough needs no IMU toggle (uses the connect-time gravity); per-tier operator
   steps ("walk a slow L…", "wave the ball slowly…") are in the doc + panel.
   **Tier-1 rough solve** — `solve_rough` = per-sensor IMU leveling
@@ -337,6 +354,37 @@ Two repos:
   (`test_calibration.segment_ball`, `test_rig` gates) + headless E2E (two posed
   sim balls → `balls` feedback flows, solve lands 2.4 mm). Optional future
   upgrade: retroreflective ball in active IR for even more robust detection.
+  **Perf fix — fine align was crawling (2026-07-09):** `segment_ball`'s voxel
+  `np.unique(axis=0)` + Python connected-components is SUPERLINEAR in point count
+  (measured 26 ms @21k pts, 135 ms @100k, 318 ms @200k), and it runs per-sensor
+  per-frame on the relay's single reader thread — so a close-range full-body
+  subtracted foreground on 2 cameras cost 150–600 ms/frame, and (see next para)
+  the session had drop-stale OFF so the backlog grew unbounded → the operator saw
+  a stream seconds behind, effectively frozen. Fix: `segment_ball` stride-
+  subsamples its input to `max_input` (default **8000**) points first — the ball
+  is located from its spatial CLUSTER, not density, so this is sub-mm-identical
+  (validated 200k→8k: <1e-3 mm centre error) at a fixed ~12 ms. A 2-sensor 80k-
+  foreground calib feed is now ~25 ms/frame (40 fps ceiling) vs ~220 ms before.
+  **Drop-stale now stays ON during a calibration session** (`_serve_node` —
+  previously disabled for it): the stationary sampler is window/velocity based,
+  so fresh-but-sparse frames sample it correctly and freshness beats density (a
+  lagging ball centre is useless). These two + the cpv2-during-session change
+  (one shared unproject, next section) are what make fine align usable on cpv3.
+  **Fine-AFTER-rough offset bug — feed calibration the RAW cloud (2026-07-09):**
+  `_feed_calibration` must get the RAW (pre-rig) view-frame cloud — `solve_rig`
+  computes the FULL raw→world transform and the LOCK marker applies the rig ONCE.
+  But `_finish_frame` was applying the loaded rig to `xyz` BEFORE returning it,
+  so a fine pass run AFTER rough (a rough rig loaded) fed calibration the already-
+  registered world-frame cloud. Result: (a) the non-reference sensor's LOCK
+  marker got the rough rig applied TWICE → one sphere sat offset sideways during
+  the pass; (b) the solve saw two already-aligned tracks, produced a ~identity
+  residual, and SAVED that as the whole rig — so it WIPED the rough alignment,
+  the camera poses collapsed toward each other (gizmos near-coincident, not their
+  real separation), and the clouds sprang apart with a large horizontal offset.
+  Fix: `_finish_frame` keeps the raw cloud (`xyz_calib`) and returns THAT as its
+  3rd value for the calibration feed; the WIRE still carries the rig-transformed
+  cloud. Regression-tested (`tests/test_calib_raw_feed.py`: the fed cloud is
+  rig-independent = raw; fails by exactly the translation with the bug).
   **Robustness pass (2026-07-03, first real-hardware run):** first wand test
   showed two failures — the lock sometimes jumped onto legs/non-spherical
   features, and the completed fine solve snapped to *completely wrong* poses,
@@ -976,7 +1024,10 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             test_texture.py (textured mesh: CCLR/CTEX round-trip, UV projection,
             CPV1+CPV2 uv/texture wire blocks),
             test_cpv3.py (CPV3 GPU-unproject wire: extract==unproject grid,
-            lossless XYZ reconstruction incl. stride+rig, size vs cpv1)
+            lossless XYZ reconstruction incl. stride+rig, size vs cpv1),
+            test_calib_raw_feed.py (calibration is fed the RAW pre-rig cloud, so
+            a fine-after-rough pass solves the full transform not a ~identity
+            residual — the collapsed-gizmos / clouds-spring-apart regression)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
             per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),

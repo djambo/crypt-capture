@@ -1387,9 +1387,20 @@ class PreviewServer:
         # only extracts the valid depth values + bitmap and forwards them — NO
         # per-point unproject / UV projection / rig transform here (the rig rides
         # rig_poses; the browser applies it). This is the whole relay-CPU + wire
-        # win. xyz is None (a calibration session, which needs xyz, must run in
-        # cpv1/cpv2 — it's a one-time setup step).
-        if self.wire_format == "cpv3":
+        # win. xyz is None (nothing to feed a calibration session with).
+        #
+        # EXCEPTION — a calibration session (Fine/Rough Align): it needs relay-side
+        # XYZ to segment the ball / track the body. Building BOTH the cpv3 payload
+        # AND a separate unproject was ~2x the per-frame work, which — single-
+        # threaded and un-drop-stale as a session is — made fine align lag badly
+        # (much worse than the old cpv1/cpv2 path, where the one unproject was
+        # already being done). So while a session is active we DON'T take the cpv3
+        # branch: we fall through to the normal unproject path and emit CPV2
+        # (compact) below, so ONE unproject feeds both the wire and the ball
+        # segmentation — the fast pre-cpv3 behaviour. The viewer renders those
+        # CPV2 frames on the CPU per-frame (it dispatches on the magic) and flips
+        # straight back to the GPU path when cpv3 resumes at session end.
+        if self.wire_format == "cpv3" and self._calib_session is None:
             # Carry per-point rgb (frame-locked colour for the POINT render, same
             # as cpv1/cpv2 — no texture/JPEG needed for points); the texture is
             # attached for the MESH render only.
@@ -1416,6 +1427,16 @@ class PreviewServer:
             xyz, rgb, grid = unproject(depth, frame.width, frame.height,
                                        ray_x, ray_y, self.stride, ns,
                                        cgrid, extrinsic, max_points=self.max_points)
+        # The RAW (pre-rig) cloud is what a calibration session must consume:
+        # solve_rig computes the FULL raw->world transform, and the LOCK marker
+        # applies the rig ONCE for display (_feed_calibration). Returning the
+        # rig-transformed cloud instead broke a fine-AFTER-rough pass badly —
+        # (a) the non-reference sensor's marker got the rough rig applied TWICE
+        # (one LOCK sphere offset sideways) and (b) the solve saw two already-
+        # registered tracks, produced a ~identity residual, and SAVED it as the
+        # whole rig — wiping the rough alignment so the clouds sprang apart. Keep
+        # the raw cloud for the calibration feed; the WIRE still gets world-frame.
+        xyz_calib = xyz
         # Rig extrinsic: P_world = R·P + t per sensor, so one canonical world
         # frame goes out on the wire. Gravity rides the same frame, so it rotates.
         if rig is not None:
@@ -1424,12 +1445,16 @@ class PreviewServer:
             if gravity is not None:
                 g = R.dot(np.asarray(gravity, dtype=np.float32))
                 gravity = (float(g[0]), float(g[1]), float(g[2]))
+        # A cpv3 relay in a calibration session emits CPV2 (compact) for the
+        # frames it had to unproject anyway — half the wire of cpv1, decoded by
+        # the same viewer, one unproject shared with the ball segmentation.
+        fmt = "cpv2" if self.wire_format == "cpv3" else self.wire_format
         out = build_message(frame.sensor_id, frame.frame_id, xyz, rgb, gravity,
                             grid if self.send_grid else None,
-                            fmt=self.wire_format,
+                            fmt=fmt,
                             uv=uv if want_uv else None,
                             texture=texture if want_uv else None)
-        return out, xyz.shape[0], xyz
+        return out, xyz.shape[0], xyz_calib
 
     def _emit(self, frame, out, npts, win):
         """Broadcast one finished CPV1 frame to viewers, tee it to any active
@@ -1561,10 +1586,15 @@ class PreviewServer:
                 # skip straight to the FRESHEST and drop the stale ones — the
                 # node pipeline's "freshness beats completeness" rule applied to
                 # the relay's read side. Control messages in the backlog are still
-                # applied in order. Disabled while recording / calibrating, which
-                # must consume every frame.
-                if not (self._recorder.recording
-                        or self._calib_session is not None):
+                # applied in order. Disabled ONLY while recording (a take must
+                # capture every frame). A CALIBRATION session now KEEPS drop-stale
+                # on: the ball segmentation is per-frame heavy, so consuming every
+                # frame let the backlog grow without bound → fine align fell
+                # seconds behind and felt frozen. The stationary sampler averages a
+                # rolling time WINDOW and gates on stillness/velocity, so fresh-but-
+                # sparse frames sample it correctly; freshness matters far more than
+                # density here (a lagging ball position is useless).
+                if not self._recorder.recording:
                     while select.select((conn,), (), (), 0)[0]:
                         nxt = read_message(conn)
                         if nxt is None:
@@ -1622,10 +1652,10 @@ class PreviewServer:
                         win = self._emit(f0, o0, n0, win)
                     out, npts, xyz = self._finish_frame(*job)
                     if self._calib_session is not None and xyz is not None:
-                        # An active calibration session consumes the RAW
-                        # view-frame cloud (a re-run must not solve on already-
-                        # transformed points — this xyz is pre-rig only when no
-                        # rig is loaded; sessions run before/without a rig).
+                        # `_finish_frame` returns the RAW (pre-rig) cloud as its
+                        # 3rd value specifically for this — the solve computes the
+                        # full raw->world rig, so it works whether or not a rough
+                        # rig is already loaded (fine refines rough correctly).
                         self._feed_calibration(frame.sensor_id, xyz)
                     win = self._emit(frame, out, npts, win)
                 else:

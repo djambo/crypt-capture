@@ -74,7 +74,7 @@ def fit_sphere(points, radius, iters=10):
 
 def segment_ball(points, radius, min_points=40, max_points=8000,
                  max_fit_rms=0.012, max_extent_factor=2.6,
-                 min_extent_factor=0.5, min_aspect=0.5):
+                 min_extent_factor=0.5, min_aspect=0.5, max_input=8000):
     """Find the marker ball as the best spherical CLUSTER in a foreground cloud.
 
     The old approach fit a sphere to the whole per-sensor cloud, so it only
@@ -99,6 +99,18 @@ def segment_ball(points, radius, min_points=40, max_points=8000,
     p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
     if p.shape[0] < min_points:
         return None, None, 0
+    # PERFORMANCE: the voxel np.unique(axis=0) + connected-components below is
+    # SUPERLINEAR in point count (measured: 26 ms @ 21k pts, 135 ms @ 100k,
+    # 318 ms @ 200k). Running that per-sensor per-frame on the relay's single
+    # reader thread is what made fine align crawl on a close-range full-body
+    # foreground. The ball is located from its spatial CLUSTER, not from point
+    # DENSITY, so a coarse subsample finds it identically (validated: sub-mm
+    # centre error at an 8k cap on a 200k cloud) at a fixed ~12 ms cost. Stride-
+    # subsample (deterministic, no RNG) to bound the work; a sparser stick also
+    # separates the ball from the hand more cleanly, not less.
+    if p.shape[0] > max_input:
+        step = int(np.ceil(p.shape[0] / float(max_input)))
+        p = p[::step]
     cell = float(radius) if radius > 1e-6 else 0.05
     vox = np.floor(p / cell).astype(np.int64)
     uniq, inv = np.unique(vox, axis=0, return_inverse=True)
