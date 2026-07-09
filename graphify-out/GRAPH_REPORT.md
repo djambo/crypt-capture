@@ -1,16 +1,16 @@
 # Graph Report - crypt-capture  (2026-07-09)
 
 ## Corpus Check
-- 69 files · ~94,795 words
+- 69 files · ~96,542 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1012 nodes · 1479 edges · 157 communities (53 shown, 104 thin omitted)
+- 1020 nodes · 1491 edges · 164 communities (60 shown, 104 thin omitted)
 - Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 33 edges (avg confidence: 0.53)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `c2665831`
+- Built from commit: `dd39a109`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -62,6 +62,7 @@
 - Keypoint Depth Sampling
 - Grid Block Tests
 - CPV3/Texture Serialization
+- JointTracker
 - Node Launch Script
 - Node Auto-Update Script
 - Calibration Dump
@@ -168,9 +169,15 @@
 - test_solve_floor_level
 - _read_gravity_optical
 - object
+- test_relay_workers.py
+- test_pose_worker_gate_hysteresis
+- test_rvl.py
+- sample_depth
+- preview_client.py
+- test_grid.py
 
 ## God Nodes (most connected - your core abstractions)
-1. `PreviewServer` - 69 edges
+1. `PreviewServer` - 70 edges
 2. `run()` - 19 edges
 3. `PoseWorker` - 19 edges
 4. `ClientSender` - 18 edges
@@ -196,15 +203,15 @@
 ## Import Cycles
 - None detected.
 
-## Communities (157 total, 104 thin omitted)
+## Communities (164 total, 104 thin omitted)
 
 ### Community 0 - "Preview Relay Server"
 Cohesion: 0.06
-Nodes (20): PreviewServer, Reset alignment: cancel any running calibration session, delete         rig_cal, Broadcast collection progress, then solve when time is up (or, for a         st, Called from the node frame path with the RAW (pre-rig-transform)         view-f, Per-sensor (fx,fy,cx,cy,dist): the node's own (sent on connect) win;         el, Distortion-aware ray table for this sensor's full-res grid (cached)., Broadcast one finished CPV1 frame to viewers, tee it to any active         reco, Apply a non-frame node->central message (intrinsics / IMU gravity /         pos (+12 more)
+Nodes (22): PreviewServer, Reset alignment: cancel any running calibration session, delete         rig_cal, Broadcast collection progress, then solve when time is up (or, for a         st, Called from the node frame path with the RAW (pre-rig-transform)         view-f, Per-sensor (fx,fy,cx,cy,dist): the node's own (sent on connect) win;         el, Distortion-aware ray table for this sensor's full-res grid (cached)., Heavy STATELESS stage: unproject -> per-sensor rig transform ->         CPV1 me, _finish_frame plus its wall time — feeds the stats line's 'fin'         stage s (+14 more)
 
 ### Community 2 - "RVL Codec & Meshing"
-Cohesion: 0.09
-Nodes (26): compress(), _compress_np(), _compress_py(), _decode_vle_nb(), decompress(), _decompress_np(), _decompress_numba(), _decompress_py() (+18 more)
+Cohesion: 0.11
+Nodes (23): compress(), _compress_np(), _compress_py(), _decode_vle_nb(), decoder_name(), decompress(), _decompress_np(), _decompress_numba() (+15 more)
 
 ### Community 3 - "Hardware & Data-Quality Strategy"
 Cohesion: 0.11
@@ -215,80 +222,80 @@ Cohesion: 0.09
 Nodes (23): EXPERIMENTAL — per-pixel temporal One-Euro filter over the raw depth grid.  Ki, depth_u16: bytes-like (buffer-protocol) row-major uint16 mm, length         w*h, Per-sensor, per-pixel One-Euro low-pass over raw depth (millimetres).      min, Drop filter memory (a sensor's, or all). Call when a sensor's         camera mo, _SensorState, TemporalDepthFilter, EXPERIMENTAL temporal depth denoise tests (central/temporal_denoise.py).  Head, A pixel that goes invalid for a long gap (subject moved away) and then     beco (+15 more)
 
 ### Community 5 - "Rough Rig Solve"
-Cohesion: 0.14
-Nodes (25): level_rotation(), load_rig_calib(), Rotation taking a measured view-frame gravity (down) unit vector onto     world, Best yaw (rotation about +Y) + translation mapping A onto B (N,3 each,     alre, Tier-1 rough rig solve (zero props, ~5-10 cm expected).      tracks: {sensor_i, Load rig_calib.json -> ({sensor_id: (R (3,3) f32, t (3,) f32)}, meta).     meta, solve_rough(), solve_yaw_translation() (+17 more)
+Cohesion: 0.11
+Nodes (26): CentroidTracker, fit_floor(), load_rig_calib(), Accumulates per-sensor (time, foreground-centroid) tracks for the Tier-1     ro, Best yaw (rotation about +Y) + translation mapping A onto B (N,3 each,     alre, Fit the floor plane in a cloud: the lowest dense band of points along     the u, Per-sensor floor leveling composed onto an existing rig solution.      samples, Load rig_calib.json -> ({sensor_id: (R (3,3) f32, t (3,) f32)}, meta).     meta (+18 more)
 
 ### Community 6 - "WebSocket & Client Tools"
-Cohesion: 0.10
-Nodes (24): accept_key(), client_handshake(), encode_frame(), Minimal WebSocket (RFC 6455) helpers — stdlib only, no dependencies.  Just eno, Encode one WS frame (FIN=1). Mask only for client→server frames., Read one WS frame. Returns (opcode, payload) or None on EOF/close., Compute the Sec-WebSocket-Accept value for a client's key., Read an HTTP request/response head (up to the blank line). (+16 more)
+Cohesion: 0.16
+Nodes (16): accept_key(), client_handshake(), encode_frame(), Minimal WebSocket (RFC 6455) helpers — stdlib only, no dependencies.  Just eno, Encode one WS frame (FIN=1). Mask only for client→server frames., Read one WS frame. Returns (opcode, payload) or None on EOF/close., Compute the Sec-WebSocket-Accept value for a client's key., Read an HTTP request/response head (up to the blank line). (+8 more)
 
 ### Community 7 - "Scene Recording"
 Cohesion: 0.08
 Nodes (18): delete_recording(), list_recordings(), Scene recording: capture the LIVE preview stream to disk, replayable in the vie, Tee one outgoing CPV1 message into the active take. Non-blocking:         store, Live stats for the record_status broadcast (None when idle)., Finish the active take: drain the queue, write the sidecar, return         the, Writer thread: drain the queue to disk until stop() drains us dry.         Also, Yield (t, payload) for every frame of a `.cpr` take. Raises ValueError     on a (+10 more)
 
 ### Community 8 - "Kinect Node Pipeline"
-Cohesion: 0.16
-Nodes (17): _build_config(), _depth_to_color_extrinsic(), _grid_to_depth_extrinsic(), main(), parse_imu_axes(), Real Azure Kinect capture node — drop-in replacement for node/sim_node.py.  Ca, Parse a manual IMU->depth axis remap like "-y,-x,-z" into a function     (x,y,z, The rigid transform taking a streamed-grid point into the DEPTH optical     fra (+9 more)
+Cohesion: 0.06
+Nodes (40): BackgroundSubtractor, denoise_mask(), foreground_mask(), Background-plate subtraction for a static rig.  The camera is fixed, so we can, Begin averaging `frames` frames into a new background plate. Disables         s, Accumulate one frame during capture. Returns True when the plate is         fin, Boolean (H,W) mask: True = keep (closer than background, or background, Foreground mask against a *snapshotted* plate (see foreground()). Module-     l (+32 more)
 
 ### Community 9 - "Jetson Setup & GPU-Unproject"
 Cohesion: 0.12
 Nodes (16): 1. Flash the OS, 1b. Remote access (SSH) + the Xorg/GL session, 2. Set the Orin to max performance (it has real headroom now), 3. USB buffer + udev (same as the Nano), 4. Azure Kinect SDK + depth engine — the hard part on 22.04 (aarch64), 5. Smoke-test the sensor, 6. Python + deps, 7. Get the code + run as a service (+8 more)
 
 ### Community 10 - "Rig Calibration Solver"
-Cohesion: 0.21
-Nodes (9): BallTracker, Accumulates per-sensor (time, ball-center) tracks for the Tier-2 wand     pass., save_rig_calib(), collect(), main(), parse_positions(), Rig extrinsic calibration — the marker-ball ("wand") collection + solve.  Head, CPV1 binary message -> (sensor_id, positions (N,3) float32) or None. (+1 more)
+Cohesion: 0.17
+Nodes (12): BallTracker, Rig extrinsic calibration from a tracked marker ball (the "wand" pass).  Why t, Accumulates per-sensor (time, ball-center) tracks for the Tier-2 wand     pass., # NOTE: on a FINE (wand) calibrated rig the floors are already coplanar to, rig_to_dict(), save_rig_calib(), collect(), main() (+4 more)
 
 ### Community 11 - "Ball Fit & Calibration Tests"
-Cohesion: 0.12
-Nodes (28): fit_sphere(), pair_tracks(), Rigid transform (R, t) minimising |R·A + t - B|^2 (Kabsch/Umeyama).      A, B:, Outlier-robust rigid solve (RANSAC around solve_rigid).      The wand pass WIL, Pair two (time, point) tracks by nearest timestamp.      track_*: sequences of, Solve every sensor's rigid transform into a reference sensor's frame.      tra, Center of a sphere of KNOWN radius fitted to surface points (N,3).      Gauss-, Solve every sensor's rigid transform into the reference sensor's frame     from (+20 more)
+Cohesion: 0.15
+Nodes (22): fit_sphere(), Rigid transform (R, t) minimising |R·A + t - B|^2 (Kabsch/Umeyama).      A, B:, Center of a sphere of KNOWN radius fitted to surface points (N,3).      Gauss-, Find the marker ball as the best spherical CLUSTER in a foreground cloud., segment_ball(), solve_rigid(), random_rotation(), Headless tests for central/calibration.py (the wand-calibration math).  Synthe (+14 more)
 
 ### Community 12 - "Spatial Depth Denoise"
 Cohesion: 0.11
 Nodes (18): EXPERIMENTAL — edge-preserving spatial (within-frame) depth smoothing.  The CO, Edge-preserving bilateral smoothing of one depth grid (millimetres).      radi, No-op — this filter is stateless (kept for call-site symmetry with         Temp, depth_u16: bytes-like (buffer-protocol) row-major uint16 mm, length         w*h, SpatialDepthFilter, EXPERIMENTAL spatial (within-frame) depth denoise tests (central/spatial_denois, No per-sensor memory: filtering one shape then a different shape must     just, In the relay the temporal filter runs first and hands its uint16 array     stra (+10 more)
 
 ### Community 13 - "Simulated Node"
-Cohesion: 0.12
-Nodes (25): ball_world_pos(), main(), parse_pose(), project_keypoints(), Simulated capture node.  Stands in for a real Jetson/x86 node so the whole spi, view = R^T · (p - t) for a view->world pose (R rows, t)., The shared ball trajectory (world frame, metres): a slow Lissajous wave     thr, A synthetic person (world frame, metres): pelvis wanders slowly through     the (+17 more)
+Cohesion: 0.11
+Nodes (27): ball_world_pos(), main(), parse_pose(), project_keypoints(), Simulated capture node.  Stands in for a real Jetson/x86 node so the whole spi, view = R^T · (p - t) for a view->world pose (R rows, t)., The shared ball trajectory (world frame, metres): a slow Lissajous wave     thr, A synthetic person (world frame, metres): pelvis wanders slowly through     the (+19 more)
 
 ### Community 14 - "Per-Viewer Sender"
 Cohesion: 0.18
 Nodes (13): ClientSender, Per-viewer sender thread with a latest-frame mailbox.      Every viewer socket, Queue a binary cloud frame; overwrites any unsent one for the sensor., FakeConn, Per-viewer ClientSender tests (headless, no sockets needed).  The fix under te, Stands in for a client socket: records sends, can wedge like a full     TCP buf, While the socket is wedged, newer cloud frames replace unsent ones —     per se, The hand-off must return immediately even while sendall is stuck —     this is (+5 more)
 
 ### Community 15 - "Frame Protocol & Relay Ingest"
-Cohesion: 0.39
-Nodes (7): _depth_frame(), Relay ingest freshness (drop-stale-on-ingest).  The relay's node-reader must s, A tiny valid CVF1 frame (geometry only, stride 1)., Feed pre-built node messages into a fresh reader connection, run     `_serve_no, _run_reader(), test_drops_stale_keeps_newest(), test_recording_keeps_every_frame()
+Cohesion: 0.29
+Nodes (9): _depth_frame(), Relay ingest freshness (drop-stale-on-ingest).  The relay's node-reader must s, A tiny valid CVF1 frame (geometry only, stride 1)., Feed pre-built node messages into a fresh reader connection, run     `_serve_no, message_buffered (the drop-stale gate) must say False for a PARTIALLY     arriv, _run_reader(), test_drops_stale_keeps_newest(), test_partial_message_does_not_trigger_skip() (+1 more)
 
 ### Community 16 - "Recording HTTP Tests"
-Cohesion: 0.16
-Nodes (15): _http_get(), _payload(), Scene-recording tests (headless): the CPR1 take writer/reader round-trip, the n, Captures the server's broadcast texts without real sockets., record_start/stop/delete via the browser-command entry point, with     frames t, Run one request through _serve_http over a socketpair; returns     (status_line, GET /recordings lists takes; GET /recordings/<id> serves the file     byte-exac, Frames come back verbatim, timestamped, with correct sidecar meta. (+7 more)
+Cohesion: 0.12
+Nodes (19): aligned_color_grid(), compute_ray_table(), default_intrinsics(), extract_depth_grid(), gravity_to_view(), load_intrinsics(), main(), _project_color_uv() (+11 more)
 
 ### Community 17 - "Background Subtraction"
-Cohesion: 0.16
-Nodes (8): BackgroundSubtractor, Background-plate subtraction for a static rig.  The camera is fixed, so we can, Begin averaging `frames` frames into a new background plate. Disables         s, Accumulate one frame during capture. Returns True when the plate is         fin, Background-plate subtraction tests (headless; numpy required).  Run: python3 -, test_capture_and_subtract(), test_clear_disables(), test_margin_and_unknown()
+Cohesion: 0.29
+Nodes (8): _decode_text(), FakeSender, XR pose passthrough tests (headless, no sockets).  The feature under test: a p, A PreviewServer with just the client-side state the passthrough     touches — t, _server_stub(), test_drop_frees_sid_entry(), test_fanout_excludes_sender_and_stamps_sid(), test_sid_stable_per_connection_and_distinct()
 
 ### Community 18 - "LAN Auto-Discovery"
 Cohesion: 0.12
 Nodes (13): discover_central(), encode_query(), parse_query(), parse_reply(), LAN auto-discovery of the central preview relay (so the node doesn't need a har, Return the rig_id from a query datagram, or None if it isn't one., Return (rig_id, node_port) from a reply datagram, or None if invalid., Answer discovery queries for `rig_id` with this relay's node TCP port.      Sp (+5 more)
 
 ### Community 19 - "Relay Unprojection Helpers"
-Cohesion: 0.06
-Nodes (42): aligned_color_grid(), build_message(), _build_message_v2(), build_message_v3(), compute_ray_table(), default_intrinsics(), extract_depth_grid(), gravity_to_view() (+34 more)
+Cohesion: 0.08
+Nodes (36): build_message(), _build_message_v2(), build_message_v3(), _quantize_positions(), Serialise the texture-UV block: count×2 uint16, normalised [0,1]×65535., Serialise the texture block (LAST): u8 format, u16 w, u16 h, u32 len,     then, Serialise one point-cloud frame. `fmt` selects the wire format:     'cpv1' (flo, CPV2 payload: same 20-byte header (magic CPV2) then a 16-byte quant block     ( (+28 more)
 
 ### Community 20 - "MoveNet Pose Estimator"
 Cohesion: 0.15
 Nodes (14): _bench(), decode_movenet(), letterbox(), MoveNetEstimator, 2D human pose on the node's color image -> CPOS keypoints (docs/skeleton_pose.md, Single-person MoveNet via onnxruntime. Tolerant of the common export     varian, (H, W, 3) uint8 RGB -> [(joint_id, u, v, conf)] in image pixels.         Per-st, Resize an (H, W, 3) image into a (size, size, 3) letterboxed square     (neares (+6 more)
 
 ### Community 21 - "Skeleton Solve Tests"
-Cohesion: 0.10
-Nodes (22): JointTracker, Accumulates per-sensor, PER-JOINT (time, 3D point) tracks from pose     keypoin, joints: iterable of (joint_id, p (3,), conf). Low-confidence or         depth-l, Total joint samples per sensor (for progress display)., Depth (metres) under a keypoint: median of the non-zero values in a     (2*half, sample_depth(), encode_pose(), Encode one frame's 2D pose keypoints.      keypoints: iterable of (joint_id, u (+14 more)
+Cohesion: 0.16
+Nodes (16): Solve every sensor's rigid transform into the reference sensor's frame     from, solve_skeleton(), encode_pose(), Encode one frame's 2D pose keypoints.      keypoints: iterable of (joint_id, u, _build_dummy_movenet(), Headless tests for the skeleton/pose pipeline (docs/skeleton_pose.md):    - CP, A minimal ONNX with MoveNet's exact interface — NHWC [1,S,S,3] input,     [1,1,, The out-of-process pose path end-to-end with a real (dummy) ONNX:     child loa (+8 more)
 
 ### Community 22 - "One-Euro Joint Smoothing"
-Cohesion: 0.14
+Cohesion: 0.16
 Nodes (8): JointSmoother, OneEuro, Per-joint One-Euro smoothing for (u, v) pixels + z metres. A joint     unseen f, One-Euro filter (Casiez et al.) for one scalar channel — the standard     keypo, Jitter shrinks a lot at rest; fast motion tracks with little lag., A low-confidence jump moves the filtered joint much less than the same     jump, test_conf_weighted_smoothing(), test_one_euro()
 
 ### Community 23 - "Stationary Ball Sampler"
-Cohesion: 0.20
-Nodes (6): Consider one frame. Returns 'ok', 'count' or 'fit'.          The ball is SEGME, Stop-and-go wand sampling for UNSYNCED / slow rigs.      Continuous waving pai, Global state machine (called under the lock). One capture per hold:         com, Find the marker ball as the best spherical CLUSTER in a foreground cloud., segment_ball(), StationaryBallSampler
+Cohesion: 0.23
+Nodes (4): Consider one frame. Returns 'ok', 'count' or 'fit'.          The ball is SEGME, Stop-and-go wand sampling for UNSYNCED / slow rigs.      Continuous waving pai, Global state machine (called under the lock). One capture per hold:         com, StationaryBallSampler
 
 ### Community 24 - "Take Recorder & Demo"
 Cohesion: 0.26
@@ -299,8 +306,8 @@ Cohesion: 0.18
 Nodes (10): PoseWorker, Runs the estimator OFF the capture path.      submit(color, depth) stashes ref, _FakeEstimator, Person-shaped keypoints with confident torso joints (5/6/11/12)., Latest-frame semantics + depth attach + emit payloads., Weak torso (furniture ghost) -> the frame emits NOTHING., --pose-joints minimal: only the requested joints are emitted., test_pose_worker() (+2 more)
 
 ### Community 26 - "Frame Wire I/O"
-Cohesion: 0.25
-Nodes (7): denoise_mask(), foreground_mask(), Boolean (H,W) mask: True = keep (closer than background, or background, Foreground mask against a *snapshotted* plate (see foreground()). Module-     l, Remove isolated speckles from a boolean foreground mask: drop any kept     pixe, _process_frame(), Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
+Cohesion: 0.22
+Nodes (8): Frame message (TCP, little-endian) — see `protocol/frame.py`, Intrinsics handshake (TCP, node → central) — `protocol/frame.py`, Take on disk — see `central/recorder.py`, Wire protocol & take format, main(), Send a control command to the running preview server (which forwards it to the, Send one command; optionally wait for (and print) the first TEXT reply     of a, send()
 
 ### Community 27 - "CPV3 Reconstruction Tests"
 Cohesion: 0.42
@@ -335,12 +342,12 @@ Cohesion: 0.25
 Nodes (8): encode(), Control channel — central → node commands (the M1 control plane).  The frame s, Encode a command dict to bytes., Read one command dict from a socket, or None on clean close., Spawn a daemon thread that reads commands and calls on_command(dict).      Ret, read_command(), _recv_exactly(), start_reader()
 
 ### Community 35 - "Pose Model Tests"
-Cohesion: 0.11
-Nodes (23): encode_calib(), Frame, crypt-capture wire protocol — a single synchronized depth+color frame.  One me, Read one node->central message, dispatching on the leading magic.      Returns, One synchronized depth+color frame. Plain class (no dataclass) so it     import, Read exactly n bytes from a blocking socket, or b'' on clean EOF., Read one Frame from a socket, or None on clean connection close., read_frame() (+15 more)
+Cohesion: 0.18
+Nodes (9): Frame, One synchronized depth+color frame. Plain class (no dataclass) so it     import, _CapturingTracker, _fed_cloud(), _frame(), Calibration is fed the RAW (pre-rig) cloud — regression test for the fine-after-, Minimal stand-in for a ball tracker: records every fed cloud and exposes     the, Push one frame through the relay reader with a fine session active and the     g (+1 more)
 
 ### Community 36 - "Joint Tracker"
-Cohesion: 0.33
-Nodes (3): CentroidTracker, Accumulates per-sensor (time, foreground-centroid) tracks for the Tier-1     ro, test_centroid_tracker()
+Cohesion: 0.43
+Nodes (7): _fake_reader(), _pinhole_rays(), Textured-mesh data-plane tests (docs/textured_mesh.md): the CCLR/CTEX node mess, run(), test_frame_messages_roundtrip(), test_unproject_uv_recovers_pixels(), test_wire_uv_texture_blocks()
 
 ### Community 37 - "IMU Gravity Reading"
 Cohesion: 0.15
@@ -351,8 +358,8 @@ Cohesion: 0.15
 Nodes (12): Accuracy: sphere (depth) vs ChArUco (color) vs IR — the honest math, Per-sensor floor leveling (`calibrate_floor`, "floor" tier), Related future work (noted here so the design accounts for it), Rig extrinsic calibration — the marker-ball ("wand") procedure, Status, The calibration ball (what to build), The fine (Tier-2) wand procedure — operator's view (STOP & GO, default), The math (implemented + unit-tested) (+4 more)
 
 ### Community 39 - "Texture UV Tests"
-Cohesion: 0.07
-Nodes (31): Frame message (TCP, little-endian) — see `protocol/frame.py`, Intrinsics handshake (TCP, node → central) — `protocol/frame.py`, Take on disk — see `central/recorder.py`, Wire protocol & take format, frame_to_mesh(), load_calib(), main(), mesh_frame() (+23 more)
+Cohesion: 0.39
+Nodes (7): frame_to_mesh(), load_calib(), main(), mesh_frame(), Convert a recorded take into per-frame triangle meshes (PLY) you can view.  Th, Unproject a depth grid to a triangle mesh with a depth-discontinuity cut., write_ply()
 
 ### Community 40 - "Floor Sampler"
 Cohesion: 0.29
@@ -363,8 +370,8 @@ Cohesion: 0.17
 Nodes (11): Central + viewer (implemented), Enabling it on a Jetson (Orin, JetPack 6), GPU inference (the real fps fix), Headless testing (implemented), Model choice (decision), Node inference worker (implemented — `node/pose.py`), Quality knobs (first-hardware findings, 2026-07-03), Remaining (+3 more)
 
 ### Community 42 - "Camera Mode Tests"
-Cohesion: 0.67
-Nodes (3): Graph-chained rig registration for a multi-camera RING.  `solve_rig` must regist, _rot_y(), test_ring_chains_through_neighbour()
+Cohesion: 0.32
+Nodes (7): Outlier-robust rigid solve (RANSAC around solve_rigid).      The wand pass WIL, Solve every sensor's rigid transform into a reference sensor's frame.      tra, solve_rig(), solve_rigid_ransac(), Graph-chained rig registration for a multi-camera RING.  `solve_rig` must regist, _rot_y(), test_ring_chains_through_neighbour()
 
 ### Community 43 - "Pose Gate Hysteresis Tests"
 Cohesion: 0.18
@@ -374,9 +381,17 @@ Nodes (10): Browser (crypt) shader plan, Browser-GPU unprojection ("approach A")
 Cohesion: 0.25
 Nodes (7): Node → relay protocol additions (`protocol/frame.py`), Relay → viewer wire additions (`CPV1`, additive blocks), Status / rollout, Textured mesh — full-resolution colour on cheap geometry, Viewer (`crypt`): `MeshCloud` texturing, Where each piece runs, Why not just make `depth_to_color`/CPV2 fast enough?
 
+### Community 45 - "Grid Block Tests"
+Cohesion: 0.24
+Nodes (5): _FakeSock, IMU / orientation path tests (headless; numpy required for the relay parts)., Minimal recv()-only socket over a fixed byte buffer (for read_message)., test_dispatch_still_reads_calib(), test_imu_roundtrip()
+
 ### Community 46 - "CPV3/Texture Serialization"
 Cohesion: 0.29
 Nodes (6): Architecture, crypt-capture, Key decisions (and why), Roadmap, Run the spine (no hardware), Status
+
+### Community 47 - "JointTracker"
+Cohesion: 0.25
+Nodes (5): JointTracker, Accumulates per-sensor, PER-JOINT (time, 3D point) tracks from pose     keypoin, joints: iterable of (joint_id, p (3,), conf). Low-confidence or         depth-l, Total joint samples per sensor (for progress display)., test_joint_tracker()
 
 ### Community 58 - "Node hardware — findings & recommendation"
 Cohesion: 0.33
@@ -384,15 +399,35 @@ Nodes (5): Depth compression: RVL, Node hardware — findings & recommendation, 
 
 ### Community 155 - "test_solve_floor_level"
 Cohesion: 0.29
-Nodes (7): fit_floor(), Rig extrinsic calibration from a tracked marker ball (the "wand" pass).  Why t, # NOTE: on a FINE (wand) calibrated rig the floors are already coplanar to, Fit the floor plane in a cloud: the lowest dense band of points along     the u, Per-sensor floor leveling composed onto an existing rig solution.      samples, rig_to_dict(), solve_floor_level()
+Nodes (8): level_rotation(), pair_tracks(), Pair two (time, point) tracks by nearest timestamp.      track_*: sequences of, Rotation taking a measured view-frame gravity (down) unit vector onto     world, Tier-1 rough rig solve (zero props, ~5-10 cm expected).      tracks: {sensor_i, solve_rough(), Two tilted+yawed cameras watching the same centroid track: solve_rough     must, test_solve_rough_end_to_end()
 
 ### Community 156 - "_read_gravity_optical"
 Cohesion: 0.25
-Nodes (8): _default_accel_to_depth(), _drain_accel(), Azure Kinect DK accelerometer -> depth-camera optical axis convention.      Th, Factory ACCEL->DEPTH rotation via pyk4a's extrinsic getter. The accel is a, Return the FRESHEST accelerometer sample (x,y,z) by draining the IMU FIFO., Freshest GRAVITY (down) unit vector in the depth optical frame (x right,     y, _read_gravity_optical(), _sdk_accel_to_depth()
+Nodes (10): message_buffered(), crypt-capture wire protocol — a single synchronized depth+color frame.  One me, True iff a COMPLETE node->central message is already in `sock`'s local     rece, Read one node->central message, dispatching on the leading magic.      Returns, Read exactly n bytes from a blocking socket, or b'' on clean EOF., Read one Frame from a socket, or None on clean connection close., read_frame(), read_message() (+2 more)
 
 ### Community 157 - "object"
-Cohesion: 0.14
-Nodes (10): object, _FakeSock, grid->depth extrinsic registration tests (headless; numpy for the relay parts)., test_extrinsic_roundtrip(), Torso confidence follows a per-call script (chair flicker etc.)., Feed the threaded worker exactly ONE frame and wait for its inference     (+ a, Isolated confident frames (furniture flukes) never acquire; a person     needs, _ScriptedEstimator (+2 more)
+Cohesion: 0.29
+Nodes (4): object, _FakeSock, grid->depth extrinsic registration tests (headless; numpy for the relay parts)., test_extrinsic_roundtrip()
+
+### Community 158 - "test_relay_workers.py"
+Cohesion: 0.43
+Nodes (6): encode_calib(), _capture(), _frame(), Relay per-sensor worker pool (--workers) equivalence.  --workers > 1 fans the, Run `frames` through a relay reader at the given worker count with     recordin, test_parallel_matches_sequential()
+
+### Community 159 - "test_pose_worker_gate_hysteresis"
+Cohesion: 0.29
+Nodes (6): Torso confidence follows a per-call script (chair flicker etc.)., Feed the threaded worker exactly ONE frame and wait for its inference     (+ a, Isolated confident frames (furniture flukes) never acquire; a person     needs, _ScriptedEstimator, _step(), test_pose_worker_gate_hysteresis()
+
+### Community 160 - "test_rvl.py"
+Cohesion: 0.38
+Nodes (5): _check_case(), RVL codec tests: the vectorized NumPy path must be BIT-IDENTICAL to the pure-Py, Reference round-trips, and (if numpy) numpy == reference, bit for bit., test_edge_cases(), test_random()
+
+### Community 161 - "sample_depth"
+Cohesion: 0.40
+Nodes (3): Depth (metres) under a keypoint: median of the non-zero values in a     (2*half, sample_depth(), test_sample_depth()
+
+### Community 162 - "preview_client.py"
+Cohesion: 0.60
+Nodes (4): main(), parse_preview(), Headless preview client — verifies the live stream WITHOUT a browser.  Connect, run()
 
 ## Knowledge Gaps
 - **205 isolated node(s):** `install-node-service.sh script`, `run-node.sh script`, `update-node.sh script`, `GIT_TERMINAL_PROMPT`, `What this project is` (+200 more)
@@ -402,12 +437,12 @@ Nodes (10): object, _FakeSock, grid->depth extrinsic registration tests (headles
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `PreviewServer` connect `Preview Relay Server` to `Pose Model Tests`, `Temporal Depth Denoise`, `WebSocket & Client Tools`, `Spatial Depth Denoise`, `Frame Protocol & Relay Ingest`, `Recording HTTP Tests`, `Relay Unprojection Helpers`, `MoveNet Pose Estimator`, `Skeleton Solve Tests`, `Pose Worker Thread`, `object`?**
-  _High betweenness centrality (0.141) - this node is a cross-community bridge._
-- **Why does `TemporalDepthFilter` connect `Temporal Depth Denoise` to `Preview Relay Server`, `Relay Unprojection Helpers`, `Per-Viewer Sender`?**
-  _High betweenness centrality (0.048) - this node is a cross-community bridge._
-- **Why does `SpatialDepthFilter` connect `Spatial Depth Denoise` to `Preview Relay Server`, `Relay Unprojection Helpers`, `Per-Viewer Sender`?**
-  _High betweenness centrality (0.029) - this node is a cross-community bridge._
+- **Why does `PreviewServer` connect `Preview Relay Server` to `Pose Model Tests`, `Temporal Depth Denoise`, `Spatial Depth Denoise`, `Frame Protocol & Relay Ingest`, `Recording HTTP Tests`, `Background Subtraction`, `Relay Unprojection Helpers`, `MoveNet Pose Estimator`, `Skeleton Solve Tests`, `Pose Worker Thread`, `test_relay_workers.py`, `test_pose_worker_gate_hysteresis`?**
+  _High betweenness centrality (0.144) - this node is a cross-community bridge._
+- **Why does `TemporalDepthFilter` connect `Temporal Depth Denoise` to `Recording HTTP Tests`, `Preview Relay Server`, `Per-Viewer Sender`?**
+  _High betweenness centrality (0.068) - this node is a cross-community bridge._
+- **Why does `SpatialDepthFilter` connect `Spatial Depth Denoise` to `Recording HTTP Tests`, `Preview Relay Server`, `Per-Viewer Sender`?**
+  _High betweenness centrality (0.022) - this node is a cross-community bridge._
 - **Are the 10 inferred relationships involving `PreviewServer` (e.g. with `SpatialDepthFilter` and `TemporalDepthFilter`) actually correct?**
   _`PreviewServer` has 10 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 4 inferred relationships involving `PoseWorker` (e.g. with `ClientSender` and `PreviewServer`) actually correct?**

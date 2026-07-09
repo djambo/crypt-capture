@@ -24,6 +24,13 @@ WorkingDirectory=__WORKDIR__
 # the Jetson throws "libusb errno=12" under load (see CLAUDE.md gotchas). The
 # leading '+' runs just this line as root even though the service drops to User=.
 ExecStartPre=+/bin/sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'
+# Pin CPU/GPU/EMC clocks to max (root; '-' = non-fatal where jetson_clocks is
+# absent). The default schedutil governor parks cores at 729 MHz-1.2 GHz between
+# bursts, so the capture->worker pipeline runs on downclocked cores mid-frame
+# and the node hovers a few fps under the sensor's 30 (observed as intermittent
+# 'sat N%' with the workers not truly saturated). A capture node has nothing to
+# power-save for — pin the clocks.
+ExecStartPre=-+/usr/bin/jetson_clocks
 # Pull the latest code before launching (as User=, so it uses that user's git
 # credentials). The leading '-' makes it non-fatal: offline / no-access just runs
 # the on-disk code. Toggle with AUTO_UPDATE / pick a branch with UPDATE_BRANCH in

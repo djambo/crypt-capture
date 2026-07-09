@@ -46,6 +46,7 @@
   "44": "Keypoint Depth Sampling",
   "45": "Grid Block Tests",
   "46": "CPV3/Texture Serialization",
+  "47": "JointTracker",
   "48": "Node Launch Script",
   "49": "Node Auto-Update Script",
   "50": "Calibration Dump",
@@ -155,5 +156,11 @@
   "154": "TSDF fusion → watertight mesh sequence (approach B)",
   "155": "test_solve_floor_level",
   "156": "_read_gravity_optical",
-  "157": "object"
+  "157": "object",
+  "158": "test_relay_workers.py",
+  "159": "test_pose_worker_gate_hysteresis",
+  "160": "test_rvl.py",
+  "161": "sample_depth",
+  "162": "preview_client.py",
+  "163": "test_grid.py"
 }

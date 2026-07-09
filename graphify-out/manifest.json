@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "central/preview_server.py": {
-    "mtime": 1783602720.5995555,
-    "ast_hash": "0074e0bf9dac06504c04e7818798d2a0",
+    "mtime": 1783616215.3839085,
+    "ast_hash": "540a9c9978e148b798e6812893f2d875",
     "semantic_hash": ""
   },
   "central/recorder.py": {
@@ -35,9 +35,9 @@
     "semantic_hash": "42b835c2ac1bdb6cfd48db83db54b455"
   },
   "central/temporal_denoise.py": {
-    "mtime": 1783267363.1296399,
-    "ast_hash": "ad15b896905ddb5cb69988d0ed27d766",
-    "semantic_hash": "ad15b896905ddb5cb69988d0ed27d766"
+    "mtime": 1783614290.8331442,
+    "ast_hash": "8cdfe834588fc54e2e5d337a0d4663d0",
+    "semantic_hash": ""
   },
   "deploy/install-node-service.sh": {
     "mtime": 1783163447.0938487,
@@ -110,14 +110,14 @@
     "semantic_hash": "2cb022329fd36a94d340eaf3eae35ba1"
   },
   "protocol/frame.py": {
-    "mtime": 1783471067.904541,
-    "ast_hash": "da7c31eb11b301c30b416a15c151283c",
+    "mtime": 1783616184.3905993,
+    "ast_hash": "4fbba9a35a322b69dcd1984e157f9f29",
     "semantic_hash": ""
   },
   "protocol/rvl.py": {
-    "mtime": 1783470035.6436973,
-    "ast_hash": "db207d400bb5760a731dbd5905352cf6",
-    "semantic_hash": "db207d400bb5760a731dbd5905352cf6"
+    "mtime": 1783613906.6890843,
+    "ast_hash": "7f0ed7323c9b79019b770612c1f66619",
+    "semantic_hash": ""
   },
   "protocol/websocket.py": {
     "mtime": 1783279772.3518796,
@@ -195,8 +195,8 @@
     "semantic_hash": "1d7c3d8591bba4067628aa9169cbfbb8"
   },
   "tests/test_ingest_freshness.py": {
-    "mtime": 1783550832.1757727,
-    "ast_hash": "5d3b3b9a69525288266e1542d2eb191e",
+    "mtime": 1783616580.8847415,
+    "ast_hash": "3054e17db034a229ee35b9fff19b3136",
     "semantic_hash": ""
   },
   "tests/test_pose.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783604434.8012114,
-    "ast_hash": "3e6ce5e072a8840f213a2b827dabc927",
+    "mtime": 1783616608.1111681,
+    "ast_hash": "a07bd63f5530f59de694a24d5e5aab1e",
     "semantic_hash": ""
   },
   "README.md": {

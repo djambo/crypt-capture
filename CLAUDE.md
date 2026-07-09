@@ -846,6 +846,67 @@ Two repos:
   setup/environment view. Defaults (`radius=1, sigma_depth=30 mm`) are a first
   estimate — retune by eye against a real noisy Kinect (⏳ open follow-up, same
   as temporal).
+- ✅ **Relay per-stage observability + temporal-denoise bbox crop (2026-07-09)**
+  — root-caused "3 cameras cap at ~22–27 fps in with stale skips even at ~700
+  pts" (the first real 3-camera subject captures). Observability: the
+  per-sensor stats line now prints per-stage ms (`dec` RVL decode / `den`
+  temporal+spatial denoise / `col` ray-table+color-grid / `fin`
+  unproject+build), a startup line prints WHICH RVL decoder this process
+  resolved (`rvl.decoder_name()` — numba/numpy/python; the import guard is
+  silent, so "installed on the box" was unverifiable), and per-viewer sender
+  backlog drops (`ClientSender.dropped`, previously invisible in every log)
+  are printed when they change. Reading rule: `fps in + stale skipped` ≈ the
+  node's actual send rate — skips > 0 means the RELAY is the bottleneck, and
+  the stage times say which stage. **The measured culprit: the temporal
+  One-Euro filter ran ~15 full-grid float passes (~16 ms/f on a fast x86)
+  REGARDLESS of subject size** — the reader thread's dominant serial cost.
+  `TemporalDepthFilter.filter` now CROPS all per-pixel work to the
+  valid-pixel bounding box — exact, not approximate: an invalid pixel's
+  state is frozen by construction (x_hat/dx_hat/last_valid_t untouched,
+  output 0), so out-of-box pixels need no work; only `valid_prev` needs a
+  full-grid memset. Measured: 16.6 → 0.4 ms/f empty, 0.9 ms @20k-pt subject
+  (full room = whole-grid box = old cost, and drop-stale already covers that
+  mode). Also `unproject`/`extract_depth_grid` sub-grid selection switched
+  from double fancy-index copies (`d[vs][:, us]` — two full-grid copies per
+  frame even at stride 1) to strided slice VIEWS (byte-identical output;
+  `fin` ~6 → ~1-1.6 ms). Net serial chain @subject: **~18 → ~3 ms/f**. All
+  relay/denoise/grid/cpv2/cpv3/texture/extrinsic/imu tests green (incl. the
+  parallel==sequential byte-equivalence and extract==unproject invariants).
+  **Second culprit, found by the new stage times (fps stayed ~25 with ~6 ms/f
+  of work): the drop-stale gate itself.** It skipped on `select()` alone —
+  "any pending BYTES" — so ONE early byte of a partially-arrived next frame
+  made the reader discard the complete frame in hand and then BLOCK inside
+  read_message until the rest trickled in: ~15-20% of frames thrown away
+  under ordinary arrival jitter with the reader mostly idle. Fix:
+  `protocol/frame.py message_buffered(sock)` (MSG_PEEK, knows every magic's
+  framing) — the drain now skips ONLY when a COMPLETE newer message is
+  already in the local receive buffer (`tests/test_ingest_freshness.py::
+  test_partial_message_does_not_trigger_skip`). Companion: node sockets get
+  an 8 MB SO_RCVBUF — drop-stale can only skip what's LOCALLY buffered, and
+  the OS default (64 KB on Windows) couldn't hold even one full-room frame
+  (~1.1 MB RVL+RGB), so a backlog used to live on the NODE side (its sendall
+  blocked → its capture loop parked) where the freshness rule couldn't see
+  it.
+- ✅ **Node colour-exposure control + clock pinning (2026-07-09)** — after the
+  relay fixes, one camera (sensor 2) still wandered 24–30 fps while the others
+  held 30, with similar low `sat%` on all nodes. Diagnosis: **auto-exposure**
+  — in a dim view the colour camera picks the next flicker-safe exposure step
+  ABOVE 33.3 ms (40 ms at 50 Hz mains → 25 fps colour), and
+  `synchronized_images_only` drags the whole capture down with it; the camera
+  facing the dim side of the room flips between 30 ms/40 ms as the scene
+  brightness wobbles (the 24↔30 fps signature). Nothing in the pipeline set
+  exposure before. New `kinect_node` flags (applied after every sensor
+  (re)start, best-effort): **`--exposure <µs>`** (manual; 33330 = the longest
+  30 fps-safe step; also equalises colour across the rig — a fusion win) and
+  **`--powerline 50|60`** (anti-flicker mains frequency; Europe = 50, SDK
+  default 60). Recommended EXTRA_ARGS for this rig: `--powerline 50
+  --exposure 33330` (raise room light/gain rather than exposure if too dark).
+  Companion: the systemd unit now runs **`jetson_clocks`** as a root
+  ExecStartPre (non-fatal) — the default schedutil governor parked cores at
+  729 MHz–1.2 GHz between bursts, slowing the worker stage mid-frame
+  (intermittent `sat N%` without true saturation). Unit changes need one
+  `sudo deploy/install-node-service.sh` re-run per device; the flags roll out
+  via EXTRA_ARGS (or a future profile default).
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

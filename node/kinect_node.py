@@ -397,6 +397,39 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride):
     return comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1
 
 
+def _apply_color_controls(k4a, exposure, powerline, sensor_id):
+    """Best-effort colour-camera controls, applied after every k4a.start().
+
+    `exposure`: None = leave the SDK's auto-exposure alone; an int = manual
+    exposure in µs. THE 30 FPS TRAP this exists for: auto-exposure in a dim
+    view picks the next flicker-safe exposure step ABOVE 33.3 ms (40 ms at
+    50 Hz mains → the colour camera runs 25 fps), and with
+    synchronized_images_only the WHOLE capture drops with it — one camera of a
+    rig facing the dim side of the room then wanders 24-30 fps while the
+    others hold 30 (observed on hardware; the wire/relay were innocent).
+    Manual 33330 µs pins the camera at 30 fps in any light (raise the room
+    light or gain if too dark). Manual exposure on every node also equalises
+    colour across the rig — a fusion win. `powerline` (50/60) sets the
+    anti-flicker frequency (Europe = 50; the SDK default is 60)."""
+    if powerline:
+        try:
+            # K4A_COLOR_CONTROL_POWERLINE_FREQUENCY: 1 = 50 Hz, 2 = 60 Hz.
+            k4a.powerline_frequency = 1 if int(powerline) == 50 else 2
+            print("sensor %d: powerline anti-flicker -> %d Hz"
+                  % (sensor_id, int(powerline)))
+        except Exception as exc:
+            print("sensor %d: powerline_frequency not applied (%s)"
+                  % (sensor_id, exc))
+    if exposure:
+        try:
+            k4a.exposure = int(exposure)      # pyk4a switches to MANUAL mode
+            print("sensor %d: colour exposure -> manual %d us"
+                  % (sensor_id, int(exposure)))
+        except Exception as exc:
+            print("sensor %d: manual exposure not applied (%s)"
+                  % (sensor_id, exc))
+
+
 def run(host, port, sensor_id, frames,
         sync="standalone", sub_delay_us=0, preview_stride=1, profile=False,
         depth_mode=None, color_resolution=None, fps=None, align=None,
@@ -404,7 +437,7 @@ def run(host, port, sensor_id, frames,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
-        pose_trt=False):
+        pose_trt=False, exposure=None, powerline=None):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -459,6 +492,7 @@ def run(host, port, sensor_id, frames,
 
     k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
     k4a.start()
+    _apply_color_controls(k4a, exposure, powerline, sensor_id)
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     s = max(1, preview_stride)
@@ -690,6 +724,8 @@ def run(host, port, sensor_id, frames,
                     k4a.stop()
                     k4a = PyK4A(_build_config(cur, sync, sub_delay_us))
                     k4a.start()
+                    # A restart resets the colour controls to SDK defaults.
+                    _apply_color_controls(k4a, exposure, powerline, sensor_id)
                 align = cur["align"]
                 bg.clear()                          # plate is wrong-shaped now
                 ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
@@ -919,6 +955,20 @@ def main():
                          "persistent engine cache (first start compiles for "
                          "~1-3 min; later starts are instant). Use when the "
                          "CUDA provider underperforms")
+    ap.add_argument("--exposure", type=int, default=None,
+                    help="MANUAL colour-camera exposure in µs (SDK-supported "
+                         "steps; 33330 = the longest that still allows 30 fps). "
+                         "Default = auto exposure — which in a dim view picks "
+                         "the next flicker-safe step ABOVE 33.3 ms (40 ms at "
+                         "50 Hz mains) and drops the WHOLE synchronized "
+                         "capture to 25 fps; a camera facing the dim side of "
+                         "the room then wanders 24-30 fps while the rest of "
+                         "the rig holds 30. Manual exposure on every node "
+                         "also equalises colour across cameras")
+    ap.add_argument("--powerline", type=int, choices=(50, 60), default=None,
+                    help="mains anti-flicker frequency for the colour camera "
+                         "(Europe = 50; SDK default is 60). Sets which "
+                         "exposure steps auto-exposure may pick")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,
@@ -930,7 +980,8 @@ def main():
         pose_model=args.pose_model, pose_threads=args.pose_threads,
         pose_min_conf=args.pose_min_conf, pose_gate=args.pose_gate,
         pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
-        pose_trt=args.pose_trt)
+        pose_trt=args.pose_trt, exposure=args.exposure,
+        powerline=args.powerline)
 
 
 if __name__ == "__main__":
