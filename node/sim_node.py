@@ -40,6 +40,18 @@ SIM_GRAVITY_OPTICAL = (0.15, 0.98, 0.10)
 IMU_EVERY = 10
 
 
+def color_to_gray(color):
+    """IR-colour-mode stand-in (set_ir): collapse each RGB triple to its
+    luminance so the payload is grey (R==G==B) — the headless-verifiable
+    signature that the browser->relay->node set_ir path ran (the real node
+    ships tone-mapped active-IR grey the same way)."""
+    out = bytearray(len(color))
+    for i in range(0, len(color), 3):
+        g = (color[i] * 30 + color[i + 1] * 59 + color[i + 2] * 11) // 100
+        out[i] = out[i + 1] = out[i + 2] = g
+    return bytes(out)
+
+
 def synth_frame(width, height, frame_id, sensor_id, stride=1):
     """A moving elliptical blob of smooth valid depth on a zero background, plus
     a depth-aligned RGB payload (one triple per valid pixel, row-major) so the
@@ -272,6 +284,7 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
     state = {"w": width, "h": height, "resend_calib": True}
     imu_state = {"stream": False}              # live orientation toggle (set_imu)
     tex_state = {"stream": False, "resend": False}   # textured mesh (set_texture)
+    ir_state = {"on": False}                   # IR colour mode (set_ir)
     cfg_lock = threading.Lock()
 
     def on_command(cmd):
@@ -298,6 +311,9 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 tex_state["resend"] = True
             print("sensor %d: textured mesh -> %s"
                   % (sensor_id, tex_state["stream"]))
+        elif c == "set_ir":
+            ir_state["on"] = bool(cmd.get("enabled", False))
+            print("sensor %d: IR colour -> %s" % (sensor_id, ir_state["on"]))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -338,6 +354,8 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             else:
                 depth, color, gw, gh = synth_frame(
                     width, height, sent, sensor_id, s)
+            if ir_state["on"] and color:       # IR mode: grey payload (R==G==B)
+                color = color_to_gray(color)
             comp = rvl.compress(depth)
             # Textured mesh (docs/textured_mesh.md): synthetic colour calib +
             # a fake "JPEG" (opaque bytes the relay forwards verbatim), sent

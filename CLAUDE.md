@@ -1010,6 +1010,26 @@ Two repos:
   cpv2/cpv3/grid/recording tests green. ⏳ next: hardware tuning (encode cost,
   quality); optionally drop rgb in textured mode for bandwidth; NVENC/H.26x
   colour transport for many viewers.
+- ✅ **IR colour mode (2026-07-10, `set_ir`)** — render the Kinect's ACTIVE-IR
+  image as the point colours. New forwarded control command
+  `{"cmd":"set_ir","enabled":bool}` (viewer "IR colour" toggle /
+  `send_command set-ir --enabled on|off`): the node substitutes tone-mapped IR
+  grey (`_ir_to_gray`, sqrt curve over `IR_CLIP=1000` ≈ k4aviewer's active-IR
+  range, LUT-based) for the camera colour in `_process_frame` — the IR image
+  shares the depth camera's geometry (same grid, same valid mask;
+  `cap.ir` in color_to_depth, `cap.transformed_ir` in depth_to_color — the
+  latter needs a pyk4a exposing it, else the node logs once and stays on
+  colour), so the swap is exact per point and the **wire format is unchanged**
+  (the rgb block just carries grey → cpv1/cpv2/cpv3, recordings, the env plate
+  and every viewer render follow automatically). While IR is on the node skips
+  the SDK colour warp unless the pose worker needs the colour image; node-side
+  pose still gets real colour (the central pose fallback would see grey —
+  known, acceptable). The viewer stops requesting `set_texture` while IR is on
+  (the JPEG stays RGB and would mismatch the mesh). `sim_node` acks `set_ir`
+  by collapsing its gradient to luminance grey (R==G==B) so the path is
+  headless-verifiable. Unit-tested (`tests/test_ir.py`: tone map, the
+  _process_frame IR branch incl. stride + mask pairing, sim grey) + E2E (relay
+  + sim + WS client: rgb flips coloured → grey → coloured on toggle).
 - ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
   --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
   `/recordings` endpoint), so a standalone headset on an https:// page (the
@@ -1148,7 +1168,9 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             a fine-after-rough pass solves the full transform not a ~identity
             residual — the collapsed-gizmos / clouds-spring-apart regression),
             test_rig_chain.py (graph-chained solve_rig registers a 3-camera ring
-            where a sensor shares NO ball captures with the reference)
+            where a sensor shares NO ball captures with the reference),
+            test_ir.py (IR colour mode: tone map + the _process_frame IR branch
+            behind a pyk4a stub + sim_node grey)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
             per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),
@@ -1210,6 +1232,8 @@ python3 -m tests.test_discovery
 python3 -m scripts.send_command --port 8080 capture-bg --frames 60
 # Live camera controls (pick which Kinect data to send; stream adapts):
 python3 -m scripts.send_command --port 8080 set-camera --align depth_to_color
+# IR colour mode (points coloured from the active-IR image, same wire format):
+python3 -m scripts.send_command --port 8080 set-ir --enabled on
 python3 -m scripts.send_command --port 8080 set-camera --depth-mode WFOV_UNBINNED
 # Camera-mode logic tests (pyk4a-free):
 python3 -m tests.test_camera

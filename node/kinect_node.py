@@ -93,6 +93,29 @@ def _encode_jpeg(bgra, quality=85):
 
 _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
                        (0.0, 0.0, 0.0))
+
+# --- IR colour mode (set_ir) -------------------------------------------------
+# Render the ACTIVE-IR image as the point colours: the IR image shares the
+# depth camera's geometry (same grid, same valid mask), so tone-mapped IR grey
+# slots straight into the existing per-point colour payload and NOTHING
+# downstream changes (relay pairing, CPV1/2/3 rgb blocks, viewer renders,
+# recordings all just carry grey). IR_CLIP = full-scale IR value — everything
+# at/above it renders white; k4aviewer visualises active IR over ~0..1000,
+# which matches what a subject at 1-3 m reflects. The sqrt curve keeps
+# mid-range detail visible without per-frame auto-gain (which flickers).
+IR_CLIP = 1000.0
+_IR_LUT = [None]
+
+
+def _ir_to_gray(ir):
+    """uint16 IR image -> uint8 grey image (same shape), sqrt tone map.
+    LUT-based, so the per-frame cost is one fancy-index gather. Runs in the
+    worker processes (pure NumPy); each child builds its LUT once."""
+    if _IR_LUT[0] is None:
+        v = np.arange(65536, dtype=np.float32)
+        _IR_LUT[0] = (np.sqrt(np.minimum(v, IR_CLIP) / IR_CLIP)
+                      * 255.0).astype(np.uint8)
+    return _IR_LUT[0][ir]
 from node.background import BackgroundSubtractor, denoise_mask, foreground_mask
 
 # Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
@@ -363,13 +386,16 @@ def _read_intrinsics(k4a, align):
     return fx, fy, cx, cy, dist
 
 
-def _process_frame(depth, csrc, plate, margin, denoise, stride):
+def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None):
     """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
     stage, run on a worker thread so consecutive frames overlap across cores.
     Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
     ops release the GIL, which is what makes the worker threads truly parallel.
     `plate`/`margin`/`denoise` are per-frame snapshots (the control reader may
-    mutate the live objects mid-frame). Returns everything the sender needs.
+    mutate the live objects mid-frame). With `ir_src` (IR colour mode, set_ir:
+    the IR16 image in the SAME geometry as `depth`), tone-mapped IR grey
+    replaces the camera colour in the payload. Returns everything the sender
+    needs.
     """
     t0 = time.time()
     keep = depth > 0
@@ -386,7 +412,14 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride):
 
     color = b""
     color_aligned = False
-    if csrc is not None:
+    if ir_src is not None:
+        if stride > 1:
+            ir_src = ir_src[::stride, ::stride]
+        gray = _ir_to_gray(ir_src)[masked != 0]     # one grey per valid point
+        color = np.ascontiguousarray(
+            np.repeat(gray[:, None], 3, axis=1)).tobytes()
+        color_aligned = True
+    elif csrc is not None:
         if stride > 1:
             csrc = csrc[::stride, ::stride]
         rgb = csrc[..., 2::-1]                      # BGRA -> RGB
@@ -524,6 +557,9 @@ def run(host, port, sensor_id, frames,
     # mesh. Off by default; only color_to_depth (the cheap-geometry path). Toggled
     # live by set_texture; resend_calib re-sends CCLR on (re)enable/reconfig.
     texture = {"stream": False, "resend_calib": False, "quality": 85}
+    # IR colour mode (set_ir): ship tone-mapped active-IR grey as the point
+    # colours instead of the camera colour (same payload/wire, see _ir_to_gray).
+    ir_mode = {"stream": False, "warned": False}
 
     # Live camera reconfig (set_camera): the reader thread only *records* the
     # request under a lock; the capture loop performs the (re)start so pyk4a is
@@ -550,6 +586,9 @@ def run(host, port, sensor_id, frames,
         elif c == "set_imu":
             imu["stream"] = bool(cmd.get("enabled", False))
             print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
+        elif c == "set_ir":
+            ir_mode["stream"] = bool(cmd.get("enabled", False))
+            print("sensor %d: IR colour -> %s" % (sensor_id, ir_mode["stream"]))
         elif c == "set_texture":
             texture["stream"] = bool(cmd.get("enabled", False))
             if "quality" in cmd:
@@ -797,17 +836,38 @@ def run(host, port, sensor_id, frames,
                 if bg.feed(depth):
                     print("sensor %d: background captured" % sensor_id)
 
+            # IR colour mode: the active-IR image in the SAME geometry as the
+            # streamed depth grid (cap.ir IS the depth grid; depth_to_color
+            # needs the SDK warp into the colour grid). Grabbed HERE because it
+            # touches the SDK; the tone map happens in the worker.
+            irsrc = None
+            if ir_mode["stream"]:
+                try:
+                    irsrc = (cap.transformed_ir if align == "depth_to_color"
+                             else cap.ir)            # (H, W) uint16
+                except Exception:
+                    irsrc = None
+                if irsrc is None and not ir_mode["warned"]:
+                    ir_mode["warned"] = True
+                    print("sensor %d: IR image unavailable (depth_to_color "
+                          "needs a pyk4a with transformed_ir) — staying on "
+                          "camera colour" % sensor_id)
+
             # Aligned color source: the color image already in the SAME geometry
             # as the streamed depth grid (transformed_color for color_to_depth,
             # the raw color image for depth_to_color). Grabbed HERE because it
-            # touches the SDK; the foreground pick happens in the worker.
-            try:
-                if align == "depth_to_color":
-                    csrc = cap.color                 # (Hc, Wc, 4) BGRA
-                else:
-                    csrc = cap.transformed_color     # (Hd, Wd, 4) BGRA
-            except Exception:
-                csrc = None
+            # touches the SDK; the foreground pick happens in the worker. In IR
+            # mode the wire doesn't use it, so skip the SDK warp unless the pose
+            # worker still needs the colour image.
+            csrc = None
+            if irsrc is None or pose_proc is not None:
+                try:
+                    if align == "depth_to_color":
+                        csrc = cap.color                 # (Hc, Wc, 4) BGRA
+                    else:
+                        csrc = cap.transformed_color     # (Hd, Wd, 4) BGRA
+                except Exception:
+                    csrc = None
             td = time.time()
 
             # Newest frame for the pose worker (stash refs — returns instantly;
@@ -845,7 +905,7 @@ def run(host, port, sensor_id, frames,
             # park check above and we are the only producer, so this can't
             # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
-                              bg.plate, bg.margin, rng["denoise"], s)
+                              bg.plate, bg.margin, rng["denoise"], s, irsrc)
             outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 

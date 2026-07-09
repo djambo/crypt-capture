@@ -102,6 +102,11 @@ def main():
     sc.add_argument("--fps", type=int, choices=[5, 15, 30])
     sc.add_argument("--align", choices=["color_to_depth", "depth_to_color"])
 
+    si = sub.add_parser("set-ir", help="IR colour mode: the node ships "
+                        "tone-mapped active-IR grey as the point colours "
+                        "instead of the camera colour (same wire format)")
+    si.add_argument("--enabled", choices=["on", "off"], required=True)
+
     cf = sub.add_parser("calibrate-fine", help="run the marker-ball wand pass "
                         "AT THE RELAY (same flow as the viewer's Fine Align "
                         "button); progress/results go to connected viewers")
@@ -166,6 +171,9 @@ def main():
         if args.align is not None:
             command["align"] = args.align
         send(args.host, args.port, command)
+    elif args.cmd == "set-ir":
+        send(args.host, args.port,
+             {"cmd": "set_ir", "enabled": args.enabled == "on"})
     elif args.cmd == "calibrate-fine":
         command = {"cmd": "calibrate_fine", "seconds": args.seconds,
                    "ball_radius": args.ball_radius}
