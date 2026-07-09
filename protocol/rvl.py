@@ -396,6 +396,19 @@ def compress(depth):
     return _compress_py(depth)
 
 
+def decoder_name():
+    """Which decompress() implementation THIS process will use ('numba',
+    'numpy' or 'python') — for the relay's startup log. The numba path is an
+    import-guarded optional dep, so "installed on the machine" is not the same
+    as "active in this process" (wrong venv / a failed import falls back
+    silently); the relay prints this so a 10x-slower decode is visible."""
+    if _HAVE_NUMBA and _np is not None:
+        return "numba"
+    if _np is not None:
+        return "numpy"
+    return "python"
+
+
 def decompress(data, num_pixels):
     """Inverse of compress(); returns an array('H') of length num_pixels.
 

@@ -106,36 +106,60 @@ class TemporalDepthFilter:
         `np.frombuffer(depth, ...)` call site downstream)."""
         if now is None:
             now = time.monotonic()
-        x = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w).astype(np.float32)
-        valid = x != 0
+        raw = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
 
         state = self._state.get(sensor_id)
         if state is None or state.shape != (h, w):
             # First sighting of this sensor, or its frame shape changed (camera
             # mode / stride switch): nothing to filter against yet — pass the
             # raw frame through and seed memory from it.
-            state = _SensorState(h, w, x, now)
+            state = _SensorState(h, w, raw.astype(np.float32), now)
             self._state[sensor_id] = state
-            return x.astype(np.uint16)
+            return raw.copy()
 
         dt = max(now - state.t_prev, 1e-4)
         state.t_prev = now
 
-        gap_expired = (now - state.last_valid_t) > self.max_gap_s
-        continue_mask = valid & state.valid_prev & ~gap_expired
+        # All per-pixel work is CROPPED to the valid-pixel bounding box. With
+        # background subtraction the subject occupies a small sub-rectangle of
+        # the grid, but the filter used to run ~15 full-grid float passes over
+        # all w*h pixels every frame — measured ~16 ms/frame on a fast x86
+        # REGARDLESS of subject size, the relay reader thread's single biggest
+        # serial cost (it capped a 3-sensor rig at ~25 fps in). The crop is
+        # exact, not an approximation: an invalid pixel's state is frozen by
+        # construction (x_hat/dx_hat/last_valid_t untouched, output 0), so
+        # pixels outside the box need no work at all — except valid_prev,
+        # which must read False for them next frame (a cheap full-grid memset).
+        # A full-room frame's box is the whole grid = the old cost exactly.
+        valid_full = raw != 0
+        rows = np.flatnonzero(valid_full.any(axis=1))
+        if rows.size == 0:                     # empty frame: nothing to filter
+            state.valid_prev.fill(False)
+            return raw.copy()
+        cols = np.flatnonzero(valid_full.any(axis=0))
+        box = (slice(rows[0], rows[-1] + 1), slice(cols[0], cols[-1] + 1))
+
+        x = raw[box].astype(np.float32)
+        valid = valid_full[box]
+        x_hat_prev = state.x_hat[box]          # views — writes go through below
+        dx_hat_prev = state.dx_hat[box]
+        last_valid_t = state.last_valid_t[box]
+
+        gap_expired = (now - last_valid_t) > self.max_gap_s
+        continue_mask = valid & state.valid_prev[box] & ~gap_expired
         seed_mask = valid & ~continue_mask  # valid now, but not continuing
 
-        # One-Euro update (vectorized over the whole grid; only continue_mask
+        # One-Euro update (vectorized over the box; only continue_mask
         # pixels' results are actually used below).
-        dx = (x - state.x_hat) / dt
+        dx = (x - x_hat_prev) / dt
         a_d = self._alpha(self.d_cutoff, dt)
-        dx_hat = a_d * dx + (1.0 - a_d) * state.dx_hat
+        dx_hat = a_d * dx + (1.0 - a_d) * dx_hat_prev
         cutoff = self.min_cutoff + self.beta * np.abs(dx_hat)
         a = self._alpha(cutoff, dt)
-        x_hat = a * x + (1.0 - a) * state.x_hat
+        x_hat = a * x + (1.0 - a) * x_hat_prev
 
-        new_x_hat = np.where(continue_mask, x_hat, state.x_hat)
-        new_dx_hat = np.where(continue_mask, dx_hat, state.dx_hat)
+        new_x_hat = np.where(continue_mask, x_hat, x_hat_prev)
+        new_dx_hat = np.where(continue_mask, dx_hat, dx_hat_prev)
         # Fresh/reseeded pixels: snap straight to the raw value, zero velocity
         # — no blending with stale (or default-zero) memory.
         new_x_hat = np.where(seed_mask, x, new_x_hat)
@@ -145,12 +169,15 @@ class TemporalDepthFilter:
         # 1-frame dropout (e.g. a speckle-filtered pixel) doesn't reset state,
         # but max_gap_s bounds how long that memory can matter.
 
-        state.x_hat = new_x_hat
-        state.dx_hat = new_dx_hat
-        state.valid_prev = valid
-        state.last_valid_t = np.where(valid, now, state.last_valid_t)
+        state.x_hat[box] = new_x_hat
+        state.dx_hat[box] = new_dx_hat
+        state.valid_prev.fill(False)           # invalid everywhere...
+        state.valid_prev[box] = valid          # ...except inside the box
+        state.last_valid_t[box] = np.where(valid, now, last_valid_t)
 
         # Force the output mask to EXACTLY match the input mask (see module
         # docstring) regardless of any floating-point edge case above.
-        out = np.where(valid, new_x_hat, 0.0)
-        return np.clip(np.round(out), 0, 65535).astype(np.uint16)
+        out = np.zeros((h, w), dtype=np.uint16)
+        out[box] = np.clip(np.round(np.where(valid, new_x_hat, 0.0)),
+                           0, 65535).astype(np.uint16)
+        return out

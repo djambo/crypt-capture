@@ -42,7 +42,7 @@ import numpy as np
 
 from central import calibration, recording
 from protocol import control, discovery, rvl, websocket
-from protocol.frame import read_message
+from protocol.frame import message_buffered, read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
@@ -218,20 +218,21 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     su = sv = stride
     while True:
-        us = np.arange(0, w, su)
-        vs = np.arange(0, h, sv)
-        sub = d[vs][:, us]
+        # Strided slice VIEWS — the old double fancy index (d[vs][:, us] with
+        # arange'd indices) copied the whole grid twice per frame; a slice
+        # selects the exact same elements with zero copies.
+        sub = d[::sv, ::su]
         m = sub != 0
         if not max_points or int(np.count_nonzero(m)) <= max_points:
             break
         # Over budget: coarsen the denser axis so decimation stays roughly
         # isotropic. Each pass shrinks the grid, so this terminates (a 1x1
         # grid is always <= max_points for any positive cap).
-        if len(us) >= len(vs):
+        if sub.shape[1] >= sub.shape[0]:
             su += 1
         else:
             sv += 1
-    grid_w, grid_h = len(us), len(vs)
+    grid_h, grid_w = sub.shape
     if not m.any():
         empty = (np.empty((0, 3), dtype=np.float32),
                  np.empty((0, 3), dtype=np.uint8) if color_grid is not None
@@ -240,8 +241,8 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
         if color_calib is not None:
             return empty + (np.empty((0, 2), dtype=np.float32),)
         return empty
-    rx = ray_x[np.ix_(vs * node_stride, us * node_stride)]
-    ry = ray_y[np.ix_(vs * node_stride, us * node_stride)]
+    rx = ray_x[::sv * node_stride, ::su * node_stride]
+    ry = ray_y[::sv * node_stride, ::su * node_stride]
     z = sub[m].astype(np.float32) / 1000.0          # mm -> m
     xo = rx[m] * z                                   # optical: x right
     yo = ry[m] * z                                   #          y down
@@ -257,7 +258,7 @@ def unproject(depth_u16, w, h, ray_x, ray_y, stride, node_stride=1,
     xyz = np.column_stack((xo, -yo, -zo)).astype(np.float32)  # optical->view flip
     rgb = None
     if color_grid is not None:
-        rgb = color_grid[vs][:, us][m]
+        rgb = color_grid[::sv, ::su][m]
     # Row-major flatten order of `sub[m]` == flatnonzero order, so index k here
     # is point k in xyz/rgb.
     grid = (grid_w, grid_h, np.flatnonzero(m).astype(np.uint32))
@@ -398,20 +399,18 @@ def extract_depth_grid(depth_u16, w, h, stride, node_stride=1, max_points=None,
     d = np.frombuffer(depth_u16, dtype=np.uint16).reshape(h, w)
     su = sv = stride
     while True:
-        us = np.arange(0, w, su)
-        vs = np.arange(0, h, sv)
-        sub = d[vs][:, us]
-        m = sub != 0
+        sub = d[::sv, ::su]     # strided VIEW, not a double fancy-index copy
+        m = sub != 0            # (see the identical note in unproject)
         if not max_points or int(np.count_nonzero(m)) <= max_points:
             break
-        if len(us) >= len(vs):
+        if sub.shape[1] >= sub.shape[0]:
             su += 1
         else:
             sv += 1
-    grid_w, grid_h = len(us), len(vs)
+    grid_h, grid_w = sub.shape
     depth_vals = sub[m].astype(np.uint16)
     indices = np.flatnonzero(m).astype(np.uint32)
-    rgb = color_grid[vs][:, us][m] if color_grid is not None else None
+    rgb = color_grid[::sv, ::su][m] if color_grid is not None else None
     return (depth_vals, grid_w, grid_h, indices,
             su * node_stride, sv * node_stride, rgb)
 
@@ -453,6 +452,17 @@ def build_message_v3(sensor_id, frame_id, depth_vals, grid_w, grid_h, indices,
 # Central-side pose (docs/skeleton_pose.md): how long after a node's own CPOS
 # message the relay keeps its fallback inference suppressed for that sensor.
 NODE_POSE_QUIET_S = 2.0
+
+
+# Per-sensor throughput window (reset every 30 emitted frames). The stage
+# accumulators are SECONDS of per-frame wall time over the window, printed as
+# ms/frame: dec = RVL decompress, den = temporal+spatial denoise, col =
+# ray-table + color-grid scatter (the rest of the reader's SERIAL chain),
+# fin = _finish_frame (unproject/extract + build; pool-parallel wall time).
+# These are what tells a relay-bound rig WHICH stage is eating the frame
+# budget instead of guessing (fps_in + stale skipped ≈ the node's send rate).
+_WIN_ZERO = {"t": 0.0, "n": 0, "pts": 0, "bytes": 0, "drop": 0,
+             "dec": 0.0, "den": 0.0, "col": 0.0, "fin": 0.0}
 
 
 class ClientSender:
@@ -608,6 +618,7 @@ class PreviewServer:
         self._xr_sids = {}                  # conn -> small int id
         self._xr_sid_next = 0
         self._nodes = []                    # connected node TCP sockets
+        self._sender_dropped_seen = 0       # last-logged viewer-sender drop total
         self._lock = threading.Lock()
         self._intr = {}                     # (w,h) -> fallback intrinsics+dist
         self._sensor_intr = {}              # sensor_id -> (fx,fy,cx,cy,dist)
@@ -1476,6 +1487,13 @@ class PreviewServer:
                             texture=texture if want_uv else None)
         return out, xyz.shape[0], xyz_calib
 
+    def _finish_timed(self, *job):
+        """_finish_frame plus its wall time — feeds the stats line's 'fin'
+        stage so a relay-bound rig shows WHICH stage eats the frame budget."""
+        t0 = time.perf_counter()
+        out, npts, xyz = self._finish_frame(*job)
+        return out, npts, xyz, time.perf_counter() - t0
+
     def _emit(self, frame, out, npts, win):
         """Broadcast one finished CPV1 frame to viewers, tee it to any active
         recording, and update/print the per-sensor throughput window. Returns
@@ -1490,13 +1508,29 @@ class PreviewServer:
             dt = max(1e-6, time.time() - win["t"])
             with self._lock:
                 nclients = len(self._clients)
+            n = win["n"]
             print("[preview] sensor %d: %.1f fps in | %d pts | "
-                  "%.0f KB/f | %d stale skipped | %d viewer(s)" % (
-                      frame.sensor_id, win["n"] / dt,
-                      win["pts"] // win["n"],
-                      win["bytes"] / win["n"] / 1024.0,
-                      win["drop"], nclients))
-            win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}
+                  "%.0f KB/f | %d stale skipped | dec %.1f den %.1f col %.1f "
+                  "fin %.1f ms/f | %d viewer(s)" % (
+                      frame.sensor_id, n / dt,
+                      win["pts"] // n,
+                      win["bytes"] / n / 1024.0,
+                      win["drop"],
+                      win["dec"] / n * 1000, win["den"] / n * 1000,
+                      win["col"] / n * 1000, win["fin"] / n * 1000,
+                      nclients))
+            # Frames the per-VIEWER senders skipped because that viewer's link
+            # (or browser tab) couldn't drain them — a loss stage that was
+            # previously invisible in every log. A trickle (~1/s across ~90
+            # msg/s) is benign — a browser tab stalling one frame, absorbed by
+            # the freshness design — so only log every 100 to keep the signal
+            # for a genuinely starved viewer (Wi-Fi, wedged tab) without spam.
+            dropped = sum(s.dropped for s in self._senders())
+            if dropped - self._sender_dropped_seen >= 100:
+                self._sender_dropped_seen = dropped
+                print("[preview] viewer send backlog: %d stale cloud frame(s) "
+                      "skipped total (slow viewer link/tab)" % dropped)
+            win = dict(_WIN_ZERO, t=time.time())
         return win
 
     def _handle_node_control(self, kind, payload):
@@ -1582,7 +1616,7 @@ class PreviewServer:
         print("[preview] node connected %s" % (addr[0],))
         with self._lock:
             self._nodes.append(conn)
-        win = {"t": time.time(), "n": 0, "pts": 0, "bytes": 0, "drop": 0}   # throughput log
+        win = dict(_WIN_ZERO, t=time.time())   # throughput + per-stage ms log
         pool = self._pool                # shared across all node connections
         inflight = collections.deque()   # (frame, future) in submission order
         try:
@@ -1614,8 +1648,16 @@ class PreviewServer:
                 # rolling time WINDOW and gates on stillness/velocity, so fresh-but-
                 # sparse frames sample it correctly; freshness matters far more than
                 # density here (a lagging ball position is useless).
+                # Skip only when a COMPLETE newer message is already buffered
+                # (message_buffered, MSG_PEEK): the old any-bytes select() check
+                # made one early byte of a partially-arrived next frame discard
+                # the complete frame in hand and then BLOCK until the rest
+                # trickled in — ~15-20% of frames thrown away under ordinary
+                # arrival jitter with the reader mostly idle (3 subtracted
+                # sensors stuck at ~22-27 fps with ~6 ms/frame of actual work).
                 if not self._recorder.recording:
-                    while select.select((conn,), (), (), 0)[0]:
+                    while (select.select((conn,), (), (), 0)[0]
+                           and message_buffered(conn)):
                         nxt = read_message(conn)
                         if nxt is None:
                             break                       # node closed mid-drain
@@ -1625,7 +1667,9 @@ class PreviewServer:
                         elif npayload.depth_rvl:
                             win["drop"] += 1
                             frame = npayload            # newer frame supersedes
+                t0 = time.perf_counter()
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
+                t1 = time.perf_counter()
                 # Decode + denoise stay on THIS thread, in order: the temporal
                 # filter is stateful per pixel over time, and every downstream
                 # consumer (color pairing, unproject grid, pose lift) must read
@@ -1636,6 +1680,7 @@ class PreviewServer:
                 if self._spatial_denoise is not None:
                     depth = self._spatial_denoise.filter(
                         frame.sensor_id, depth, frame.width, frame.height)
+                t2 = time.perf_counter()
                 # the node may have downsampled by frame.stride; the ray table is
                 # full-res, so derive the original dimensions. Build/read it here
                 # so the pool workers only ever READ the cache (no race).
@@ -1646,6 +1691,9 @@ class PreviewServer:
                 if frame.color_aligned and frame.color:
                     cgrid = aligned_color_grid(frame.color, depth,
                                                frame.width, frame.height)
+                win["dec"] += t1 - t0
+                win["den"] += t2 - t1
+                win["col"] += time.perf_counter() - t2
                 if self.pose_model and cgrid is not None:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
@@ -1668,9 +1716,11 @@ class PreviewServer:
                 if pool is None or self._calib_session is not None:
                     while inflight:
                         f0, fut0 = inflight.popleft()
-                        o0, n0, _ = fut0.result()
+                        o0, n0, _, dt0 = fut0.result()
+                        win["fin"] += dt0
                         win = self._emit(f0, o0, n0, win)
-                    out, npts, xyz = self._finish_frame(*job)
+                    out, npts, xyz, dt = self._finish_timed(*job)
+                    win["fin"] += dt
                     if self._calib_session is not None and xyz is not None:
                         # `_finish_frame` returns the RAW (pre-rig) cloud as its
                         # 3rd value specifically for this — the solve computes the
@@ -1682,7 +1732,7 @@ class PreviewServer:
                     # Parallel path: fan the heavy stateless stage (unproject +
                     # build) across the pool so one sensor uses multiple cores.
                     inflight.append(
-                        (frame, pool.submit(self._finish_frame, *job)))
+                        (frame, pool.submit(self._finish_timed, *job)))
                     # LATENCY-ADAPTIVE retirement (still strictly in order): emit
                     # every frame whose future is ALREADY done. When the pool
                     # keeps up (a light subtracted subject, or a fast box), the
@@ -1694,20 +1744,22 @@ class PreviewServer:
                     # INPUT fresh; this keeps the OUTPUT prompt.
                     while inflight and inflight[0][1].done():
                         f0, fut0 = inflight.popleft()
-                        o0, n0, _ = fut0.result()
+                        o0, n0, _, dt0 = fut0.result()
+                        win["fin"] += dt0
                         win = self._emit(f0, o0, n0, win)
                     # Throughput mode: only BLOCK when the window is full, i.e.
                     # the pool is the real bottleneck (heavy full-room stream) —
                     # then buffering up to `workers` keeps every core fed.
                     while len(inflight) >= self.workers:
                         f0, fut0 = inflight.popleft()
-                        o0, n0, _ = fut0.result()
+                        o0, n0, _, dt0 = fut0.result()
+                        win["fin"] += dt0
                         win = self._emit(f0, o0, n0, win)
         finally:
             if pool is not None:
                 for f0, fut0 in inflight:               # drain this conn's tail
                     try:
-                        o0, n0, _ = fut0.result()
+                        o0, n0, _, _dt = fut0.result()
                     except Exception:
                         continue
                     win = self._emit(f0, o0, n0, win)   # pool is shared; keep it
@@ -1830,6 +1882,13 @@ class PreviewServer:
         while True:
             conn, addr = srv.accept()
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            # Big receive buffer: drop-stale can only skip what is LOCALLY
+            # buffered (message_buffered peeks this buffer). The OS default
+            # (64 KB on Windows) can't hold even one full-room frame (~1.1 MB
+            # RVL+RGB), so a backlog used to live on the NODE side where the
+            # freshness rule couldn't see it — the node's sendall blocked and
+            # its capture loop parked instead of the relay skipping to fresh.
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
             threading.Thread(target=self._serve_node, args=(conn, addr),
                              daemon=True).start()
 
@@ -2010,6 +2069,12 @@ def main():
         workers,
         " (parallel unproject+build)" if workers > 1 else " (single-threaded)",
         args.workers, os.cpu_count() or 0))
+    # Which RVL decoder this PROCESS resolved (the numba path is an optional
+    # dep behind a silent import guard — "installed on the box" isn't proof).
+    dec = rvl.decoder_name()
+    print("[preview] rvl decode: %s%s" % (
+        dec, "" if dec == "numba"
+        else " — pip install numba here for the ~10x JIT decode"))
     if not args.no_discovery:
         # Answer nodes broadcasting "where is central?" with our node port, so a
         # node configured with --host auto finds us regardless of our DHCP IP.

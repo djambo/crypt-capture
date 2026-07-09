@@ -222,6 +222,62 @@ def encode_pose(sensor_id, timestamp_ns, keypoints):
     return out
 
 
+# Fixed-size message types: the magic alone determines the total wire length.
+_FIXED_MESSAGE_SIZE = {
+    CALIB_MAGIC: _CALIB.size,
+    IMU_MAGIC: _IMU.size,
+    EXTRINSIC_MAGIC: _EXTRINSIC.size,
+    COLOR_CALIB_MAGIC: _COLOR_CALIB.size,
+}
+
+
+def message_buffered(sock):
+    """True iff a COMPLETE node->central message is already in `sock`'s local
+    receive buffer — i.e. read_message() is guaranteed not to block. Peek-only
+    (MSG_PEEK consumes nothing). The caller must know at least one byte is
+    readable (e.g. via select) — on an idle blocking socket the peek itself
+    would block.
+
+    This is what the relay's drop-stale ingest gates on. Its original check
+    was select() alone — "any pending BYTES" — so a single early byte of a
+    PARTIALLY-arrived next frame made it discard the complete frame in hand
+    and then block inside read_message until the rest trickled in. Under
+    ordinary arrival jitter that threw away ~15-20%% of frames with the
+    reader mostly idle (measured: 3 subtracted-subject sensors stuck at
+    ~22-27 fps in with per-frame work of ~6 ms). Only a FULLY-buffered newer
+    message justifies skipping the one already read."""
+    try:
+        head = sock.recv(_HEADER.size, socket.MSG_PEEK)
+    except OSError:
+        return True                 # dying socket: let read_message surface it
+    if len(head) < 4:
+        return False
+    magic = head[:4]
+    if magic == MAGIC:              # variable: header carries dlen + clen
+        if len(head) < _HEADER.size:
+            return False
+        vals = _HEADER.unpack(head)
+        need = _HEADER.size + vals[8] + vals[9]
+    elif magic == TEXTURE_MAGIC:    # variable: head carries the JPEG length
+        if len(head) < _TEXTURE_HEAD.size:
+            return False
+        need = _TEXTURE_HEAD.size + struct.unpack_from("<I", head, 21)[0]
+    elif magic == POSE_MAGIC:       # variable: head carries the keypoint count
+        if len(head) < _POSE_HEAD.size:
+            return False
+        need = _POSE_HEAD.size + head[16] * _POSE_KP.size
+    else:
+        need = _FIXED_MESSAGE_SIZE.get(magic)
+        if need is None:            # unknown magic: let read_message raise
+            return True
+    if need <= len(head):
+        return True
+    try:
+        return len(sock.recv(need, socket.MSG_PEEK)) >= need
+    except OSError:
+        return True
+
+
 def read_message(sock):
     """Read one node->central message, dispatching on the leading magic.
 

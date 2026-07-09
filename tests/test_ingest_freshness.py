@@ -80,7 +80,53 @@ def test_recording_keeps_every_frame():
     assert relayed == n, "recording must keep every frame, relayed=%d" % relayed
 
 
+def test_partial_message_does_not_trigger_skip():
+    """message_buffered (the drop-stale gate) must say False for a PARTIALLY
+    arrived message and True only once it is fully buffered. The original gate
+    was select() alone ("any pending bytes"), so one early byte of the next
+    frame made the reader discard the complete frame in hand and BLOCK inside
+    read_message until the rest trickled in — throwing away ~15-20% of frames
+    under ordinary arrival jitter while mostly idle (3 subtracted-subject
+    sensors stuck at ~22-27 fps in with ~6 ms/frame of actual work)."""
+    import time
+
+    from protocol import frame as F
+
+    tx, rx = socket.socketpair()
+    try:
+        enc = F.Frame(0, 7, 123, 4, 4, b"D" * 100, b"C" * 50).encode()
+        cases = [                       # (encoded message, partial cut points)
+            (enc, (20, 40)),            # frame: mid-header, mid-payload
+            (F.encode_imu(1, 0.0, -1.0, 0.0), (5,)),          # fixed-size
+            (F.encode_pose(2, 999, [(0, 1.0, 2.0, 3.0, 0.5)] * 5), (17,)),
+            (F.encode_texture(0, 3, b"J" * 1000, 10, 10), (200,)),
+        ]
+        for msg, cuts in cases:
+            sent = 0
+            for cut in cuts:
+                tx.sendall(msg[sent:cut])
+                sent = cut
+                time.sleep(0.05)
+                assert F.message_buffered(rx) is False, \
+                    "partial message (%d bytes) must not read as skippable" % cut
+            tx.sendall(msg[sent:])
+            time.sleep(0.05)
+            assert F.message_buffered(rx) is True, "complete message"
+            assert F.read_message(rx) is not None
+        # Two complete frames back to back: still skippable after reading one.
+        tx.sendall(enc + enc)
+        time.sleep(0.05)
+        assert F.message_buffered(rx) is True
+        F.read_message(rx)
+        assert F.message_buffered(rx) is True
+        F.read_message(rx)
+    finally:
+        tx.close()
+        rx.close()
+
+
 if __name__ == "__main__":
     test_drops_stale_keeps_newest()
     test_recording_keeps_every_frame()
+    test_partial_message_does_not_trigger_skip()
     print("ingest freshness OK")
