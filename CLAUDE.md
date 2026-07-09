@@ -385,6 +385,23 @@ Two repos:
   3rd value for the calibration feed; the WIRE still carries the rig-transformed
   cloud. Regression-tested (`tests/test_calib_raw_feed.py`: the fed cloud is
   rig-independent = raw; fails by exactly the translation with the bug).
+  **Multi-camera RING coverage — graph-chained solve + keep-prior (2026-07-09):**
+  on a 3+-camera ring a ball spot is usually seen by only 2 of N cameras, and
+  `solve_rig` paired every sensor DIRECTLY to the reference — so a camera that
+  rarely shared the ball with the ref got too few pairs and was UNSOLVED (then
+  dropped to RAW → its gizmo collapsed onto the ref, clouds sprang apart; the
+  user saw "s0: 0.0mm/7 pairs — UNSOLVED s1,s2"). Two fixes: (1) `solve_rig` is
+  now GRAPH-BASED — it builds a pairwise transform for every co-visible pair and
+  chains from the reference along a max-inlier-pairs spanning tree, so s1
+  registers via s1→s2→ref (star topology reduces to the old direct solve;
+  `tests/test_rig_chain.py` proves a ring where s1 shares NO captures with the
+  ref registers to ~1e-15 m). (2) `_finish_calibration` KEEPS a sensor's prior
+  (e.g. rough) transform when a pass still can't solve it, instead of dropping it
+  to raw — frame-consistent because `solve_rig`/`solve_rough` both put the ref
+  (min id) at its own gravity-leveled pose (guarded on the ref matching). Those
+  kept sensors ride back in the `calib_status` `done` message's new `kept` field
+  (the viewer shows "kept sN at prior align — give it ball coverage"), so a
+  partial fine pass improves what it can and NEVER regresses the rest.
   **Robustness pass (2026-07-03, first real-hardware run):** first wand test
   showed two failures — the lock sometimes jumped onto legs/non-spherical
   features, and the completed fine solve snapped to *completely wrong* poses,
@@ -1027,7 +1044,9 @@ tests/      test_rvl.py, test_background.py, test_camera.py, test_imu.py,
             lossless XYZ reconstruction incl. stride+rig, size vs cpv1),
             test_calib_raw_feed.py (calibration is fed the RAW pre-rig cloud, so
             a fine-after-rough pass solves the full transform not a ~identity
-            residual — the collapsed-gizmos / clouds-spring-apart regression)
+            residual — the collapsed-gizmos / clouds-spring-apart regression),
+            test_rig_chain.py (graph-chained solve_rig registers a 3-camera ring
+            where a sensor shares NO ball captures with the reference)
 docs/       hardware.md, protocol.md, preview_protocol.md, realtime_architecture.md,
             textured_mesh.md (full-res colour on cheap geometry: JPEG texture +
             per-vertex UVs, relay UV projection, the CCLR/CTEX/set_texture wiring),

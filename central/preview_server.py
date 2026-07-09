@@ -1324,6 +1324,25 @@ class PreviewServer:
                 "centers": {str(s): n
                             for s, n in tracker.counts().items()}})
             return
+        # Keep a PRIOR transform for any sensor THIS pass couldn't register, so a
+        # partial fine/rough pass never drops a sensor back to RAW — which wiped a
+        # prior alignment (gizmos collapsed onto the reference, clouds sprang
+        # apart). Safe to mix because solve_rig/solve_rough both put the reference
+        # (min sensor id) at its own gravity-leveled pose, so an existing entry is
+        # in the SAME world frame — but only when the reference MATCHES, so guard
+        # on that. `kept` is reported separately (still rough-quality, not fine).
+        kept = []
+        if tier in ("fine", "rough", "skeleton") and rig and self._rig:
+            old_ref = (self._rig_meta or {}).get("ref")
+            if old_ref is not None and old_ref == min(rig):
+                meta_sensors = (self._rig_meta or {}).get("sensors", {})
+                for sid, (R, t) in self._rig.items():
+                    if sid not in rig:
+                        m = meta_sensors.get(sid, {})
+                        rig[sid] = {"R": R, "t": t,
+                                    "rms": float(m.get("rms", 0.0)),
+                                    "pairs": int(m.get("pairs", 0))}
+                        kept.append(sid)
         if tier == "floor":
             # A sensor is unsolved if its entry is still the pre-existing one
             # (or absent): the floor fit found no credible plane for it.
@@ -1354,6 +1373,7 @@ class PreviewServer:
             "type": "calib_status", "state": "done", "tier": tier,
             "sensors": {str(sid): {"rms": s["rms"], "pairs": s["pairs"]}
                         for sid, s in rig.items()},
+            "kept": [str(s) for s in kept],
             "unsolved": [str(s) for s in unsolved]})
 
     # --- node (TCP Frame) side ------------------------------------------

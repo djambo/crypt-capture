@@ -153,5 +153,9 @@
   "151": "One Kinect per edge node",
   "152": "RVL lossless depth codec",
   "153": "SMPL-X template tracking (approach C)",
-  "154": "TSDF fusion → watertight mesh sequence (approach B)"
+  "154": "TSDF fusion → watertight mesh sequence (approach B)",
+  "155": "test_solve_floor_level",
+  "156": "_read_gravity_optical",
+  "157": "object",
+  "158": "test_grid.py"
 }

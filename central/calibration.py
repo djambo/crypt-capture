@@ -285,26 +285,61 @@ def solve_rig(tracks, ref=None, max_dt=0.02, min_pairs=30, gravities=None,
     Returns {sensor_id: {"R": (3,3), "t": (3,), "rms": float, "pairs": int}},
     with the reference mapping to identity (or its leveling). Correspondences are
     solved OUTLIER-ROBUSTLY (solve_rigid_ransac): a few ball/leg mis-locks can't
-    corrupt the rigid fit. Sensors with too few inliers are omitted.
+    corrupt the rigid fit.
+
+    Registration is GRAPH-BASED, not direct-to-reference: it builds a pairwise
+    transform for EVERY co-visible sensor pair and chains them from the reference
+    along a max-support spanning tree. This is what makes a 3+-camera RING work —
+    a ball spot is usually seen by only 2 of N cameras, so a camera that rarely
+    shares the ball with the reference DIRECTLY still registers by chaining
+    through a neighbour it does share it with (s1 -> s2 -> ref). With a star
+    topology (every camera co-visible with the ref) it reduces to the old
+    direct solve. Sensors with no sufficiently-supported path to the reference
+    are omitted.
     """
     if not tracks:
         return {}
     if ref is None:
         ref = min(tracks)
+    sensors = [s for s in tracks if len(tracks[s]) > 0]
+    # Pairwise relative transforms (robust). edges[(i, j)] maps sensor i's points
+    # INTO sensor j's frame: X_j = R·X_i + t. Compute once per unordered pair and
+    # store both directions (the inverse is exact).
+    edges = {}
+    for a in range(len(sensors)):
+        for b in range(a + 1, len(sensors)):
+            i, j = sensors[a], sensors[b]
+            A, B = pair_tracks(tracks[i], tracks[j], max_dt=max_dt)
+            if A.shape[0] < min_pairs:
+                continue
+            sol = solve_rigid_ransac(A, B, threshold=ransac_threshold,
+                                     min_inliers=max(4, min_pairs // 2))
+            if sol is None:                        # no clean consensus for i<->j
+                continue
+            R, t, rms, inliers = sol               # maps i -> j
+            npairs = int(inliers.shape[0])
+            edges[(i, j)] = (R, t, rms, npairs)
+            edges[(j, i)] = (R.T, -R.T.dot(t), rms, npairs)   # j -> i (inverse)
+    # Max-support spanning tree from the reference (greedy Prim's, always taking
+    # the edge with the MOST inlier pairs so error accumulates least along a
+    # chain). M[s] = (R, t) maps sensor s's points into the reference frame.
     out = {ref: {"R": np.eye(3), "t": np.zeros(3), "rms": 0.0,
                  "pairs": len(tracks[ref])}}
-    for sid, track in tracks.items():
-        if sid == ref:
-            continue
-        A, B = pair_tracks(track, tracks[ref], max_dt=max_dt)
-        if A.shape[0] < min_pairs:
-            continue
-        sol = solve_rigid_ransac(A, B, threshold=ransac_threshold,
-                                 min_inliers=max(4, min_pairs // 2))
-        if sol is None:                            # no clean consensus -> unsolved
-            continue
-        R, t, rms, inliers = sol
-        out[sid] = {"R": R, "t": t, "rms": rms, "pairs": int(inliers.shape[0])}
+    M = {ref: (np.eye(3), np.zeros(3))}
+    while True:
+        best = None            # (npairs, u, R_u_ref, t_u_ref, rms) for unvisited u
+        for (u, v), (R_uv, t_uv, rms, npairs) in edges.items():
+            if v in M and u not in M:              # edge from unvisited u -> visited v
+                Rv, tv = M[v]                      # v -> ref
+                Ru = Rv.dot(R_uv)                  # u -> ref = (v->ref) ∘ (u->v)
+                tu = Rv.dot(t_uv) + tv
+                if best is None or npairs > best[0]:
+                    best = (npairs, u, Ru, tu, rms)
+        if best is None:
+            break
+        npairs, u, Ru, tu, rms = best
+        M[u] = (Ru, tu)
+        out[u] = {"R": Ru, "t": tu, "rms": rms, "pairs": npairs}
     if gravities is not None:
         L = level_rotation(gravities.get(ref, (0.0, -1.0, 0.0)))
         for s in out.values():

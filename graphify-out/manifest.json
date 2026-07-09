@@ -10,13 +10,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "central/calibration.py": {
-    "mtime": 1783550729.5285003,
-    "ast_hash": "486eb46338377c7cca68e88b1e4f5c17",
+    "mtime": 1783602691.5000904,
+    "ast_hash": "bdf15a5fa53158702247994f6cd19cbe",
     "semantic_hash": ""
   },
   "central/preview_server.py": {
-    "mtime": 1783553308.9591234,
-    "ast_hash": "7e0a23ac70ebc916a5b8ee5e96e0113c",
+    "mtime": 1783602720.5995555,
+    "ast_hash": "0074e0bf9dac06504c04e7818798d2a0",
     "semantic_hash": ""
   },
   "central/recorder.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783553374.3284044,
-    "ast_hash": "a7ca872fe60940d181bbf4a1379ae0bd",
+    "mtime": 1783604434.8012114,
+    "ast_hash": "3e6ce5e072a8840f213a2b827dabc927",
     "semantic_hash": ""
   },
   "README.md": {
@@ -342,6 +342,11 @@
   "tests/test_calib_raw_feed.py": {
     "mtime": 1783553238.5323,
     "ast_hash": "a50ba61e497ddf923b7110a503975cba",
+    "semantic_hash": ""
+  },
+  "tests/test_rig_chain.py": {
+    "mtime": 1783603969.256801,
+    "ast_hash": "64a8ebc96c0ec92a781ac34118021c7f",
     "semantic_hash": ""
   }
 }
