@@ -275,6 +275,99 @@ def test_stationary_sampler():
           % (s.captures, rot_err, t_err * 1000))
 
 
+def _ring_poses(n=3, radius=1.8, height=1.0):
+    """n cameras on a circle, 360/n deg apart, looking inward: (R, t) with
+    p_sensor = R·p_world + t (the convention the other tests use)."""
+    poses = {}
+    for i in range(n):
+        th = 2 * np.pi * i / n
+        c, s = np.cos(th), np.sin(th)
+        R = np.array([[c, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, c]])  # yaw
+        cam_w = np.array([radius * np.sin(th), height, radius * np.cos(th)])
+        poses[i] = (R, -R.dot(cam_w))
+    return poses
+
+
+def _run_ring_pass(late_join_window):
+    """Feed a 3-camera 120-deg ring where sensor 2 settles LATE at every hold
+    (the real-rig failure: per-camera distance/noise spreads settle times, so
+    the quorum-2 commit fired before the slowest camera joined). Returns the
+    sampler after 6 holds."""
+    poses = _ring_poses()
+    holds = [np.array(h) for h in [
+        (-0.4, 0.9, 0.1), (0.3, 1.1, -0.2), (0.0, 0.7, 0.3),
+        (-0.2, 1.3, -0.1), (0.4, 0.8, 0.2), (-0.3, 1.0, -0.3)]]
+    s = StationaryBallSampler(BALL_R, move_dist=0.06, min_samples=3,
+                              late_join_window=late_join_window)
+
+    def feed(center_w, t, sensors):
+        for sid in sensors:
+            R, tt = poses[sid]
+            cam = -R.T.dot(tt)
+            cap = sphere_cap(center_w, BALL_R, view_origin=cam, n=200)
+            cap = cap.dot(R.T) + tt + RNG.normal(scale=0.0008, size=cap.shape)
+            s.add(sid, t + 0.007 * sid, cap)
+
+    t = 0.0
+    for hi, h in enumerate(holds):
+        for f in range(60):                     # hold ~2 s
+            # Sensor 2 "locks on" 0.5 s into the hold — its detections during
+            # the approach lag behind (slower/noisier camera), so it settles
+            # well after the quorum has already committed the capture.
+            feed(h, t, sensors=(0, 1) if f < 15 else (0, 1, 2))
+            t += 0.033
+        if hi + 1 < len(holds):                 # move to the next spot
+            for f in range(6):
+                feed(h + (holds[hi + 1] - h) * (f + 1) / 6.0, t, (0, 1, 2))
+                t += 0.033
+    return s
+
+
+def test_stationary_late_join():
+    """A camera that settles AFTER the quorum commit must still land in the
+    same capture (late join) — without it, a 3-camera inward ring starves the
+    slow camera's solve edges and the fine pass can never register it (the
+    'all three markers were green but s1/s2 kept at prior align' failure)."""
+    # Old behaviour (no late join): sensor 2 misses every capture.
+    s_old = _run_ring_pass(late_join_window=0.0)
+    assert s_old.captures >= 5, "only %d holds captured" % s_old.captures
+    n2_old = len(s_old.tracks.get(2, []))
+    assert n2_old == 0, (
+        "expected the late-settling camera to be starved without late join, "
+        "got %d captures" % n2_old)
+
+    # With late join: sensor 2 joins EVERY capture under the same ids.
+    s = _run_ring_pass(late_join_window=2.5)
+    assert s.captures >= 5, "only %d holds captured" % s.captures
+    n2 = len(s.tracks.get(2, []))
+    assert n2 == s.captures, (
+        "late join incomplete: sensor 2 in %d/%d captures" % (n2, s.captures))
+    ids0 = [cid for cid, _ in s.tracks[0]]
+    ids2 = [cid for cid, _ in s.tracks[2]]
+    assert set(ids2) <= set(ids0) and len(set(ids2)) == n2, \
+        "late joins must reuse the committed capture ids"
+
+    # The relay's stationary defaults (min_pairs=6) must now solve the ring.
+    poses = _ring_poses()
+    rig = solve_rig(s.tracks, ref=0, min_pairs=min(6, s.captures))
+    for sid in (1, 2):
+        assert sid in rig, "ring solve dropped sensor %d" % sid
+        R_i, t_i = poses[sid]
+        R0, t0 = poses[0]
+        R_map = R0.dot(R_i.T)                   # sensor i -> sensor 0
+        t_map = t0 - R_map.dot(t_i)
+        rot_err = np.degrees(np.arccos(np.clip(
+            (np.trace(rig[sid]["R"].T.dot(R_map)) - 1) / 2, -1, 1)))
+        t_err = np.linalg.norm(rig[sid]["t"] - t_map)
+        assert rot_err < 1.0, "s%d rotation off %.2f deg" % (sid, rot_err)
+        assert t_err < 0.02, "s%d translation off %.1f mm" % (sid, t_err * 1e3)
+    members = s.capture_members()
+    assert members == {0, 1, 2} or s.state == "armed", \
+        "capture_members should report every joined sensor while held"
+    print("stationary late join: OK (%d holds, s2 %d->%d captures)"
+          % (s.captures, n2_old, n2))
+
+
 if __name__ == "__main__":
     test_fit_sphere()
     test_segment_ball()
@@ -283,4 +376,5 @@ if __name__ == "__main__":
     test_solve_rig_end_to_end()
     test_solve_rig_robust_to_outliers()
     test_stationary_sampler()
+    test_stationary_late_join()
     print("\nALL CALIBRATION TESTS PASSED")

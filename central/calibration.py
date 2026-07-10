@@ -430,6 +430,19 @@ class StationaryBallSampler:
     ids act as exact correspondence keys (solve_rig pairs by them, no max_dt
     guesswork), and the per-window averaging also beats down ToF noise. The
     operator's loop is: move the orb, hold ~1 s, it captures, move again.
+
+    LATE JOIN (the 3+-camera ring fix): the capture commits the instant the
+    QUORUM (`min_still_sensors`, default 2) settles — but on an inward ring the
+    cameras see the ball at different distances/noise levels and settle at
+    different times, so the slowest camera was systematically excluded from
+    every capture (it can only pair through captures it shares, so its solve
+    edges starved at ~1/3 the capture rate and the graph never reached it).
+    Now, while the ball is still HELD at the captured spot, any camera that
+    settles within `late_join_window` seconds of the commit appends its own
+    window-averaged sample under the SAME capture id — correct because a
+    stationary ball is at one physical spot no matter when each camera sampled
+    it (the whole premise of stop-and-go). The operator's cue: keep holding
+    until every camera's marker confirms it joined (see capture_members()).
     """
 
     # A camera is "still" when its detection's SPEED across the window is under
@@ -439,7 +452,8 @@ class StationaryBallSampler:
     def __init__(self, radius, still_window=0.8, min_still_time=0.5,
                  max_still_speed=0.015, still_radius=0.010, move_dist=0.08,
                  min_still_sensors=2, min_samples=3, min_points=40,
-                 max_points=8000, max_fit_rms=0.012, min_aspect=0.5):
+                 max_points=8000, max_fit_rms=0.012, min_aspect=0.5,
+                 late_join_window=2.5):
         self.radius = float(radius)
         self.still_window = float(still_window)
         self.min_still_time = float(min_still_time)
@@ -447,6 +461,7 @@ class StationaryBallSampler:
         self.still_radius = float(still_radius)
         self.move_dist = float(move_dist)
         self.min_still_sensors = int(min_still_sensors)
+        self.late_join_window = float(late_join_window)
         self.min_samples = int(min_samples)
         self.min_points = int(min_points)
         self.max_points = int(max_points)
@@ -460,6 +475,7 @@ class StationaryBallSampler:
         self.captured_centers = {}  # sid -> center at the last committed capture
         self.captures = 0
         self.state = "armed"        # "armed" (ready) | "captured" (await move)
+        self._capture_time = None   # t_seconds of the last commit (late join)
         self.rejected = {}
 
     def _reject(self, sid, reason):
@@ -488,7 +504,7 @@ class StationaryBallSampler:
             while buf and t_seconds - buf[0][0] > self.still_window:
                 buf.popleft()
             self.still[sensor_id] = self._is_still(buf)
-            self._try_capture()
+            self._try_capture(float(t_seconds))
             return "ok"
 
     def _is_still(self, buf):
@@ -522,10 +538,11 @@ class StationaryBallSampler:
             return None
         return np.array([c for _, c in buf]).mean(axis=0)
 
-    def _try_capture(self):
+    def _try_capture(self, t_seconds):
         """Global state machine (called under the lock). One capture per hold:
-        commit when a quorum is still, then wait for the ball to move away
-        before arming the next one."""
+        commit when a quorum is still, let slower cameras LATE-JOIN the same
+        capture while the ball is still held there, then wait for the ball to
+        move away before arming the next one."""
         still_sensors = [s for s, v in self.still.items() if v]
         if self.state == "armed":
             if len(still_sensors) >= self.min_still_sensors:
@@ -539,18 +556,50 @@ class StationaryBallSampler:
                     self.captured_centers[s] = ctr
                 self.captures += 1
                 self.state = "captured"
-        else:                                  # captured: re-arm once moved away
-            for s, cap in self.captured_centers.items():
-                cur = self.last.get(s)
-                if cur is not None and \
-                        np.linalg.norm(cur[0] - cap) >= self.move_dist:
-                    self.state = "armed"
-                    self.captured_centers = {}
-                    break
+                self._capture_time = t_seconds
+            return
+        # captured: (1) LATE JOIN — a camera that settles shortly after the
+        # commit appends its sample under the SAME capture id (the ball hasn't
+        # moved: a captured sensor spotting >= move_dist motion re-arms below,
+        # which ends the join window). Gate on a FRESH buffer so a camera whose
+        # frames stopped (occlusion sets still=False, but a dead node freezes
+        # its last flag) can't join with a stale window.
+        if (self._capture_time is not None and
+                t_seconds - self._capture_time <= self.late_join_window):
+            cid = float(self.captures)
+            for s in still_sensors:
+                if s in self.captured_centers:
+                    continue
+                buf = self.buffers.get(s)
+                if not buf or t_seconds - buf[-1][0] > self.still_window:
+                    continue
+                ctr = self._window_center(s)
+                if ctr is None:
+                    continue
+                self.tracks.setdefault(s, []).append((cid, ctr))
+                self.captured_centers[s] = ctr
+        # (2) re-arm once the ball moved away from the captured spot.
+        for s, cap in self.captured_centers.items():
+            cur = self.last.get(s)
+            if cur is not None and \
+                    np.linalg.norm(cur[0] - cap) >= self.move_dist:
+                self.state = "armed"
+                self.captured_centers = {}
+                break
 
     def counts(self):
         with self._lock:
             return {sid: len(t) for sid, t in self.tracks.items()}
+
+    def capture_members(self):
+        """Sensors whose sample is committed into the CURRENT capture (empty
+        once the ball moves away and the sampler re-arms). Drives the viewer's
+        per-camera 'your sample is in' confirmation — the operator holds the
+        spot until every camera that can see the ball appears here."""
+        with self._lock:
+            if self.state != "captured":
+                return set()
+            return set(self.captured_centers)
 
 
 class CentroidTracker:

@@ -1313,6 +1313,10 @@ class PreviewServer:
                         max_still_speed=float(cmd.get("max_still_speed", 0.015)),
                         still_radius=float(cmd.get("still_radius", 0.010)),
                         move_dist=float(cmd.get("move_dist", 0.08)),
+                        min_still_sensors=int(
+                            cmd.get("min_still_sensors", 2)),
+                        late_join_window=float(
+                            cmd.get("late_join_window", 2.5)),
                         **common)
                     min_pairs = int(cmd.get("min_pairs", 6))
                 # Faster feedback so the still/lock indicator feels live (the
@@ -1377,12 +1381,19 @@ class PreviewServer:
             # Latest detected ball centre + still flag per sensor (wand pass),
             # pruned of stale entries so a camera that lost the ball fades its
             # marker. `still` drives the LOCK colour so the operator sees WHEN a
-            # camera has settled and a capture is imminent.
+            # camera has settled and a capture is imminent; `cap` confirms that
+            # camera's sample is COMMITTED into the current capture (incl. late
+            # joins) — the operator holds the spot until every camera shows it.
             balls = session.get("balls")
             if balls:
+                members = set()
+                get_members = getattr(tracker, "capture_members", None)
+                if get_members is not None:
+                    members = get_members()
                 now = time.time()
                 fresh = {str(s): {"c": v["c"], "rms": v["rms"], "n": v["n"],
-                                  "still": v.get("still", False)}
+                                  "still": v.get("still", False),
+                                  "cap": s in members}
                          for s, v in balls.items() if now - v["t"] < 1.5}
                 if fresh:
                     msg["balls"] = fresh

@@ -176,9 +176,21 @@ it captures that position, move to the next. This is the default because it is
    sphere turns green**;
    when ≥2 cameras are settled at the same instant the relay **captures** that
    position (one averaged sample per still camera) and the status line's capture
-   count ticks up. Then **move to a new spot** (≥ ~8 cm away) and hold again.
+   count ticks up. A camera whose sample is committed turns **GOLD** (`★in` on
+   the status line) — and the capture stays **open for late joins**
+   (`late_join_window`, default 2.5 s): a slower camera that settles after the
+   commit appends its sample to the SAME capture (correct because the held ball
+   is at one physical spot regardless of when each camera sampled it). **Keep
+   holding until every camera that can see the ball is gold**, THEN move to a
+   new spot (≥ ~8 cm away) and hold again. Green alone is NOT confirmation —
+   before late joins existed, an inward 120° ring systematically starved the
+   slowest-settling camera (the quorum-2 commit fired before it settled, every
+   hold, so its solve edges never accumulated and it came back "kept at prior
+   align" despite all markers showing green).
 4. **Cover the whole volume** — ~12+ spots, spread near/far, high/low, and
-   across every camera's view. It **auto-finishes** once the target number of
+   across every camera's view; on an inward ring hold the ball out to the side
+   or overhead so your body doesn't hide it from the camera behind you. It
+   **auto-finishes** once the target number of
    captures is reached (or the time cap); each camera must contribute to enough
    shared holds (`min_pairs`, default 6) or it comes back unsolved.
 5. On "done" it reports per-sensor RMS residual — **millimetres = good**. A bad

@@ -433,6 +433,27 @@ Two repos:
   + a `captures` count at ~4 Hz (was 1 Hz, felt laggy); the viewer greens the
   LOCK sphere when a camera settles. `mode:"continuous"` (old `BallTracker`)
   stays for hardware-synced rigs; the viewer button sends `mode:"stationary"`.
+  **Late join (2026-07-10, the 120°-ring fix):** the quorum-2 commit fired the
+  instant the SECOND camera settled, and a camera settling later could never
+  join that capture — on the real inward 3-camera ring (different distances/
+  noise/fps per camera spread settle times; the shelf test masked it) the
+  slowest camera missed nearly every capture, its pairwise solve edges accrued
+  at ~1/3 the capture rate and never reached `min_pairs=6`, so the fine pass
+  solved ONLY the reference and "kept s1, s2 at prior align" even though the
+  operator saw all three markers green (green lagged the commit).
+  `StationaryBallSampler` now keeps the capture OPEN for `late_join_window`
+  (default 2.5 s, command-tunable, ends early when the ball moves): a camera
+  that settles after the commit appends its window-averaged sample under the
+  SAME capture id — correct because the held ball is at one physical spot
+  regardless of sampling instant. `min_still_sensors` is now command-exposed
+  too. Feedback: `calib_status.balls` gains `cap` (sample committed into the
+  current capture, via `capture_members()`); the viewer turns that camera's
+  marker GOLD (`★in` on the status line) — the operator holds until every
+  camera that can see the ball is gold. Regression-tested
+  (`test_calibration.test_stationary_late_join`: a simulated 120° ring whose
+  third camera settles 0.5 s late gets 0 captures without late join, all of
+  them with it, and solve_rig at the relay defaults recovers the ring to
+  <1°/2 cm of ground truth).
 - ✅ **Skeleton pipeline wiring (2026-07-03, design: `docs/skeleton_pose.md`)**
   — 2D pose keypoints from the nodes, lifted to metric 3D at the relay.
   New `CPOS` node→central message (`frame.encode_pose`, 3.6-safe): COCO-17
