@@ -75,8 +75,8 @@
     "semantic_hash": "26640c11c71ae3d2419f03bb4fcda26c"
   },
   "node/kinect_node.py": {
-    "mtime": 1783639158.4531672,
-    "ast_hash": "0eb1ae7888949841e5c529c40622879d",
+    "mtime": 1783641437.9183767,
+    "ast_hash": "ae46dc3cc235ce64e459b8e201476791",
     "semantic_hash": ""
   },
   "node/pose.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783640450.3210826,
-    "ast_hash": "b153f0d43788e56db0ff420e71c36b3d",
+    "mtime": 1783641533.862144,
+    "ast_hash": "a06572e03ec4bf97e209b6ccf7289300",
     "semantic_hash": ""
   },
   "README.md": {
@@ -295,8 +295,8 @@
     "semantic_hash": "b69297f317bec44e46c8995130de27d6"
   },
   "docs/preview_protocol.md": {
-    "mtime": 1783639275.7061656,
-    "ast_hash": "62ede13811836829c3f4b9d753787ece",
+    "mtime": 1783641519.2244935,
+    "ast_hash": "3f71aefb0f57ecd6b0c4a77737fa4f03",
     "semantic_hash": ""
   },
   "docs/protocol.md": {
@@ -350,8 +350,8 @@
     "semantic_hash": ""
   },
   "tests/test_ir.py": {
-    "mtime": 1783639550.5826683,
-    "ast_hash": "a7db01d2f19a3b74d7a5c9a95a598958",
+    "mtime": 1783641484.8121972,
+    "ast_hash": "1059542e238a8b244bf91aa35369bd62",
     "semantic_hash": ""
   },
   "tests/test_scene_sync.py": {

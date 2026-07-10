@@ -1014,12 +1014,22 @@ Two repos:
   image as the point colours. New forwarded control command
   `{"cmd":"set_ir","enabled":bool}` (viewer "IR colour" toggle /
   `send_command set-ir --enabled on|off`): the node substitutes tone-mapped IR
-  grey (`_ir_to_gray`, sqrt curve over `IR_CLIP=1000` ≈ k4aviewer's active-IR
-  range, LUT-based) for the camera colour in `_process_frame` — the IR image
+  grey for the camera colour in `_process_frame` — the IR image
   shares the depth camera's geometry (same grid, same valid mask;
   `cap.ir` in color_to_depth, `cap.transformed_ir` in depth_to_color — the
   latter needs a pyk4a exposing it, else the node logs once and stays on
-  colour), so the swap is exact per point and the **wire format is unchanged**
+  colour), so the swap is exact per point and the **wire format is unchanged**.
+  **The white point is AUTO-GAINED (2026-07-10, same day):** a fixed full-scale
+  (first cut `IR_CLIP=1000`, k4aviewer's range) rendered the whole subject
+  WHITE on hardware — active-IR spans orders of magnitude with distance/
+  reflectivity (skin at 1-2 m returns thousands). Now each frame's worker
+  measures the subject's 99th-percentile IR (`IR_WHITE_PERCENTILE`), returns it
+  in the result tuple, and the sender EMA-smooths it (`IR_SCALE_EMA=0.1`, no
+  gain flicker) into `ir_mode["scale"]`, which the capture thread hands to the
+  NEXT frame's worker — classic auto-exposure with one frame of lag (worker
+  processes can't share state). Sqrt curve on top for shadow detail;
+  `IR_SCALE_FLOOR=200` so an empty scene's noise isn't amplified; the scale
+  resets on every set_ir toggle (re-expose fresh)
   (the rgb block just carries grey → cpv1/cpv2/cpv3, recordings, the env plate
   and every viewer render follow automatically). While IR is on the node skips
   the SDK colour warp unless the pose worker needs the colour image; node-side

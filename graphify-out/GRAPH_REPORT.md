@@ -1,7 +1,7 @@
 # Graph Report - crypt-capture  (2026-07-10)
 
 ## Corpus Check
-- 71 files · ~101,084 words
+- 71 files · ~101,639 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `a8128371`
+- Built from commit: `145568ad`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -356,7 +356,7 @@ Nodes (12): Accuracy: sphere (depth) vs ChArUco (color) vs IR — the honest mat
 
 ### Community 39 - "Texture UV Tests"
 Cohesion: 0.22
-Nodes (12): denoise_mask(), Remove isolated speckles from a boolean foreground mask: drop any kept     pixe, _ir_to_gray(), _process_frame(), uint16 IR image -> uint8 grey image (same shape), sqrt tone map.     LUT-based,, Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy, color_to_gray(), IR-colour-mode stand-in (set_ir): collapse each RGB triple to its     luminance (+4 more)
+Nodes (12): denoise_mask(), Remove isolated speckles from a boolean foreground mask: drop any kept     pixe, _ir_to_gray(), _process_frame(), Masked IR values (uint16 1-D) -> uint8 grey, sqrt tone map with `scale`     as, Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy, color_to_gray(), IR-colour-mode stand-in (set_ir): collapse each RGB triple to its     luminance (+4 more)
 
 ### Community 40 - "Floor Sampler"
 Cohesion: 0.29

@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "central/preview_server.py": {
-    "mtime": 1783616215.3839085,
-    "ast_hash": "540a9c9978e148b798e6812893f2d875",
+    "mtime": 1783639230.1672528,
+    "ast_hash": "99d7817d62c09cca9ac63617e2f1c913",
     "semantic_hash": ""
   },
   "central/recorder.py": {
@@ -75,9 +75,9 @@
     "semantic_hash": "26640c11c71ae3d2419f03bb4fcda26c"
   },
   "node/kinect_node.py": {
-    "mtime": 1783470035.6406999,
-    "ast_hash": "49ab158362981cb1201b02e0bafc560c",
-    "semantic_hash": "49ab158362981cb1201b02e0bafc560c"
+    "mtime": 1783639158.4531672,
+    "ast_hash": "0eb1ae7888949841e5c529c40622879d",
+    "semantic_hash": ""
   },
   "node/pose.py": {
     "mtime": 1783163447.1096125,
@@ -85,9 +85,9 @@
     "semantic_hash": "a05e59b1a464238738b5e31690ae864a"
   },
   "node/sim_node.py": {
-    "mtime": 1783470035.641699,
-    "ast_hash": "0c8357640a5b6899a4b4e7a1ecd3e455",
-    "semantic_hash": "0c8357640a5b6899a4b4e7a1ecd3e455"
+    "mtime": 1783639199.2116828,
+    "ast_hash": "319724e74b2d343ab6ac7eb1019ccf23",
+    "semantic_hash": ""
   },
   "processing/mesh_take.py": {
     "mtime": 1782226228.621757,
@@ -140,9 +140,9 @@
     "semantic_hash": "f64863bdff5d53ec25da77ed1d44289f"
   },
   "scripts/send_command.py": {
-    "mtime": 1783209622.3852835,
-    "ast_hash": "fc0249d2336b6b1b12a26e67ed8e0a2b",
-    "semantic_hash": "fc0249d2336b6b1b12a26e67ed8e0a2b"
+    "mtime": 1783639220.3468547,
+    "ast_hash": "5b37578098631059258089a2b3ca0f98",
+    "semantic_hash": ""
   },
   "tests/__init__.py": {
     "mtime": 1783163447.1174295,
@@ -210,9 +210,9 @@
     "semantic_hash": "c1433ea603c3a3ce3c60a57b36ef333f"
   },
   "tests/test_relay_workers.py": {
-    "mtime": 1783279772.35414,
-    "ast_hash": "81e14a560abfaa56ada228e746480f6f",
-    "semantic_hash": "81e14a560abfaa56ada228e746480f6f"
+    "mtime": 1783622357.147794,
+    "ast_hash": "0ffa9c260984feedfb54b630bf276e42",
+    "semantic_hash": ""
   },
   "tests/test_rig.py": {
     "mtime": 1783163447.1224241,
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783616608.1111681,
-    "ast_hash": "a07bd63f5530f59de694a24d5e5aab1e",
+    "mtime": 1783640450.3210826,
+    "ast_hash": "b153f0d43788e56db0ff420e71c36b3d",
     "semantic_hash": ""
   },
   "README.md": {
@@ -295,8 +295,8 @@
     "semantic_hash": "b69297f317bec44e46c8995130de27d6"
   },
   "docs/preview_protocol.md": {
-    "mtime": 1783470035.5687053,
-    "ast_hash": "cb8a9080d1d21163188f97d098963ba3",
+    "mtime": 1783639275.7061656,
+    "ast_hash": "62ede13811836829c3f4b9d753787ece",
     "semantic_hash": ""
   },
   "docs/protocol.md": {
@@ -347,6 +347,16 @@
   "tests/test_rig_chain.py": {
     "mtime": 1783603969.256801,
     "ast_hash": "64a8ebc96c0ec92a781ac34118021c7f",
+    "semantic_hash": ""
+  },
+  "tests/test_ir.py": {
+    "mtime": 1783639550.5826683,
+    "ast_hash": "a7db01d2f19a3b74d7a5c9a95a598958",
+    "semantic_hash": ""
+  },
+  "tests/test_scene_sync.py": {
+    "mtime": 1783622384.3010957,
+    "ast_hash": "8530661fc45e57dd24ace76f9e10d249",
     "semantic_hash": ""
   }
 }

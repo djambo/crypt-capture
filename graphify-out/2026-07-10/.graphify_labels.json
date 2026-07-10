@@ -159,8 +159,5 @@
   "157": "object",
   "158": "test_relay_workers.py",
   "159": "test_pose_worker_gate_hysteresis",
-  "160": "test_rvl.py",
-  "161": "sample_depth",
-  "162": "preview_client.py",
-  "163": "test_grid.py"
+  "161": "sample_depth"
 }

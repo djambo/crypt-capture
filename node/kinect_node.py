@@ -99,23 +99,27 @@ _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
 # depth camera's geometry (same grid, same valid mask), so tone-mapped IR grey
 # slots straight into the existing per-point colour payload and NOTHING
 # downstream changes (relay pairing, CPV1/2/3 rgb blocks, viewer renders,
-# recordings all just carry grey). IR_CLIP = full-scale IR value — everything
-# at/above it renders white; k4aviewer visualises active IR over ~0..1000,
-# which matches what a subject at 1-3 m reflects. The sqrt curve keeps
-# mid-range detail visible without per-frame auto-gain (which flickers).
-IR_CLIP = 1000.0
-_IR_LUT = [None]
+# recordings all just carry grey).
+#
+# The white point is AUTO-GAINED, not fixed: active-IR brightness spans orders
+# of magnitude with distance/reflectivity (skin at 1-2 m returns thousands —
+# a fixed full-scale like k4aviewer's 0..1000 saturated the whole subject to
+# white on hardware). Each frame's worker measures the 99th percentile of the
+# subject's own IR values; the node EMA-smooths that (IR_SCALE_EMA, so the
+# gain doesn't flicker as the subject moves) and hands the smoothed scale to
+# the NEXT frame's worker — classic auto-exposure, one frame of lag. The sqrt
+# curve on top keeps shadow detail visible.
+IR_WHITE_PERCENTILE = 99.0    # this fraction of subject IR maps below white
+IR_SCALE_EMA = 0.1            # per-frame blend toward the measured percentile
+IR_SCALE_FLOOR = 200.0        # never amplify an empty/dark scene's noise
 
 
-def _ir_to_gray(ir):
-    """uint16 IR image -> uint8 grey image (same shape), sqrt tone map.
-    LUT-based, so the per-frame cost is one fancy-index gather. Runs in the
-    worker processes (pure NumPy); each child builds its LUT once."""
-    if _IR_LUT[0] is None:
-        v = np.arange(65536, dtype=np.float32)
-        _IR_LUT[0] = (np.sqrt(np.minimum(v, IR_CLIP) / IR_CLIP)
-                      * 255.0).astype(np.uint8)
-    return _IR_LUT[0][ir]
+def _ir_to_gray(vals, scale):
+    """Masked IR values (uint16 1-D) -> uint8 grey, sqrt tone map with `scale`
+    as the white point. Runs in the worker processes (pure NumPy)."""
+    s = max(float(scale), IR_SCALE_FLOOR)
+    return (np.sqrt(np.minimum(vals.astype(np.float32) / s, 1.0))
+            * 255.0).astype(np.uint8)
 from node.background import BackgroundSubtractor, denoise_mask, foreground_mask
 
 # Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
@@ -386,7 +390,8 @@ def _read_intrinsics(k4a, align):
     return fx, fy, cx, cy, dist
 
 
-def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None):
+def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
+                   ir_scale=None):
     """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
     stage, run on a worker thread so consecutive frames overlap across cores.
     Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
@@ -394,7 +399,10 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None):
     `plate`/`margin`/`denoise` are per-frame snapshots (the control reader may
     mutate the live objects mid-frame). With `ir_src` (IR colour mode, set_ir:
     the IR16 image in the SAME geometry as `depth`), tone-mapped IR grey
-    replaces the camera colour in the payload. Returns everything the sender
+    replaces the camera colour in the payload; `ir_scale` is the EMA-smoothed
+    white point from previous frames (None on the first frame — this frame's
+    own percentile is used), and the frame's measured percentile rides back in
+    the result so the sender can update the EMA. Returns everything the sender
     needs.
     """
     t0 = time.time()
@@ -412,10 +420,14 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None):
 
     color = b""
     color_aligned = False
+    ir_p = 0.0
     if ir_src is not None:
         if stride > 1:
             ir_src = ir_src[::stride, ::stride]
-        gray = _ir_to_gray(ir_src)[masked != 0]     # one grey per valid point
+        vals = ir_src[masked != 0]                  # one IR value per point
+        if vals.size:
+            ir_p = float(np.percentile(vals, IR_WHITE_PERCENTILE))
+        gray = _ir_to_gray(vals, ir_scale if ir_scale else ir_p)
         color = np.ascontiguousarray(
             np.repeat(gray[:, None], 3, axis=1)).tobytes()
         color_aligned = True
@@ -427,7 +439,7 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None):
         color_aligned = True
     t2 = time.time()
     pts = int((masked != 0).sum())
-    return comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1
+    return comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1, ir_p
 
 
 def _apply_color_controls(k4a, exposure, powerline, sensor_id):
@@ -559,7 +571,9 @@ def run(host, port, sensor_id, frames,
     texture = {"stream": False, "resend_calib": False, "quality": 85}
     # IR colour mode (set_ir): ship tone-mapped active-IR grey as the point
     # colours instead of the camera colour (same payload/wire, see _ir_to_gray).
-    ir_mode = {"stream": False, "warned": False}
+    # `scale` = the EMA-smoothed auto-gain white point (None until the first
+    # IR frame lands; reset on toggle so a re-enable re-exposes fresh).
+    ir_mode = {"stream": False, "warned": False, "scale": None}
 
     # Live camera reconfig (set_camera): the reader thread only *records* the
     # request under a lock; the capture loop performs the (re)start so pyk4a is
@@ -588,6 +602,7 @@ def run(host, port, sensor_id, frames,
             print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
         elif c == "set_ir":
             ir_mode["stream"] = bool(cmd.get("enabled", False))
+            ir_mode["scale"] = None            # re-expose fresh on (re)enable
             print("sensor %d: IR colour -> %s" % (sensor_id, ir_mode["stream"]))
         elif c == "set_texture":
             texture["stream"] = bool(cmd.get("enabled", False))
@@ -664,7 +679,14 @@ def run(host, port, sensor_id, frames,
                     sock.sendall(item[1])
                     continue
                 _, fut, fid, fstride, t_cap, tc = item
-                comp, color, color_aligned, w, h, pts, ms_d, ms_c = fut.result()
+                (comp, color, color_aligned, w, h, pts, ms_d, ms_c,
+                 ir_p) = fut.result()
+                # IR auto-gain: EMA the frame's measured white point (plain
+                # dict + GIL = safe; the capture thread reads it on submit).
+                if ir_p > 0:
+                    prev = ir_mode["scale"]
+                    ir_mode["scale"] = (ir_p if prev is None else
+                                        prev + IR_SCALE_EMA * (ir_p - prev))
                 t_send = time.time()
                 # timestamp_ns = the CAPTURE instant (tc, taken right before
                 # get_capture returned), NOT send time: send time is biased by
@@ -905,7 +927,8 @@ def run(host, port, sensor_id, frames,
             # park check above and we are the only producer, so this can't
             # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
-                              bg.plate, bg.margin, rng["denoise"], s, irsrc)
+                              bg.plate, bg.margin, rng["denoise"], s, irsrc,
+                              ir_mode["scale"])
             outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 

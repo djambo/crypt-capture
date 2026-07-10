@@ -43,27 +43,33 @@ if "pyk4a" not in sys.modules:
         ACCEL=1, DEPTH=2, COLOR=3)
     sys.modules["pyk4a"] = stub
 
-from node.kinect_node import IR_CLIP, _ir_to_gray, _process_frame
+from node.kinect_node import (IR_SCALE_FLOOR, IR_WHITE_PERCENTILE,
+                              _ir_to_gray, _process_frame)
 from node.sim_node import color_to_gray
 from protocol import rvl
 
 
 def test_tone_map():
-    v = np.array([0, 1, int(IR_CLIP) // 4, int(IR_CLIP), 5000, 65535],
+    scale = 4000.0
+    v = np.array([0, 1, int(scale) // 4, int(scale), 20000, 65535],
                  dtype=np.uint16)
-    g = _ir_to_gray(v)
+    g = _ir_to_gray(v, scale)
     assert g.dtype == np.uint8 and g.shape == v.shape
     assert g[0] == 0, "zero IR must be black"
-    assert g[3] == 255, "IR at the clip must be full white"
-    assert g[4] == 255 and g[5] == 255, "above the clip saturates"
+    assert g[3] == 255, "IR at the white point must be full white"
+    assert g[4] == 255 and g[5] == 255, "above the white point saturates"
     # sqrt curve: quarter scale lands at half brightness (mid-range lift).
-    assert abs(int(g[2]) - 127) <= 1, "sqrt tone map: 1/4 clip -> ~1/2 white"
-    # monotonic over the whole LUT range
-    ramp = _ir_to_gray(np.arange(65536, dtype=np.uint16))
+    assert abs(int(g[2]) - 127) <= 1, "sqrt tone map: 1/4 scale -> ~1/2 white"
+    # monotonic over the whole input range
+    ramp = _ir_to_gray(np.arange(65536, dtype=np.uint16), scale)
     assert np.all(np.diff(ramp.astype(np.int16)) >= 0), "must be monotonic"
-    # 2D shape passes through
-    img = _ir_to_gray(np.full((4, 6), 250, np.uint16))
-    assert img.shape == (4, 6)
+    # the white point is what maps to full brightness — the auto-gain contract
+    assert _ir_to_gray(np.array([800], np.uint16), 800.0)[0] == 255
+    assert _ir_to_gray(np.array([800], np.uint16), 8000.0)[0] < 255
+    # the floor stops an empty/dark scene's noise being amplified to white
+    lo = _ir_to_gray(np.array([30], np.uint16), 30.0)
+    assert lo[0] < 255 and lo[0] == _ir_to_gray(
+        np.array([30], np.uint16), IR_SCALE_FLOOR)[0]
     print("tone map: OK")
 
 
@@ -72,19 +78,35 @@ def test_process_frame_ir_branch():
     depth = np.zeros((h, w), np.uint16)
     depth[3:9, 4:12] = 1500                       # a valid "subject" patch
     ir = np.zeros((h, w), np.uint16)
-    ir[3:9, 4:12] = np.arange(48, dtype=np.uint16).reshape(6, 8) * 20
+    # realistic active-IR magnitudes (thousands) — the case a fixed white
+    # point saturated all-white on hardware
+    ir[3:9, 4:12] = np.arange(48, dtype=np.uint16).reshape(6, 8) * 100 + 800
 
-    comp, color, aligned, gw, gh, pts, _, _ = _process_frame(
+    comp, color, aligned, gw, gh, pts, _, _, ir_p = _process_frame(
         depth, None, None, 60, 0, 1, ir_src=ir)
     assert aligned and (gw, gh) == (w, h)
     assert pts == 48 and len(color) == pts * 3
     tri = np.frombuffer(color, np.uint8).reshape(-1, 3)
     assert np.all(tri[:, 0] == tri[:, 1]) and np.all(tri[:, 1] == tri[:, 2]), \
         "IR payload must be grey (R==G==B)"
-    # paired 1:1 with the valid depth pixels, in row-major mask order — the
-    # exact contract the relay's colour pairing relies on
-    expect = _ir_to_gray(ir)[depth != 0]
+    # the measured white point rides back for the EMA
+    expect_p = float(np.percentile(ir[depth != 0], IR_WHITE_PERCENTILE))
+    assert abs(ir_p - expect_p) < 1e-6, "frame percentile must be returned"
+    # auto-gain: with no prior scale the frame self-exposes off its own
+    # percentile — most of the subject must land BELOW white (the all-white
+    # regression), and the mapping must match the masked IR exactly, in
+    # row-major mask order (the relay's colour-pairing contract)
+    expect = _ir_to_gray(ir[depth != 0], ir_p)
     assert np.array_equal(tri[:, 0], expect), "grey must be the masked IR"
+    assert (tri[:, 0] < 255).sum() >= int(pts * 0.9), \
+        "auto-gain must keep most of the subject below saturation"
+    assert int(tri[:, 0].max()) == 255, "the hottest points still reach white"
+    # an explicit EMA scale wins over the frame's own percentile
+    _, color_s, _, _, _, _, _, _, _ = _process_frame(
+        depth, None, None, 60, 0, 1, ir_src=ir, ir_scale=20000.0)
+    tri_s = np.frombuffer(color_s, np.uint8).reshape(-1, 3)
+    assert np.array_equal(tri_s[:, 0],
+                          _ir_to_gray(ir[depth != 0], 20000.0))
     # depth path untouched by the IR branch
     back = np.asarray(rvl.decompress(comp, gw * gh),
                       dtype=np.uint16).reshape(h, w)
@@ -94,16 +116,17 @@ def test_process_frame_ir_branch():
     csrc = np.zeros((h, w, 4), np.uint8)
     csrc[..., 0] = 10                              # B
     csrc[..., 2] = 30                              # R
-    _, color2, aligned2, _, _, _, _, _ = _process_frame(
+    _, color2, aligned2, _, _, _, _, _, ir_p2 = _process_frame(
         depth, csrc, None, 60, 0, 1)
     tri2 = np.frombuffer(color2, np.uint8).reshape(-1, 3)
     assert aligned2 and np.all(tri2[0] == (30, 0, 10)), "colour path unchanged"
+    assert ir_p2 == 0.0, "no IR -> no percentile (EMA untouched)"
 
     # stride applies to the IR image exactly like depth/colour
-    comp3, color3, _, gw3, gh3, pts3, _, _ = _process_frame(
+    comp3, color3, _, gw3, gh3, pts3, _, _, ir_p3 = _process_frame(
         depth, None, None, 60, 0, 2, ir_src=ir)
     assert (gw3, gh3) == (w // 2, h // 2) and len(color3) == pts3 * 3
-    expect3 = _ir_to_gray(ir[::2, ::2])[depth[::2, ::2] != 0]
+    expect3 = _ir_to_gray(ir[::2, ::2][depth[::2, ::2] != 0], ir_p3)
     tri3 = np.frombuffer(color3, np.uint8).reshape(-1, 3)
     assert np.array_equal(tri3[:, 0], expect3)
     print("process_frame IR branch: OK")
