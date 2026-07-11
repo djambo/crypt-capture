@@ -83,7 +83,9 @@ already-provisioned node run it once directly, then reboot once so the
 driver-level modprobe options load:
 ```bash
 sudo deploy/disable-wifi-powersave.sh && sudo reboot
-# verify after: iw dev wlan0 get power_save   -> "Power save: off"
+# verify after (prints each WiFi interface's state — the name is often NOT
+# wlan0; predictable naming gives e.g. wlP1p1s0, `iw dev` lists it):
+deploy/disable-wifi-powersave.sh --runtime-only   # -> "Power save: off"
 ```
 Do NOT just edit `NetworkManager.conf` — Ubuntu ships
 `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (powersave = 3),
@@ -267,8 +269,9 @@ Floor**. Clouds registered, floors flush on the grid — the rig is at parity.
 - [ ] `CAPTURE OK` smoke test (§7)
 - [ ] pyk4a (§8)
 - [ ] Service + `/etc/default/kinect-node` with a **unique `SENSOR_ID`** (§9)
-- [ ] WiFi powersave OFF (§4 — the installer runs the script; verify
-      `iw dev wlan0 get power_save` → off, reboot once for the driver options)
+- [ ] WiFi powersave OFF (§4 — the installer runs the script; verify with
+      `deploy/disable-wifi-powersave.sh --runtime-only` → off, reboot once
+      for the driver options)
 - [ ] Skeleton pose: `onnxruntime-gpu "numpy<2"` + MoveNet Thunder (§10)
 - [ ] Confirm streaming + skeleton in the viewer (§12)
 

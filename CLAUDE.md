@@ -1418,9 +1418,13 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
   nl80211 (deep LPS + PCIe ASPM). The script layers a `zz-*` NM drop-in
   (sorts last → wins), per-connection `powersave 2`, a dispatcher hook
   (`iw set power_save off` on every interface-up) and rtw88/iwlwifi modprobe
-  options (need ONE reboot). Existing nodes: pull +
+  options (need ONE reboot; generated only from parameters the loaded modules
+  actually expose — an unknown option would make the module fail to load and
+  kill WiFi outright). Existing nodes: pull +
   `sudo deploy/disable-wifi-powersave.sh` + reboot; verify
-  `iw dev wlan0 get power_save` → off.
+  `deploy/disable-wifi-powersave.sh --runtime-only` → "Power save: off"
+  (the interface is often NOT wlan0 — predictable naming gives e.g.
+  wlP1p1s0, hence `iw dev wlan0 …` → "No such device (-19)").
 - **Run on boot / headless**: `deploy/install-node-service.sh` installs the node
   as a systemd service (`Restart=always`, USB-buffer fix, per-device config in
   `/etc/default/kinect-node`) so it auto-starts and relaunches on failure — the
