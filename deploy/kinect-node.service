@@ -31,6 +31,13 @@ ExecStartPre=+/bin/sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory
 # 'sat N%' with the workers not truly saturated). A capture node has nothing to
 # power-save for — pin the clocks.
 ExecStartPre=-+/usr/bin/jetson_clocks
+# Re-assert WiFi power_save OFF at every start (root, non-fatal; no-op on
+# Ethernet). The PERSISTENT config (NetworkManager zz-* drop-in + dispatcher
+# hook + driver modprobe options) is written by the installer via
+# deploy/disable-wifi-powersave.sh — this just covers runtime drift. WiFi
+# powersave = the radio dozing between beacons = RTT spikes/stalls on the
+# live stream; a capture node has nothing to power-save for.
+ExecStartPre=-+__WORKDIR__/deploy/disable-wifi-powersave.sh --runtime-only
 # Pull the latest code before launching (as User=, so it uses that user's git
 # credentials). The leading '-' makes it non-fatal: offline / no-access just runs
 # the on-disk code. Toggle with AUTO_UPDATE / pick a branch with UPDATE_BRANCH in

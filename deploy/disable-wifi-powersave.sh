@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Kill WiFi power saving on a capture node — permanently, at every layer.
+#
+# A streaming node has nothing to power-save for, and WiFi powersave is a
+# proven latency/throughput killer (the radio dozes between beacons -> RTT
+# spikes + multi-hundred-ms stalls on the live stream). Turning it off is
+# NOT one setting, which is why the usual advice fails:
+#
+#   1. NetworkManager: Ubuntu ships
+#      /etc/NetworkManager/conf.d/default-wifi-powersave-on.conf
+#      (wifi.powersave = 3 = ON). conf.d files are read in ALPHABETICAL
+#      order after NetworkManager.conf and the LAST value wins — so editing
+#      NetworkManager.conf (read first!) or adding an earlier-sorting
+#      drop-in silently loses to it. Our drop-in is named zz-* so it sorts
+#      last and wins.
+#   2. The value only applies when a connection (re)activates — restarting
+#      NetworkManager with a config that loses per (1) changes nothing.
+#   3. The DRIVER can doze on its own below nl80211: rtw88 "deep LPS" +
+#      PCIe ASPM on the Orin Nano devkit's RTL8822CE, iwlwifi power_save on
+#      Intel cards. Those need modprobe options and take effect on the next
+#      module load, i.e. after ONE reboot.
+#   4. Belt-and-braces: a NetworkManager dispatcher hook re-runs
+#      `iw set power_save off` on every interface-up (reconnects/roams),
+#      and the kinect-node service re-asserts it at every start.
+#
+# Run on the JETSON, from the repo root (also called by
+# install-node-service.sh, so freshly provisioned nodes get it for free):
+#     sudo deploy/disable-wifi-powersave.sh
+#     sudo reboot        # once, for the driver-level modprobe options
+#
+# Verify after: iw dev wlan0 get power_save   -> "Power save: off"
+#
+#   --runtime-only   just re-apply `iw ... set power_save off` now, write no
+#                    files (used by the service's ExecStartPre).
+set -euo pipefail
+
+RUNTIME_ONLY=0
+[ "${1:-}" = "--runtime-only" ] && RUNTIME_ONLY=1
+
+wifi_ifaces() {
+  local d
+  for d in /sys/class/net/*; do
+    [ -d "$d/wireless" ] && basename "$d"
+  done
+  return 0
+}
+
+apply_now() {
+  local i any=0 drv
+  for i in $(wifi_ifaces); do
+    any=1
+    drv="$(basename "$(readlink -f "/sys/class/net/$i/device/driver" 2>/dev/null)" 2>/dev/null || echo '?')"
+    iw dev "$i" set power_save off 2>/dev/null || true
+    echo "  $i (driver: $drv): $(iw dev "$i" get power_save 2>/dev/null || echo 'state unknown')"
+  done
+  [ "$any" -eq 1 ] || echo "  (no WiFi interfaces found — nothing to apply)"
+}
+
+if [ "$RUNTIME_ONLY" -eq 1 ]; then
+  apply_now
+  exit 0
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Run with sudo:  sudo deploy/disable-wifi-powersave.sh" >&2
+  exit 1
+fi
+
+echo "Disabling WiFi power saving (persistent):"
+
+# 1. NetworkManager global default. zz-* sorts AFTER Ubuntu's shipped
+#    default-wifi-powersave-on.conf (powersave = 3), so ours wins.
+NM_CONF=/etc/NetworkManager/conf.d/zz-wifi-powersave-off.conf
+mkdir -p /etc/NetworkManager/conf.d
+cat > "$NM_CONF" <<'EOF'
+# crypt-capture: WiFi power saving OFF (2 = disable) for a streaming node.
+# Named zz-* on purpose: NetworkManager reads conf.d alphabetically and the
+# LAST value wins — Ubuntu's default-wifi-powersave-on.conf (= 3) would
+# otherwise override this.
+[connection]
+wifi.powersave = 2
+EOF
+echo "  wrote $NM_CONF"
+
+# 2. Dispatcher hook: re-assert on EVERY interface-up (reconnects, roams),
+#    independent of what the NM config resolves to.
+DISPATCH=/etc/NetworkManager/dispatcher.d/99-wifi-powersave-off
+mkdir -p /etc/NetworkManager/dispatcher.d
+cat > "$DISPATCH" <<'EOF'
+#!/bin/sh
+# crypt-capture: force WiFi power_save off every time an interface comes up.
+[ "$2" = "up" ] || exit 0
+[ -d "/sys/class/net/$1/wireless" ] || exit 0
+exec iw dev "$1" set power_save off
+EOF
+chmod 755 "$DISPATCH"
+echo "  wrote $DISPATCH"
+
+# 3. Driver-level doze (below nl80211 — the part `iw` can't reach).
+#    Options for modules that aren't present are simply ignored, so this is
+#    safe to write on every device. Takes effect on next module load (reboot).
+MODPROBE=/etc/modprobe.d/wifi-no-powersave.conf
+cat > "$MODPROBE" <<'EOF'
+# crypt-capture: driver-level WiFi power saving OFF (applies at module load,
+# i.e. after a reboot). Unused-module options are ignored.
+# Realtek rtw88 (RTL8822CE = the Orin Nano devkit M.2 card): deep LPS and
+# PCIe ASPM doze independently of the nl80211 power_save flag.
+options rtw88_core disable_lps_deep=y
+options rtw88_pci disable_aspm=1
+# Intel iwlwifi, in case a node carries an Intel card instead:
+options iwlwifi power_save=0
+options iwlmvm power_scheme=1
+EOF
+echo "  wrote $MODPROBE  (needs one reboot to apply)"
+
+# 4. Normalise every saved WiFi profile: a profile-level powersave (0=default
+#    falls through to the global; an explicit 3 would beat it) can't linger.
+if command -v nmcli >/dev/null 2>&1; then
+  nmcli -t -f NAME,TYPE connection show 2>/dev/null | while IFS=: read -r name type; do
+    [ "$type" = "802-11-wireless" ] || continue
+    if nmcli connection modify "$name" 802-11-wireless.powersave 2 2>/dev/null; then
+      echo "  connection '$name': powersave=2"
+    fi
+  done
+  nmcli general reload 2>/dev/null || systemctl reload NetworkManager 2>/dev/null || true
+fi
+
+# 5. Apply to the running interfaces NOW (no reconnect — safe over SSH).
+echo "Runtime state:"
+apply_now
+
+cat <<'EOF'
+
+Done. Reboot once so the driver-level (modprobe) options load too:
+    sudo reboot
+Verify after:
+    iw dev wlan0 get power_save        # -> Power save: off
+EOF
