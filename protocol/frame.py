@@ -175,6 +175,17 @@ TEXTURE_MAGIC = b"CTEX"
 _TEXTURE_HEAD = struct.Struct("<4sIQBHHI")  # magic, sensor, frame_id, fmt, w, h, len
 TEXTURE_JPEG = 0
 
+# --- node status events --------------------------------------------------
+# Tiny node -> central notifications for state changes the operator must SEE
+# (the control plane is fire-and-forget, so without these the viewer can only
+# guess with optimistic timers — which lied whenever the node ran slower than
+# assumed, e.g. background-plate averaging on a WiFi-throttled capture loop).
+# Fixed-size; the relay rebroadcasts them to viewers as JSON TEXT
+# ({"type": "node_status", sensor, event}).
+STATUS_MAGIC = b"CSTA"
+_STATUS = struct.Struct("<4sIB")       # magic, sensor_id, event code
+STATUS_BG_CAPTURED = 1                 # background plate done -> subtraction live
+
 
 def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):
     d = tuple(dist) + (0.0,) * (8 - len(dist))
@@ -210,6 +221,11 @@ def encode_texture(sensor_id, frame_id, data, width, height, fmt=TEXTURE_JPEG):
                               width, height, len(data)) + data
 
 
+def encode_status(sensor_id, event):
+    """Encode a node status event (CSTA) — e.g. STATUS_BG_CAPTURED."""
+    return _STATUS.pack(STATUS_MAGIC, sensor_id, int(event) & 0xFF)
+
+
 def encode_pose(sensor_id, timestamp_ns, keypoints):
     """Encode one frame's 2D pose keypoints.
 
@@ -228,6 +244,7 @@ _FIXED_MESSAGE_SIZE = {
     IMU_MAGIC: _IMU.size,
     EXTRINSIC_MAGIC: _EXTRINSIC.size,
     COLOR_CALIB_MAGIC: _COLOR_CALIB.size,
+    STATUS_MAGIC: _STATUS.size,
 }
 
 
@@ -328,6 +345,12 @@ def read_message(sock):
             return None
         return ("texture", {"sensor_id": sid, "frame_id": fid, "format": fmt,
                             "width": w, "height": h, "data": data})
+    if magic == STATUS_MAGIC:
+        rest = _recv_exactly(sock, _STATUS.size - 4)
+        if not rest:
+            return None
+        sid, event = struct.unpack("<IB", rest)
+        return ("status", {"sensor_id": sid, "event": event})
     if magic == POSE_MAGIC:
         rest = _recv_exactly(sock, _POSE_HEAD.size - 4)
         if not rest:

@@ -69,8 +69,78 @@ def test_clear_disables():
     print("clear: OK")
 
 
+def test_plate_persistence():
+    """save()/load() round-trip: a node restart must resume subtraction from
+    the persisted plate — but only when the grid shape still matches (a
+    camera-mode change makes the saved plate wrong-shaped -> ignored)."""
+    import tempfile
+
+    path = os.path.join(tempfile.gettempdir(), "test_bg_plate_rt.npz")
+    try:
+        sub = BackgroundSubtractor(margin_mm=50)
+        sub.start_capture(1)
+        plate = np.full((6, 8), 1800, np.uint16)
+        sub.feed(plate)
+        assert sub.active
+        assert sub.save(path)
+
+        fresh = BackgroundSubtractor(margin_mm=50)
+        assert not fresh.active
+        assert fresh.load(path, expect_shape=(6, 8))
+        assert fresh.active
+        fg = fresh.foreground(np.full((6, 8), 1500, np.uint16))
+        assert fg.all()      # 300mm closer than the plate -> kept everywhere
+        fg = fresh.foreground(np.full((6, 8), 1800, np.uint16))
+        assert not fg.any()  # at plate depth -> removed everywhere
+
+        wrong = BackgroundSubtractor()
+        assert not wrong.load(path, expect_shape=(4, 4))   # shape gate
+        assert not wrong.active
+        assert not wrong.load(path + ".missing")           # absent file
+        empty = BackgroundSubtractor()
+        assert not empty.save(path + ".none")              # no plate -> no-op
+    finally:
+        for p in (path, path + ".none"):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    print("plate persistence: OK")
+
+
+def test_status_message_round_trip():
+    """The plate-done ack (CSTA): encode -> socket -> read_message, and the
+    drop-stale gate (message_buffered) must recognise the fixed-size magic so
+    a status sitting in a drained backlog isn't mistaken for a partial frame."""
+    import select
+    import socket
+
+    from protocol.frame import (encode_status, read_message, message_buffered,
+                                STATUS_BG_CAPTURED)
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    cli = socket.create_connection(srv.getsockname())
+    conn, _ = srv.accept()
+    try:
+        cli.sendall(encode_status(3, STATUS_BG_CAPTURED))
+        select.select([conn], [], [], 2.0)
+        assert message_buffered(conn)
+        kind, payload = read_message(conn)
+        assert kind == "status", kind
+        assert payload == {"sensor_id": 3, "event": STATUS_BG_CAPTURED}, payload
+    finally:
+        cli.close()
+        conn.close()
+        srv.close()
+    print("status (CSTA) round-trip: OK")
+
+
 if __name__ == "__main__":
     test_capture_and_subtract()
     test_margin_and_unknown()
     test_clear_disables()
+    test_plate_persistence()
+    test_status_message_round_trip()
     print("\nALL BACKGROUND TESTS PASSED")

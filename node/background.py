@@ -67,6 +67,38 @@ class BackgroundSubtractor:
         unknown). None if no plate yet."""
         return foreground_mask(self.plate, depth, self.margin)
 
+    # --- persistence (2026-07-10) ------------------------------------------
+    # The plate used to live only in process memory, so every node service
+    # restart (WiFi stall killing the socket -> systemd relaunch) silently
+    # dropped subtraction and the stream went back to full frames — "the
+    # background capture worked and then stopped working". The rig is static,
+    # so persist the plate to disk and reload it on start (shape-checked; a
+    # camera-mode change makes it wrong-shaped and it's discarded).
+
+    def save(self, path):
+        """Write the current plate to `path` (.npz). No-op without a plate."""
+        if self.plate is None:
+            return False
+        np.savez_compressed(path, plate=self.plate)
+        return True
+
+    def load(self, path, expect_shape=None):
+        """Adopt a previously-saved plate. Returns True on success; a missing/
+        corrupt file or a shape mismatch (camera mode changed since the save)
+        leaves the subtractor untouched."""
+        try:
+            with np.load(path) as data:
+                plate = data["plate"]
+        except Exception:
+            return False
+        if expect_shape is not None and tuple(plate.shape) != tuple(expect_shape):
+            return False
+        self.plate = plate.astype(np.float32)
+        self._sum = None
+        self._cnt = None
+        self._remaining = 0
+        return True
+
 
 def foreground_mask(plate, depth, margin):
     """Foreground mask against a *snapshotted* plate (see foreground()). Module-

@@ -37,8 +37,10 @@ Multi-sensor (later): give the master sensor --sync master and the others
 
 import argparse
 import math
+import os
 import queue
 import socket
+import tempfile
 import threading
 import time
 from concurrent.futures import ProcessPoolExecutor
@@ -51,7 +53,8 @@ from pyk4a import (
 
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
-                            encode_pose, encode_color_calib, encode_texture)
+                            encode_pose, encode_color_calib, encode_texture,
+                            encode_status, STATUS_BG_CAPTURED)
 from node import camera_modes
 
 
@@ -497,7 +500,7 @@ def run(host, port, sensor_id, frames,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
-        pose_trt=False, exposure=None, powerline=None):
+        pose_trt=False, exposure=None, powerline=None, setup_fps=2.0):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -562,6 +565,24 @@ def run(host, port, sensor_id, frames,
     # Plain dict + GIL = safe between the capture loop and the control reader.
     rng = {"denoise": 2}
     bg = BackgroundSubtractor()
+    # Plate-done ack, set where the plate completes (either capture path) and
+    # enqueued from the normal (non-saturated) path only.
+    bg_ack = {"pending": False}
+    # Plate persistence (node/background.py): the plate used to die with the
+    # process, so every systemd relaunch (WiFi stall killing the socket)
+    # silently dropped subtraction. Saved on capture, reloaded on start
+    # (shape-checked against the live grid), deleted by clear_bg.
+    bg_path = os.path.join(tempfile.gettempdir(),
+                           "kinect_bg_plate_%d.npz" % sensor_id)
+    bg_persist = {"try_load": True}
+    # Setup-rate throttle (the "never stream the environment in realtime"
+    # workflow): until subtraction is active the stream is the FULL room,
+    # which a slow link can't carry and nobody needs live — the viewer
+    # freezes one frame per camera as the static reference. So without a
+    # plate the node streams at `setup_fps` (default 2 — enough to aim
+    # cameras and feed the env freeze); with the plate active it streams
+    # every frame (the subject is tiny). 0 = unthrottled (old behaviour).
+    setup = {"t": 0.0}
     # IMU orientation streaming, toggled live from the UI ("camera orientation").
     imu = {"stream": False}
     # Textured mesh (docs/textured_mesh.md): when on, ship the full-res colour
@@ -593,6 +614,10 @@ def run(host, port, sensor_id, frames,
             print("sensor %d: capturing background (%d frames)..." % (sensor_id, n))
         elif c == "clear_bg":
             bg.clear()
+            try:                        # drop the persisted plate too — an
+                os.remove(bg_path)      # explicit Clear must not resurrect
+            except OSError:             # on the next restart
+                pass
             print("sensor %d: background subtraction cleared" % sensor_id)
         elif c == "set_bg_margin":
             bg.margin = int(cmd.get("mm", bg.margin))
@@ -709,8 +734,11 @@ def run(host, port, sensor_id, frames,
                         fps_meas = 30.0 / (now - state["win_t0"])
                         kb = (len(comp) + len(color)) / 1024.0
                         msg = ("sensor %d: %d frames | %.1f fps | %d pts | "
-                               "%.0f KB/f" % (sensor_id, state["n"], fps_meas,
-                                              pts, kb))
+                               "%.0f KB/f | bg %s" % (
+                                   sensor_id, state["n"], fps_meas, pts, kb,
+                                   "ON" if bg.active else
+                                   ("capturing" if bg.capturing
+                                    else "off (setup rate)")))
                         win = now - state["win_t0"]
                         if state["park_s"] > 0.05 and win > 0:
                             # % of the window the capture thread sat parked =
@@ -809,6 +837,7 @@ def run(host, port, sensor_id, frames,
                     _apply_color_controls(k4a, exposure, powerline, sensor_id)
                 align = cur["align"]
                 bg.clear()                          # plate is wrong-shaped now
+                bg_persist["try_load"] = True       # re-check (shape-gated)
                 ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
                 calib_sent = False
                 texture["resend_calib"] = True      # colour intrinsics changed
@@ -818,13 +847,46 @@ def run(host, port, sensor_id, frames,
             # Saturated? Park WITHOUT touching the SDK (sleep releases the GIL
             # and does zero work). The camera keeps running; its internal queue
             # discards stale frames, so the next capture after a park is fresh.
+            #
+            # EXCEPTION — background-plate averaging (2026-07-10): while
+            # bg.capturing, keep reading the CAMERA at its full rate and feed
+            # the plate, dropping the frame for sending. Parking here made the
+            # plate average at the WIRE rate (send backpressure fills outq →
+            # capture parks), so on a WiFi-choked link (~4 fps, stalls) a
+            # 60-frame plate took 15-60+ s with subtraction disabled the whole
+            # time — "Capture Background never works over WiFi". get_capture
+            # blocks until the next camera frame (no GIL spin), and the plate
+            # accumulate is a couple of vectorized adds — bounded work for the
+            # ~2 s the capture lasts.
             if outq.full():
+                if bg.capturing:
+                    cap = k4a.get_capture()
+                    depth = (cap.transformed_depth
+                             if align == "depth_to_color" else cap.depth)
+                    if depth is not None and bg.feed(depth):
+                        print("sensor %d: background captured" % sensor_id)
+                        bg.save(bg_path)
+                        bg_ack["pending"] = True
+                    continue
                 time.sleep(0.004)
                 with acc_lock:
                     state["park_s"] += 0.004
                 continue
 
+            # Setup-rate throttle: no plate and not averaging one -> the
+            # stream is the FULL room, which nobody needs in realtime (the
+            # env freeze grabs its one reference frame from this trickle) and
+            # a slow link can't carry. Sleep between setup frames WITHOUT
+            # touching the SDK (the camera's internal queue keeps discarding,
+            # so the next capture is fresh). Full-rate streaming starts the
+            # moment subtraction is active — the subject-only stream is tiny.
+            if (setup_fps > 0 and not bg.capturing and not bg.active
+                    and time.time() - setup["t"] < 1.0 / setup_fps):
+                time.sleep(0.02)
+                continue
+
             tc = time.time()
+            setup["t"] = tc
             cap = k4a.get_capture()
             # The streamed point grid is the depth image (color_to_depth) or the
             # depth warped into the color image (depth_to_color).
@@ -854,9 +916,29 @@ def run(host, port, sensor_id, frames,
                           "gravity(optical)=(%.3f, %.3f, %.3f)"
                           % (sensor_id, raw[0], raw[1], raw[2], g[0], g[1], g[2]))
                 calib_sent = True
+            # Reload a persisted plate once the live grid shape is known (a
+            # node restart used to silently drop subtraction; the rig is
+            # static, so yesterday's empty-room plate is still the room).
+            # Shape mismatch (camera mode changed since the save) = ignored.
+            if bg_persist["try_load"] and not bg.capturing and not bg.active:
+                bg_persist["try_load"] = False
+                if bg.load(bg_path, expect_shape=depth.shape):
+                    print("sensor %d: background plate reloaded (%dx%d) — "
+                          "subtraction active" % (
+                              sensor_id, depth.shape[1], depth.shape[0]))
+                    bg_ack["pending"] = True
             if bg.capturing:                        # averaging the empty scene
                 if bg.feed(depth):
                     print("sensor %d: background captured" % sensor_id)
+                    bg.save(bg_path)
+                    bg_ack["pending"] = True
+            # Plate-done ack (CSTA): queued from the normal path so a full outq
+            # can't block on it; the viewer turns it into a truthful
+            # "background set on sN" (the old optimistic timer lied whenever
+            # the plate ran slower than assumed).
+            if bg_ack["pending"]:
+                outq.put(("raw", encode_status(sensor_id, STATUS_BG_CAPTURED)))
+                bg_ack["pending"] = False
 
             # IR colour mode: the active-IR image in the SAME geometry as the
             # streamed depth grid (cap.ir IS the depth grid; depth_to_color
@@ -1073,6 +1155,14 @@ def main():
                     help="mains anti-flicker frequency for the colour camera "
                          "(Europe = 50; SDK default is 60). Sets which "
                          "exposure steps auto-exposure may pick")
+    ap.add_argument("--setup-fps", type=float, default=2.0,
+                    help="stream rate WITHOUT a background plate (the full-"
+                         "room 'setup view' — nobody needs it in realtime and "
+                         "a slow link can't carry it; the viewer freezes one "
+                         "frame as the environment reference). Full-rate "
+                         "streaming starts when background subtraction is "
+                         "active (subject-only = tiny frames). 0 = never "
+                         "throttle (old behaviour)")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,
@@ -1085,7 +1175,7 @@ def main():
         pose_min_conf=args.pose_min_conf, pose_gate=args.pose_gate,
         pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
         pose_trt=args.pose_trt, exposure=args.exposure,
-        powerline=args.powerline)
+        powerline=args.powerline, setup_fps=args.setup_fps)
 
 
 if __name__ == "__main__":

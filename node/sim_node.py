@@ -26,7 +26,8 @@ from array import array
 
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
-                            encode_pose, encode_color_calib, encode_texture)
+                            encode_pose, encode_color_calib, encode_texture,
+                            encode_status, STATUS_BG_CAPTURED)
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
@@ -314,6 +315,14 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
         elif c == "set_ir":
             ir_state["on"] = bool(cmd.get("enabled", False))
             print("sensor %d: IR colour -> %s" % (sensor_id, ir_state["on"]))
+        elif c == "capture_bg":
+            # No real scene to average, but ack like the real node does (the
+            # CSTA plate-done status) so the viewer's truthful "background set
+            # on sN" path is testable headless. Sent from the send loop via a
+            # flag (this reader thread must not write the socket).
+            state["bg_ack"] = True
+            print("sensor %d: received command %r (will ack CSTA)"
+                  % (sensor_id, cmd))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -346,6 +355,8 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 state["resend_calib"] = False
             if resend:                         # (re)announce grid + intrinsics
                 send_calib(width, height)
+            if state.pop("bg_ack", False):     # capture_bg received: CSTA ack
+                sock.sendall(encode_status(sensor_id, STATUS_BG_CAPTURED))
             if ball > 0:
                 bv = world_to_view(pose_R, pose_t, ball_world_pos(time.time()))
                 depth, color, gw, gh = synth_ball_frame(

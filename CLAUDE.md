@@ -1061,6 +1061,52 @@ Two repos:
   headless-verifiable. Unit-tested (`tests/test_ir.py`: tone map, the
   _process_frame IR branch incl. stride + mask pairing, sim grey) + E2E (relay
   + sim + WS client: rgb flips coloured → grey → coloured on toggle).
+- ✅ **Background capture at CAMERA rate + plate-done ack (2026-07-10)** — two
+  fixes for "Capture Background almost never works over WiFi". (1) The node's
+  capture loop parks when the send queue is full, so on a WiFi-choked link
+  (~4 fps with stalls) it also CAPTURED at the wire rate — `capture_bg`'s
+  60-frame average took 15–60+ s with subtraction disabled the whole time,
+  while the viewer's label optimistically claimed "done" at 2.5 s. Now while
+  `bg.capturing` the saturated branch still reads the camera and feeds the
+  plate (dropping the frame for sending — `get_capture` blocks until the next
+  camera frame, no GIL spin; a couple of vectorized adds per frame for the
+  ~2 s the capture lasts), so the plate always completes in `frames/30` s of
+  wall time. (2) New fixed-size **`CSTA` node→central status message**
+  (`protocol/frame.py` `encode_status`/`STATUS_BG_CAPTURED`; in
+  `_FIXED_MESSAGE_SIZE` so `message_buffered`/drop-stale handle it): the node
+  queues it the moment the plate finalises (from the normal path, so a full
+  outq can't block on it), the relay rebroadcasts it to viewers as
+  `{"type":"node_status", sensor, event:"bg_captured"}` (handled in
+  `_handle_node_control`, so a status in a drained backlog still applies) —
+  the crypt viewer shows truthful per-camera "Background set on N/M
+  camera(s)" instead of the blind timer (which stays as the old-node
+  fallback). `sim_node` acks capture_bg with the same CSTA so the path is
+  headless-testable. Unit (`test_background.test_status_message_round_trip`)
+  + E2E (sim → relay → WS client: capture_bg → node_status received).
+  **Node-side change — needs the push→service-restart flow to reach the
+  Jetsons.**
+- ✅ **Subject-only realtime workflow + plate persistence (2026-07-10, same
+  push)** — the user's call: *nobody needs the full environment in realtime*
+  (the viewer freezes ONE frame per camera as the static room reference), so
+  the node now streams the un-subtracted full room at **`--setup-fps`
+  (default 2)** — enough to aim cameras and feed the env freeze, and a rate
+  even WiFi carries — and switches to **full-rate streaming only once
+  background subtraction is active** (the subject-only frames are tiny, so
+  30 fps fits any link). 0 = never throttle (old behaviour). The throttle
+  sleeps WITHOUT touching the SDK (camera's internal queue keeps discarding)
+  and is bypassed while `bg.capturing` (the plate still averages at camera
+  rate). Companion fix — **the plate now PERSISTS across node restarts**
+  (`background.py save/load`, `<tmp>/kinect_bg_plate_<sensor>.npz`): it used
+  to live only in process memory, so every systemd relaunch (WiFi stall
+  killing the socket) silently dropped subtraction and the stream fell back
+  to the full room — "capture worked, then stopped working". Reloaded on
+  start (shape-checked; a camera-mode change discards it), saved on every
+  completed capture, deleted by `clear_bg`; a successful reload re-sends the
+  CSTA ack. The relay **caches the last node_status per sensor and replays
+  it to each new viewer on connect** (cleared on clear_bg) so panels show
+  the true subtraction state after a reload. The node stats line prints
+  `bg ON/capturing/off (setup rate)` for journalctl diagnosis.
+  `test_background.test_plate_persistence`; E2E re-verified.
 - ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
   --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
   `/recordings` endpoint), so a standalone headset on an https:// page (the

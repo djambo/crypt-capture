@@ -791,6 +791,9 @@ class PreviewServer:
         self._sensor_color_calib = {}       # sensor_id -> dict(fx,fy,cx,cy,dist,R,t,w,h)
         # sensor_id -> deque[(frame_id, texture)], recent-first-pruned, fid-paired
         self._pending_texture = {}
+        # sensor_id -> last node status event (CSTA, e.g. "bg_captured");
+        # replayed to each new viewer so panels show the true node state.
+        self._node_status = {}
         self._sensor_dims = {}              # sensor_id -> (w,h) full-res depth grid (CPV3)
         self.frames_relayed = 0
         # Rig extrinsics (docs/rig_calibration.md): per-sensor (R,t) applied
@@ -884,6 +887,12 @@ class PreviewServer:
             msg = self._sensor_calib_message(sid)
             if msg is not None:
                 self._send_text(conn, msg)
+        # Last known node status per sensor (e.g. bg_captured = subtraction
+        # live) so a freshly-(re)loaded viewer shows the TRUE state instead of
+        # assuming subtraction is off.
+        for sid, event in sorted(self._node_status.items()):
+            self._send_text(conn, {"type": "node_status", "sensor": sid,
+                                   "event": event})
         self._send_text(conn, self._recordings_message())
         status = self._recorder.status()
         if status is not None:
@@ -1001,6 +1010,10 @@ class PreviewServer:
                 self._start_calibration(cmd)
             return
         if name in _FORWARDED_COMMANDS:
+            if name == "clear_bg":
+                # Subtraction is being turned off — drop the cached per-sensor
+                # bg state so new viewers don't get a stale "background set".
+                self._node_status.clear()
             n = self.send_to_nodes(cmd)
             print("[preview] forwarded %s to %d node(s)" % (cmd, n))
             return
@@ -1781,6 +1794,18 @@ class PreviewServer:
                 buf = collections.deque(maxlen=TEXTURE_BUFFER)
                 self._pending_texture[payload["sensor_id"]] = buf
             buf.append((payload.get("frame_id", 0), payload))
+        elif kind == "status":
+            # Node status event (CSTA) -> viewers as JSON TEXT, so the panel
+            # can show TRUTHFUL state instead of optimistic timers. Event 1 =
+            # background plate averaged, subtraction now live on that node.
+            # Cached per sensor and replayed to each new viewer on connect.
+            sid = payload["sensor_id"]
+            event = ("bg_captured" if payload.get("event") == 1
+                     else "event_%s" % payload.get("event"))
+            self._node_status[sid] = event
+            print("[preview] sensor %d status: %s" % (sid, event))
+            self._broadcast_text({"type": "node_status", "sensor": sid,
+                                  "event": event})
 
     def _take_texture(self, sensor_id, frame_id):
         """Pick the buffered JPEG whose capture frame_id is nearest this geometry
