@@ -82,7 +82,7 @@ def test_process_frame_ir_branch():
     # point saturated all-white on hardware
     ir[3:9, 4:12] = np.arange(48, dtype=np.uint16).reshape(6, 8) * 100 + 800
 
-    comp, color, aligned, gw, gh, pts, _, _, ir_p = _process_frame(
+    comp, color, aligned, gw, gh, pts, _, _, ir_p, _ = _process_frame(
         depth, None, None, 60, 0, 1, ir_src=ir)
     assert aligned and (gw, gh) == (w, h)
     assert pts == 48 and len(color) == pts * 3
@@ -102,7 +102,7 @@ def test_process_frame_ir_branch():
         "auto-gain must keep most of the subject below saturation"
     assert int(tri[:, 0].max()) == 255, "the hottest points still reach white"
     # an explicit EMA scale wins over the frame's own percentile
-    _, color_s, _, _, _, _, _, _, _ = _process_frame(
+    _, color_s, _, _, _, _, _, _, _, _ = _process_frame(
         depth, None, None, 60, 0, 1, ir_src=ir, ir_scale=20000.0)
     tri_s = np.frombuffer(color_s, np.uint8).reshape(-1, 3)
     assert np.array_equal(tri_s[:, 0],
@@ -116,14 +116,14 @@ def test_process_frame_ir_branch():
     csrc = np.zeros((h, w, 4), np.uint8)
     csrc[..., 0] = 10                              # B
     csrc[..., 2] = 30                              # R
-    _, color2, aligned2, _, _, _, _, _, ir_p2 = _process_frame(
+    _, color2, aligned2, _, _, _, _, _, ir_p2, _ = _process_frame(
         depth, csrc, None, 60, 0, 1)
     tri2 = np.frombuffer(color2, np.uint8).reshape(-1, 3)
     assert aligned2 and np.all(tri2[0] == (30, 0, 10)), "colour path unchanged"
     assert ir_p2 == 0.0, "no IR -> no percentile (EMA untouched)"
 
     # stride applies to the IR image exactly like depth/colour
-    comp3, color3, _, gw3, gh3, pts3, _, _, ir_p3 = _process_frame(
+    comp3, color3, _, gw3, gh3, pts3, _, _, ir_p3, _ = _process_frame(
         depth, None, None, 60, 0, 2, ir_src=ir)
     assert (gw3, gh3) == (w // 2, h // 2) and len(color3) == pts3 * 3
     expect3 = _ir_to_gray(ir[::2, ::2][depth[::2, ::2] != 0], ir_p3)

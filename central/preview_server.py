@@ -285,6 +285,65 @@ def aligned_color_grid(color_bytes, depth_u16, w, h):
     return grid
 
 
+# JPEG decoder for FLAG_COLOR_JPEG (import-guarded: cv2 -> Pillow -> a loud
+# one-time instruction). The node ships the colour as a bbox-cropped JPEG
+# (~5-8x smaller than raw triples — see protocol/frame.py); we decode it back
+# onto the full grid so everything downstream is unchanged.
+_JPEG_DEC = {"fn": None, "tried": False, "warned": False}
+
+
+def _decode_jpeg_rgb(data):
+    """JPEG bytes -> (h,w,3) uint8 RGB array, or None (no codec/corrupt)."""
+    if not _JPEG_DEC["tried"]:
+        _JPEG_DEC["tried"] = True
+        try:
+            import cv2
+            _JPEG_DEC["fn"] = ("cv2", cv2)
+        except ImportError:
+            try:
+                from PIL import Image
+                _JPEG_DEC["fn"] = ("pil", Image)
+            except ImportError:
+                _JPEG_DEC["fn"] = None
+    fn = _JPEG_DEC["fn"]
+    if fn is None:
+        if not _JPEG_DEC["warned"]:
+            _JPEG_DEC["warned"] = True
+            print("[preview] node sends JPEG colour but neither cv2 nor "
+                  "Pillow is installed on the relay — points will render "
+                  "WHITE. Fix: pip install opencv-python  (or Pillow), or "
+                  "run nodes with --color-jpeg-quality 0")
+        return None
+    kind, mod = fn
+    try:
+        if kind == "cv2":
+            img = mod.imdecode(np.frombuffer(data, np.uint8),
+                               mod.IMREAD_COLOR)
+            return None if img is None else img[..., ::-1]   # BGR -> RGB
+        import io
+        return np.asarray(mod.open(io.BytesIO(data)).convert("RGB"))
+    except Exception:
+        return None
+
+
+def jpeg_color_grid(payload, w, h):
+    """FLAG_COLOR_JPEG payload (u16 x0,y0,bw,bh + JPEG of the bbox crop of the
+    aligned colour image) -> a full (h,w,3) RGB grid, or None. Downstream
+    samples it through the depth valid mask exactly like aligned_color_grid's
+    output, so the JPEG wire is invisible past this point."""
+    if len(payload) <= 8:
+        return None
+    x0, y0, bw, bh = struct.unpack_from("<HHHH", payload)
+    if bw == 0 or bh == 0 or x0 + bw > w or y0 + bh > h:
+        return None
+    img = _decode_jpeg_rgb(payload[8:])
+    if img is None or img.shape[0] != bh or img.shape[1] != bw:
+        return None
+    grid = np.zeros((h, w, 3), dtype=np.uint8)
+    grid[y0:y0 + bh, x0:x0 + bw] = img
+    return grid
+
+
 def _uv_block(uv):
     """Serialise the texture-UV block: count×2 uint16, normalised [0,1]×65535."""
     q = np.clip(np.asarray(uv, dtype=np.float32), 0.0, 1.0) * 65535.0
@@ -1901,8 +1960,15 @@ class PreviewServer:
                                                frame.width * ns, frame.height * ns)
                 cgrid = None
                 if frame.color_aligned and frame.color:
-                    cgrid = aligned_color_grid(frame.color, depth,
-                                               frame.width, frame.height)
+                    if frame.color_jpeg:
+                        # FLAG_COLOR_JPEG: bbox-cropped JPEG of the aligned
+                        # colour image (~5-8x smaller wire) — decode back onto
+                        # the full grid; downstream is unchanged.
+                        cgrid = jpeg_color_grid(frame.color,
+                                                frame.width, frame.height)
+                    else:
+                        cgrid = aligned_color_grid(frame.color, depth,
+                                                   frame.width, frame.height)
                 win["dec"] += t1 - t0
                 win["den"] += t2 - t1
                 win["col"] += time.perf_counter() - t2

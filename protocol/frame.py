@@ -9,7 +9,8 @@ sync), which is how the recorder groups the N sensors back together.
 Header (little-endian, 36 bytes):
     magic        4s   b"CVF1"
     sensor_id    B    0..N-1
-    flags        B    bit0 = depth is RVL-compressed; bit1 = color is aligned RGB
+    flags        B    bit0 = depth is RVL-compressed; bit1 = color is aligned RGB;
+                      bit2 = color payload is bbox(u16 x0,y0,bw,bh) + JPEG
     stride       H    preview downsample factor applied on the node (1 = full res);
                       depth/color are width*height at this stride, and pixel (u,v)
                       maps to original (u*stride, v*stride) for unprojection
@@ -32,6 +33,17 @@ HEADER_SIZE = _HEADER.size
 FLAG_DEPTH_RVL = 0x01
 FLAG_COLOR_ALIGNED = 0x02   # color payload = raw uint8 RGB of valid pixels,
                             # row-major, one triple per non-zero depth pixel
+FLAG_COLOR_JPEG = 0x04      # color payload = u16 x0,y0,bw,bh (bbox of the
+                            # valid pixels on the strided grid) + a JPEG of
+                            # the aligned colour image cropped to that bbox.
+                            # ~5-8x smaller than the raw triples — the raw
+                            # foreground RGB was ~75% of a subject frame's
+                            # bytes, the difference between a WiFi link
+                            # carrying 3 cameras at 30 fps or at 8. The relay
+                            # decodes + scatters via the same valid mask
+                            # (jpeg_color_grid), so everything downstream is
+                            # unchanged. Requires cv2 or Pillow on BOTH ends;
+                            # either side missing it falls back loudly.
 
 
 class Frame(object):
@@ -39,10 +51,12 @@ class Frame(object):
     imports on the Nano's Python 3.6."""
 
     __slots__ = ("sensor_id", "frame_id", "timestamp_ns", "width", "height",
-                 "depth", "color", "depth_rvl", "color_aligned", "stride")
+                 "depth", "color", "depth_rvl", "color_aligned", "stride",
+                 "color_jpeg")
 
     def __init__(self, sensor_id, frame_id, timestamp_ns, width, height,
-                 depth, color, depth_rvl=True, color_aligned=False, stride=1):
+                 depth, color, depth_rvl=True, color_aligned=False, stride=1,
+                 color_jpeg=False):
         self.sensor_id = sensor_id        # 0..N-1
         self.frame_id = frame_id          # hardware-synced frame index
         self.timestamp_ns = timestamp_ns  # node capture timestamp (ns)
@@ -53,11 +67,14 @@ class Frame(object):
         self.depth_rvl = depth_rvl
         self.color_aligned = color_aligned  # color is depth-aligned RGB (see flag)
         self.stride = stride              # node-side preview downsample (1 = full)
+        self.color_jpeg = color_jpeg      # color payload = bbox header + JPEG
 
     def encode(self):
         flags = FLAG_DEPTH_RVL if self.depth_rvl else 0
         if self.color_aligned:
             flags |= FLAG_COLOR_ALIGNED
+        if self.color_jpeg:
+            flags |= FLAG_COLOR_JPEG
         header = _HEADER.pack(
             MAGIC, self.sensor_id, flags, self.stride,
             self.frame_id, self.timestamp_ns,
@@ -96,6 +113,7 @@ def read_frame(sock: socket.socket):
         width=w, height=h, depth=depth, color=color,
         depth_rvl=bool(flags & FLAG_DEPTH_RVL),
         color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
+        color_jpeg=bool(flags & FLAG_COLOR_JPEG),
         stride=stride or 1,          # 0 (old/unset) means full resolution
     )
 
@@ -378,5 +396,6 @@ def read_message(sock):
         width=w, height=h, depth=depth, color=color,
         depth_rvl=bool(flags & FLAG_DEPTH_RVL),
         color_aligned=bool(flags & FLAG_COLOR_ALIGNED),
+        color_jpeg=bool(flags & FLAG_COLOR_JPEG),
         stride=stride or 1,
     ))

@@ -40,6 +40,7 @@ import math
 import os
 import queue
 import socket
+import struct
 import tempfile
 import threading
 import time
@@ -393,8 +394,27 @@ def _read_intrinsics(k4a, align):
     return fx, fy, cx, cy, dist
 
 
+def _encode_color_bbox_jpeg(csrc, keep, quality):
+    """Encode the ALIGNED colour image, cropped to the valid-pixel bounding
+    box, as `u16 x0,y0,bw,bh + JPEG` (FLAG_COLOR_JPEG payload). `csrc` = the
+    (strided) BGRA colour grid, `keep` = the (strided) valid mask. Returns
+    None when there's nothing to encode or no codec — caller falls back to
+    the raw-triples path. Runs in the worker processes, so the ~2-5 ms encode
+    parallelises across cores instead of taxing the capture thread."""
+    rows = np.flatnonzero(keep.any(axis=1))
+    if rows.size == 0:
+        return None
+    cols = np.flatnonzero(keep.any(axis=0))
+    y0, y1 = int(rows[0]), int(rows[-1]) + 1
+    x0, x1 = int(cols[0]), int(cols[-1]) + 1
+    jpeg = _encode_jpeg(csrc[y0:y1, x0:x1], quality)
+    if jpeg is None:
+        return None
+    return struct.pack("<HHHH", x0, y0, x1 - x0, y1 - y0) + jpeg
+
+
 def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
-                   ir_scale=None):
+                   ir_scale=None, color_jpeg_quality=0):
     """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
     stage, run on a worker thread so consecutive frames overlap across cores.
     Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
@@ -423,6 +443,7 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
 
     color = b""
     color_aligned = False
+    color_jpeg = False
     ir_p = 0.0
     if ir_src is not None:
         if stride > 1:
@@ -437,12 +458,26 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
     elif csrc is not None:
         if stride > 1:
             csrc = csrc[::stride, ::stride]
-        rgb = csrc[..., 2::-1]                      # BGRA -> RGB
-        color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
-        color_aligned = True
+        # JPEG colour (FLAG_COLOR_JPEG): the raw foreground triples are ~75%
+        # of a subject frame's bytes — the wire cost that starves a WiFi link.
+        # Encode the bbox of the valid pixels instead (~5-8x smaller); any
+        # failure (no codec, empty frame) falls back to the raw path so the
+        # stream never depends on the codec being present.
+        if color_jpeg_quality > 0:
+            payload = _encode_color_bbox_jpeg(
+                csrc, masked != 0, color_jpeg_quality)
+            if payload is not None:
+                color = payload
+                color_aligned = True
+                color_jpeg = True
+        if not color_jpeg:
+            rgb = csrc[..., 2::-1]                  # BGRA -> RGB
+            color = np.ascontiguousarray(rgb[masked != 0]).tobytes()
+            color_aligned = True
     t2 = time.time()
     pts = int((masked != 0).sum())
-    return comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1, ir_p
+    return (comp, color, color_aligned, w, h, pts, t1 - t0, t2 - t1, ir_p,
+            color_jpeg)
 
 
 def _apply_color_controls(k4a, exposure, powerline, sensor_id):
@@ -500,7 +535,8 @@ def run(host, port, sensor_id, frames,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
-        pose_trt=False, exposure=None, powerline=None, setup_fps=0.0):
+        pose_trt=False, exposure=None, powerline=None, setup_fps=0.0,
+        color_jpeg_quality=80):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -705,7 +741,7 @@ def run(host, port, sensor_id, frames,
                     continue
                 _, fut, fid, fstride, t_cap, tc = item
                 (comp, color, color_aligned, w, h, pts, ms_d, ms_c,
-                 ir_p) = fut.result()
+                 ir_p, color_jpeg) = fut.result()
                 # IR auto-gain: EMA the frame's measured white point (plain
                 # dict + GIL = safe; the capture thread reads it on submit).
                 if ir_p > 0:
@@ -723,6 +759,7 @@ def run(host, port, sensor_id, frames,
                     timestamp_ns=int(tc * 1e9), width=w, height=h,
                     depth=comp, color=color, depth_rvl=True,
                     color_aligned=color_aligned, stride=fstride,
+                    color_jpeg=color_jpeg,
                 )
                 sock.sendall(frame.encode())
                 now = time.time()
@@ -1010,7 +1047,7 @@ def run(host, port, sensor_id, frames,
             # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s, irsrc,
-                              ir_mode["scale"])
+                              ir_mode["scale"], color_jpeg_quality)
             outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 
@@ -1155,6 +1192,14 @@ def main():
                     help="mains anti-flicker frequency for the colour camera "
                          "(Europe = 50; SDK default is 60). Sets which "
                          "exposure steps auto-exposure may pick")
+    ap.add_argument("--color-jpeg-quality", type=int, default=80,
+                    help="JPEG-compress the per-frame foreground colour on "
+                         "the node->relay wire (bbox crop of the aligned "
+                         "colour image; ~5-8x smaller than the raw RGB "
+                         "triples, which are ~75%% of a subject frame). "
+                         "Falls back to raw automatically without cv2/Pillow. "
+                         "0 = raw triples (old wire). Relay needs cv2 or "
+                         "Pillow to decode")
     ap.add_argument("--setup-fps", type=float, default=0.0,
                     help="OPT-IN throttle for the stream WITHOUT a background "
                          "plate (the full-room 'setup view'): e.g. 2 streams "
@@ -1176,7 +1221,8 @@ def main():
         pose_min_conf=args.pose_min_conf, pose_gate=args.pose_gate,
         pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
         pose_trt=args.pose_trt, exposure=args.exposure,
-        powerline=args.powerline, setup_fps=args.setup_fps)
+        powerline=args.powerline, setup_fps=args.setup_fps,
+        color_jpeg_quality=args.color_jpeg_quality)
 
 
 if __name__ == "__main__":

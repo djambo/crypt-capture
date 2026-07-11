@@ -1109,6 +1109,28 @@ Two repos:
   the true subtraction state after a reload. The node stats line prints
   `bg ON/capturing/off (setup rate)` for journalctl diagnosis.
   `test_background.test_plate_persistence`; E2E re-verified.
+- ✅ **JPEG foreground colour on the node→relay wire (2026-07-10,
+  `FLAG_COLOR_JPEG`)** — the WiFi throughput lever. The raw foreground RGB
+  triples were **~75 % of a background-subtracted subject frame's bytes**
+  (~75 KB of a ~100 KB frame at 25 k pts); the node now encodes the **bbox
+  crop of the aligned colour image as JPEG** (`--color-jpeg-quality`, default
+  80; payload = `u16 x0,y0,bw,bh` + JPEG, frame flag bit2) — measured 3.6×
+  smaller on a tiny synthetic blob, ~5-8× on realistic frames → a subject
+  frame drops to ~30-45 KB, i.e. 3 cameras × 30 fps ≈ 25-35 Mbps, inside a
+  WiFi link's real budget. Encode runs in the WORKER PROCESSES
+  (`_process_frame` → `_encode_color_bbox_jpeg`, reuses the CTEX `_encode_jpeg`
+  cv2→Pillow fallback; no codec / empty frame → automatic raw fallback, flag
+  off). The relay decodes back onto the full grid (`jpeg_color_grid` +
+  import-guarded `_decode_jpeg_rgb`, cv2→Pillow→loud one-time "pip install
+  opencv-python" fallback with white points) and samples through the depth
+  valid mask — everything downstream (unproject/rgb pairing/pose/recording)
+  unchanged. IR mode keeps raw (grey is per-point, not a grid image). Old
+  relay + new node degrades to white points (count mismatch → cgrid None),
+  never a crash. Lossy but far below rendering-visible (mean err ~0.75/255 at
+  q90 on the round-trip test). `tests/test_color_jpeg.py` (round-trip vs raw,
+  size, fallbacks, decoder robustness, wire flag); `test_ir` updated for the
+  widened `_process_frame` tuple. **Node-side — push→service-restart to
+  deploy.**
 - ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
   --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
   `/recordings` endpoint), so a standalone headset on an https:// page (the
