@@ -203,6 +203,8 @@ TEXTURE_JPEG = 0
 STATUS_MAGIC = b"CSTA"
 _STATUS = struct.Struct("<4sIB")       # magic, sensor_id, event code
 STATUS_BG_CAPTURED = 1                 # background plate done -> subtraction live
+STATUS_ADMIN_RESTARTING = 2            # node_admin ack: service restart imminent
+STATUS_ADMIN_REBOOTING = 3             # node_admin ack: device reboot imminent
 
 
 def encode_calib(sensor_id, width, height, fx, fy, cx, cy, dist=(0,) * 8):

@@ -57,6 +57,21 @@ fi
 # applied to the running interfaces immediately; no-op on Ethernet-only nodes.
 "$SCRIPT_DIR/disable-wifi-powersave.sh" || echo "  (wifi powersave setup failed — non-fatal)"
 
+# Passwordless reboot for the service user: the viewer's per-camera node-admin
+# button sends {"cmd":"node_admin","action":"reboot"} and the node (running
+# unprivileged) executes `sudo -n reboot` — without this rule that's refused.
+# Scoped to the reboot binaries only. visudo -c validates before it can lock
+# anyone out.
+SUDOERS=/etc/sudoers.d/kinect-node-reboot
+printf '%s ALL=(root) NOPASSWD: /sbin/reboot, /usr/sbin/reboot\n' "$RUN_USER" > "$SUDOERS"
+chmod 440 "$SUDOERS"
+if visudo -c -f "$SUDOERS" >/dev/null 2>&1; then
+  echo "  wrote $SUDOERS (remote reboot via node_admin)"
+else
+  rm -f "$SUDOERS"
+  echo "  (sudoers rule failed validation — removed; remote reboot disabled)"
+fi
+
 systemctl daemon-reload
 systemctl enable "$UNIT"
 

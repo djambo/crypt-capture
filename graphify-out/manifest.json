@@ -15,8 +15,8 @@
     "semantic_hash": ""
   },
   "central/preview_server.py": {
-    "mtime": 1783789405.8952415,
-    "ast_hash": "a13e6f997868d51573621ab51a615646",
+    "mtime": 1783793127.9102654,
+    "ast_hash": "f07e86af06dfd2f4f33ab83d5eeef90e",
     "semantic_hash": ""
   },
   "central/recorder.py": {
@@ -40,8 +40,8 @@
     "semantic_hash": ""
   },
   "deploy/install-node-service.sh": {
-    "mtime": 1783780430.9335158,
-    "ast_hash": "c86413e9e6ab6c910faf9d360d12353c",
+    "mtime": 1783793290.216413,
+    "ast_hash": "89da80f4c3d992b6946ad4960c89ae08",
     "semantic_hash": ""
   },
   "deploy/run-node.sh": {
@@ -75,8 +75,8 @@
     "semantic_hash": "26640c11c71ae3d2419f03bb4fcda26c"
   },
   "node/kinect_node.py": {
-    "mtime": 1783789388.3815837,
-    "ast_hash": "624e28fb100176c1f091ec129f533472",
+    "mtime": 1783793188.8709824,
+    "ast_hash": "8f3d12cd989af908657090755ca85b17",
     "semantic_hash": ""
   },
   "node/pose.py": {
@@ -85,8 +85,8 @@
     "semantic_hash": "a05e59b1a464238738b5e31690ae864a"
   },
   "node/sim_node.py": {
-    "mtime": 1783714584.7707944,
-    "ast_hash": "4d0a0a900a1201759d386dfcbe657724",
+    "mtime": 1783793531.7463212,
+    "ast_hash": "b5ddaf84c182c3efbdfafdf57fb0cd23",
     "semantic_hash": ""
   },
   "processing/mesh_take.py": {
@@ -110,8 +110,8 @@
     "semantic_hash": "2cb022329fd36a94d340eaf3eae35ba1"
   },
   "protocol/frame.py": {
-    "mtime": 1783777210.7139163,
-    "ast_hash": "d0d69d4b5a51ea0ad497785349fb6bf8",
+    "mtime": 1783793111.099853,
+    "ast_hash": "ed4bbf8dd1413a76fdfdba7235f4c639",
     "semantic_hash": ""
   },
   "protocol/rvl.py": {
@@ -140,8 +140,8 @@
     "semantic_hash": "f64863bdff5d53ec25da77ed1d44289f"
   },
   "scripts/send_command.py": {
-    "mtime": 1783789429.0892127,
-    "ast_hash": "b6e1f54abdbbc701c39faf7d1a23edef",
+    "mtime": 1783794007.2203634,
+    "ast_hash": "a1e487505f082809c42dd20d81f42dc2",
     "semantic_hash": ""
   },
   "tests/__init__.py": {
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783789799.077366,
-    "ast_hash": "59370bd69128f8f7c582997fc74e0906",
+    "mtime": 1783794160.4553845,
+    "ast_hash": "448d99696a312d546a7043a22bc15b64",
     "semantic_hash": ""
   },
   "README.md": {
@@ -295,8 +295,8 @@
     "semantic_hash": "b69297f317bec44e46c8995130de27d6"
   },
   "docs/preview_protocol.md": {
-    "mtime": 1783789462.45647,
-    "ast_hash": "b4f5df9851c6136dcf67515480996359",
+    "mtime": 1783793325.796061,
+    "ast_hash": "08c527b2ffc5d50a601959d13af0497c",
     "semantic_hash": ""
   },
   "docs/protocol.md": {

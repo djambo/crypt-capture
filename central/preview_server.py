@@ -45,9 +45,11 @@ from protocol import control, discovery, rvl, websocket
 from protocol.frame import message_buffered, read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
+# node_admin is broadcast like the rest — it carries a `sensor` field and every
+# non-matching node ignores it (the relay doesn't map connections to sensors).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
                        "set_denoise", "set_erode", "set_camera", "set_imu",
-                       "set_texture", "set_ir")
+                       "set_texture", "set_ir", "node_admin")
 # Browser→RELAY commands, handled here (rig calibration + scene recording;
 # nothing goes to nodes).
 _RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "calibrate_floor",
@@ -1856,12 +1858,19 @@ class PreviewServer:
         elif kind == "status":
             # Node status event (CSTA) -> viewers as JSON TEXT, so the panel
             # can show TRUTHFUL state instead of optimistic timers. Event 1 =
-            # background plate averaged, subtraction now live on that node.
-            # Cached per sensor and replayed to each new viewer on connect.
+            # background plate averaged, subtraction now live on that node;
+            # 2/3 = node_admin acks (service restart / device reboot imminent).
+            # Only the DURABLE plate state is cached and replayed to new
+            # viewers on connect — the transient admin acks are broadcast-only
+            # (caching one would both stomp the replayed bg state and tell a
+            # late-joining viewer the node is "restarting" long after it's
+            # back).
             sid = payload["sensor_id"]
-            event = ("bg_captured" if payload.get("event") == 1
-                     else "event_%s" % payload.get("event"))
-            self._node_status[sid] = event
+            names = {1: "bg_captured", 2: "restarting", 3: "rebooting"}
+            event = names.get(payload.get("event"),
+                              "event_%s" % payload.get("event"))
+            if event == "bg_captured":
+                self._node_status[sid] = event
             print("[preview] sensor %d status: %s" % (sid, event))
             self._broadcast_text({"type": "node_status", "sensor": sid,
                                   "event": event})

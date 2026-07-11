@@ -41,6 +41,7 @@ import os
 import queue
 import socket
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -55,7 +56,8 @@ from pyk4a import (
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
                             encode_pose, encode_color_calib, encode_texture,
-                            encode_status, STATUS_BG_CAPTURED)
+                            encode_status, STATUS_BG_CAPTURED,
+                            STATUS_ADMIN_RESTARTING, STATUS_ADMIN_REBOOTING)
 from node import camera_modes
 
 
@@ -657,9 +659,53 @@ def run(host, port, sensor_id, frames,
     cfg_lock = threading.Lock()
     pending = {"reconfig": False, "restart": False}
 
+    # Remote node admin (node_admin, the viewer's per-camera ⚙ button):
+    # queue a best-effort CSTA ack, give the sender a moment to flush it,
+    # then act. "restart" just exits the process — systemd (Restart=always)
+    # relaunches it and its ExecStartPre auto-update (deploy/update-node.sh)
+    # pulls the latest code first, so restart == update+restart; systemd's
+    # cgroup kill also reaps the worker processes os._exit leaves behind.
+    # "reboot" needs the passwordless-sudo rule install-node-service.sh drops
+    # in /etc/sudoers.d/ (the service runs unprivileged).
+    def admin_ack_then(event, act):
+        try:                               # outq may not exist yet (a command
+            outq.put_nowait(("raw", encode_status(sensor_id, event)))
+        except Exception:                  # in the first ms) or be full — the
+            pass                           # ack is best-effort, the act isn't
+        threading.Timer(1.5, act).start()
+
+    def admin_reboot():
+        try:
+            rc = subprocess.call(["sudo", "-n", "reboot"])
+        except OSError as exc:
+            print("sensor %d: reboot spawn failed: %s" % (sensor_id, exc))
+            return
+        if rc != 0:
+            print("sensor %d: reboot refused (rc=%d) — passwordless sudo "
+                  "for reboot missing? re-run sudo "
+                  "deploy/install-node-service.sh" % (sensor_id, rc))
+
     def on_command(cmd):
         c = cmd.get("cmd")
-        if c == "set_denoise":
+        if c == "node_admin":
+            # Targeted per node: the relay broadcasts to every node, each
+            # non-matching sensor ignores it (no `sensor` field = all nodes).
+            target = cmd.get("sensor")
+            if target is not None and int(target) != sensor_id:
+                return
+            action = cmd.get("action")
+            if action == "restart":
+                print("sensor %d: node_admin restart — exiting; systemd "
+                      "relaunches (auto-update pulls latest code)" % sensor_id)
+                admin_ack_then(STATUS_ADMIN_RESTARTING, lambda: os._exit(0))
+            elif action == "reboot":
+                print("sensor %d: node_admin reboot — sudo -n reboot"
+                      % sensor_id)
+                admin_ack_then(STATUS_ADMIN_REBOOTING, admin_reboot)
+            else:
+                print("sensor %d: node_admin unknown action %r"
+                      % (sensor_id, action))
+        elif c == "set_denoise":
             rng["denoise"] = int(cmd.get("min_neighbors", 0))
             print("sensor %d: speckle filter -> min_neighbors=%d"
                   % (sensor_id, rng["denoise"]))

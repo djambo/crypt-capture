@@ -27,7 +27,8 @@ from array import array
 from protocol import control, discovery, rvl
 from protocol.frame import (Frame, encode_calib, encode_imu, encode_extrinsic,
                             encode_pose, encode_color_calib, encode_texture,
-                            encode_status, STATUS_BG_CAPTURED)
+                            encode_status, STATUS_BG_CAPTURED,
+                            STATUS_ADMIN_RESTARTING, STATUS_ADMIN_REBOOTING)
 from node import camera_modes
 
 DEFAULT_W, DEFAULT_H = 640, 576   # Azure Kinect NFOV unbinned depth resolution
@@ -323,6 +324,25 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             state["bg_ack"] = True
             print("sensor %d: received command %r (will ack CSTA)"
                   % (sensor_id, cmd))
+        elif c == "node_admin":
+            # Per-node admin (restart/reboot). Targeted: a non-matching
+            # `sensor` is another node's command. The sim has no systemd or
+            # sudo — both actions ack CSTA like the real node, then exit
+            # (restart's exit IS the real node's behaviour; reboot's is
+            # illustrative), proving the targeted path headless.
+            if cmd.get("sensor") is not None and \
+                    int(cmd["sensor"]) != sensor_id:
+                return
+            action = cmd.get("action")
+            if action in ("restart", "reboot"):
+                state["admin_ack"] = (STATUS_ADMIN_RESTARTING
+                                      if action == "restart"
+                                      else STATUS_ADMIN_REBOOTING)
+                print("sensor %d: node_admin %s — acking CSTA then exiting"
+                      % (sensor_id, action))
+            else:
+                print("sensor %d: node_admin unknown action %r"
+                      % (sensor_id, action))
         else:
             # background commands etc. — sim has no real scene to subtract, so it
             # just acknowledges (the real node acts on them). Proves the
@@ -357,6 +377,11 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
                 send_calib(width, height)
             if state.pop("bg_ack", False):     # capture_bg received: CSTA ack
                 sock.sendall(encode_status(sensor_id, STATUS_BG_CAPTURED))
+            ack = state.pop("admin_ack", None)  # node_admin: ack, then exit
+            if ack is not None:
+                sock.sendall(encode_status(sensor_id, ack))
+                print("sensor %d: exiting on node_admin" % sensor_id)
+                return sent
             if ball > 0:
                 bv = world_to_view(pose_R, pose_t, ball_world_pos(time.time()))
                 depth, color, gw, gh = synth_ball_frame(

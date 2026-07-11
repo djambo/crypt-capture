@@ -1,7 +1,7 @@
 # Graph Report - crypt-capture  (2026-07-11)
 
 ## Corpus Check
-- 74 files · ~110,286 words
+- 74 files · ~111,390 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -10,7 +10,7 @@
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `974871c8`
+- Built from commit: `5f316116`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -259,7 +259,7 @@ Nodes (18): EXPERIMENTAL — edge-preserving spatial (within-frame) depth smooth
 
 ### Community 13 - "Simulated Node"
 Cohesion: 0.13
-Nodes (23): ball_world_pos(), main(), parse_pose(), project_keypoints(), Simulated capture node.  Stands in for a real Jetson/x86 node so the whole spi, view = R^T · (p - t) for a view->world pose (R rows, t)., The shared ball trajectory (world frame, metres): a slow Lissajous wave     thr, World-frame joints -> CPOS keypoints for a sensor at `pose` (view->world     R (+15 more)
+Nodes (23): ball_world_pos(), main(), parse_pose(), project_keypoints(), Simulated capture node.  Stands in for a real Jetson/x86 node so the whole spi, yaw_deg,x,y,z[,pitch_deg]' -> (R (3x3 rows), t) — this sensor's     view->world, view = R^T · (p - t) for a view->world pose (R rows, t)., The shared ball trajectory (world frame, metres): a slow Lissajous wave     thr (+15 more)
 
 ### Community 14 - "Per-Viewer Sender"
 Cohesion: 0.14

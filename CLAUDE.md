@@ -1147,6 +1147,31 @@ Two repos:
   (mixed pixels there as well). Unit-tested
   (`test_background.test_erode_mask`). **Node-side — push→service-restart to
   deploy.**
+- ✅ **Per-node remote admin (2026-07-11, `node_admin`)** — the viewer's
+  per-camera **⚙** button (and `send_command node-admin --sensor N --action
+  restart|reboot`): restart one node's kinect service or reboot its Jetson
+  from the browser, no SSH. New forwarded command `{"cmd":"node_admin",
+  "sensor":<id>,"action":"restart"|"reboot"}` — broadcast like the others,
+  each node ignores a non-matching `sensor` (omit = all). **restart**: the
+  node queues a CSTA ack then `os._exit(0)` after ~1.5 s (best-effort flush)
+  — systemd (`Restart=always`) relaunches it, its ExecStartPre auto-update
+  (`deploy/update-node.sh`) **pulls the latest code first** (so restart ==
+  update+restart — THE deploy button for node-side changes), systemd's
+  cgroup kill reaps the leftover worker processes, and the persisted bg
+  plate reloads (+ re-acks). **reboot**: ack then `sudo -n reboot` — the
+  service user is unprivileged, so `install-node-service.sh` now writes a
+  visudo-validated `/etc/sudoers.d/kinect-node-reboot` (reboot binaries
+  only; refused + journal-logged without it — re-run the installer once per
+  device to enable). Acks: new CSTA events (`STATUS_ADMIN_RESTARTING`=2 /
+  `STATUS_ADMIN_REBOOTING`=3) → relay `node_status`
+  `restarting`/`rebooting`, **broadcast-only** (only the durable
+  `bg_captured` is cached/replayed to new viewers — a cached transient would
+  stomp the bg state and lie to late joiners). `sim_node` acks + exits on it
+  (targeted path E2E-verified: 2 sims + relay + `send_command node-admin` →
+  target acked `restarting` and exited, the other kept streaming).
+  Companion fix: `send_command`'s reply wait now has a wall-clock deadline
+  (per-recv `settimeout` never fired on a busy relay — binary frames keep
+  every recv fed).
 - ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
   --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
   `/recordings` endpoint), so a standalone headset on an https:// page (the

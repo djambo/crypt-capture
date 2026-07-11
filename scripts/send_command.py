@@ -14,19 +14,23 @@ import json
 import os
 import socket
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from protocol import websocket
 
 
-def send(host, port, command, wait_type=None, wait_state=None, timeout=5.0):
+def send(host, port, command, wait_type=None, wait_state=None,
+         wait_event=None, timeout=5.0):
     """Send one command; optionally wait for (and print) the first TEXT reply
     of a given "type" (e.g. list-recordings wants the recordings index back
     on the same socket) — and, when `wait_state` is given, of a matching
     "state" (record-stop wants the final "saved" status, not a stale in-
-    flight "recording" tick). Binary cloud frames arriving meanwhile are
-    skipped."""
+    flight "recording" tick); `wait_event` filters node_status the same way
+    (the relay replays the cached bg state to every fresh connection, which
+    would otherwise satisfy the wait). Binary cloud frames arriving meanwhile
+    are skipped."""
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     if not websocket.client_handshake(sock, host, port):
@@ -36,9 +40,13 @@ def send(host, port, command, wait_type=None, wait_state=None, timeout=5.0):
     sock.sendall(websocket.encode_frame(payload, opcode=websocket.OP_TEXT, mask=True))
     reply = None
     if wait_type:
+        # settimeout alone is per-recv: on a busy relay the binary cloud
+        # frames keep every recv fed, so it would never fire — enforce a
+        # wall-clock deadline too.
+        deadline = time.time() + timeout
         sock.settimeout(timeout)
         try:
-            while True:
+            while time.time() < deadline:
                 msg = websocket.read_frame(sock)
                 if msg is None or msg[0] == websocket.OP_CLOSE:
                     break
@@ -50,7 +58,8 @@ def send(host, port, command, wait_type=None, wait_state=None, timeout=5.0):
                 except ValueError:
                     continue
                 if obj.get("type") == wait_type and (
-                        not wait_state or obj.get("state") in wait_state):
+                        not wait_state or obj.get("state") in wait_state) and (
+                        not wait_event or obj.get("event") in wait_event):
                     reply = obj
                     break
                 if obj.get("type") == "cmd_error" and \
@@ -111,6 +120,13 @@ def main():
                         "tone-mapped active-IR grey as the point colours "
                         "instead of the camera colour (same wire format)")
     si.add_argument("--enabled", choices=["on", "off"], required=True)
+
+    na = sub.add_parser("node-admin", help="restart one node's kinect service "
+                        "(systemd relaunch — the auto-update pulls latest "
+                        "code first) or reboot its Jetson; the node acks with "
+                        "a node_status restarting/rebooting message")
+    na.add_argument("--sensor", type=int, required=True)
+    na.add_argument("--action", choices=["restart", "reboot"], required=True)
 
     cf = sub.add_parser("calibrate-fine", help="run the marker-ball wand pass "
                         "AT THE RELAY (same flow as the viewer's Fine Align "
@@ -181,6 +197,12 @@ def main():
     elif args.cmd == "set-ir":
         send(args.host, args.port,
              {"cmd": "set_ir", "enabled": args.enabled == "on"})
+    elif args.cmd == "node-admin":
+        send(args.host, args.port,
+             {"cmd": "node_admin", "sensor": args.sensor,
+              "action": args.action},
+             wait_type="node_status",
+             wait_event=("restarting", "rebooting"))
     elif args.cmd == "calibrate-fine":
         command = {"cmd": "calibrate_fine", "seconds": args.seconds,
                    "ball_radius": args.ball_radius}

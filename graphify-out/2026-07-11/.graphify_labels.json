@@ -159,5 +159,12 @@
   "157": "object",
   "158": "test_relay_workers.py",
   "159": "test_pose_worker_gate_hysteresis",
-  "161": "sample_depth"
+  "160": "test_recording.py",
+  "161": "sample_depth",
+  "162": "test_xr_pose.py",
+  "163": "_run_ring_pass",
+  "164": "mesh_take.py",
+  "165": "preview_client.py",
+  "166": "send_command.py",
+  "167": "disable-wifi-powersave.sh"
 }
