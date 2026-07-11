@@ -500,7 +500,7 @@ def run(host, port, sensor_id, frames,
         discovery_port=discovery.DISCOVERY_PORT, workers=2,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
-        pose_trt=False, exposure=None, powerline=None, setup_fps=2.0):
+        pose_trt=False, exposure=None, powerline=None, setup_fps=0.0):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -1155,14 +1155,15 @@ def main():
                     help="mains anti-flicker frequency for the colour camera "
                          "(Europe = 50; SDK default is 60). Sets which "
                          "exposure steps auto-exposure may pick")
-    ap.add_argument("--setup-fps", type=float, default=2.0,
-                    help="stream rate WITHOUT a background plate (the full-"
-                         "room 'setup view' — nobody needs it in realtime and "
-                         "a slow link can't carry it; the viewer freezes one "
-                         "frame as the environment reference). Full-rate "
-                         "streaming starts when background subtraction is "
-                         "active (subject-only = tiny frames). 0 = never "
-                         "throttle (old behaviour)")
+    ap.add_argument("--setup-fps", type=float, default=0.0,
+                    help="OPT-IN throttle for the stream WITHOUT a background "
+                         "plate (the full-room 'setup view'): e.g. 2 streams "
+                         "the room at 2 fps until subtraction is active, then "
+                         "full rate (subject-only = tiny frames) — saves a "
+                         "slow link from carrying the full room it can't. "
+                         "Default 0 = never throttle. NB first deployment "
+                         "shipped default 2 and the pre-capture view read as "
+                         "'the Kinects broke' — hence opt-in")
     args = ap.parse_args()
     run(args.host, args.port, args.sensor, args.frames,
         args.sync, args.sub_delay_us,

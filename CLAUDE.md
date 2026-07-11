@@ -1088,11 +1088,13 @@ Two repos:
 - ✅ **Subject-only realtime workflow + plate persistence (2026-07-10, same
   push)** — the user's call: *nobody needs the full environment in realtime*
   (the viewer freezes ONE frame per camera as the static room reference), so
-  the node now streams the un-subtracted full room at **`--setup-fps`
-  (default 2)** — enough to aim cameras and feed the env freeze, and a rate
-  even WiFi carries — and switches to **full-rate streaming only once
+  the node can throttle the un-subtracted full room to **`--setup-fps`**
+  and switch to **full-rate streaming only once
   background subtraction is active** (the subject-only frames are tiny, so
-  30 fps fits any link). 0 = never throttle (old behaviour). The throttle
+  30 fps fits any link). **Default 0 = never throttle — OPT-IN** (first
+  deployment shipped default 2 and the pre-capture 2 fps view read as "the
+  Kinects broke"/unusable on the rig, 2026-07-10 evening; enable per-device
+  via EXTRA_ARGS when a link truly can't carry the setup view). The throttle
   sleeps WITHOUT touching the SDK (camera's internal queue keeps discarding)
   and is bypassed while `bg.capturing` (the plate still averages at camera
   rate). Companion fix — **the plate now PERSISTS across node restarts**
