@@ -92,6 +92,11 @@ def main():
                         "8-neighbours to keep a point; 0 = off)")
     dn.add_argument("--min-neighbors", type=int, required=True)
 
+    er = sub.add_parser("set-erode", help="silhouette-rim trim while background "
+                        "subtraction is active (px; kills the wall-coloured "
+                        "mixed-pixel contour on the subject; 0 = off)")
+    er.add_argument("--px", type=int, required=True)
+
     sc = sub.add_parser("set-camera", help="change depth FOV mode / color "
                         "resolution / fps / alignment live (streaming adapts)")
     sc.add_argument("--depth-mode",
@@ -160,6 +165,8 @@ def main():
     elif args.cmd == "set-denoise":
         send(args.host, args.port,
              {"cmd": "set_denoise", "min_neighbors": args.min_neighbors})
+    elif args.cmd == "set-erode":
+        send(args.host, args.port, {"cmd": "set_erode", "px": args.px})
     elif args.cmd == "set-camera":
         command = {"cmd": "set_camera"}
         if args.depth_mode is not None:

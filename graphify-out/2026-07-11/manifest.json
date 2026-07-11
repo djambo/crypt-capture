@@ -10,13 +10,13 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "central/calibration.py": {
-    "mtime": 1783689619.1416907,
-    "ast_hash": "7a660c812bf49c79f2d64be1e607bd0c",
+    "mtime": 1783602691.5000904,
+    "ast_hash": "bdf15a5fa53158702247994f6cd19cbe",
     "semantic_hash": ""
   },
   "central/preview_server.py": {
-    "mtime": 1783789405.8952415,
-    "ast_hash": "a13e6f997868d51573621ab51a615646",
+    "mtime": 1783639230.1672528,
+    "ast_hash": "99d7817d62c09cca9ac63617e2f1c913",
     "semantic_hash": ""
   },
   "central/recorder.py": {
@@ -40,9 +40,9 @@
     "semantic_hash": ""
   },
   "deploy/install-node-service.sh": {
-    "mtime": 1783780430.9335158,
-    "ast_hash": "c86413e9e6ab6c910faf9d360d12353c",
-    "semantic_hash": ""
+    "mtime": 1783163447.0938487,
+    "ast_hash": "6db9b1fd987cb42492c6238212f408b5",
+    "semantic_hash": "6db9b1fd987cb42492c6238212f408b5"
   },
   "deploy/run-node.sh": {
     "mtime": 1783163447.0981524,
@@ -60,9 +60,9 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "node/background.py": {
-    "mtime": 1783789365.228506,
-    "ast_hash": "adc816bbdabca935f47ad0245d76b2f2",
-    "semantic_hash": ""
+    "mtime": 1783163447.1076148,
+    "ast_hash": "ab137bf90d61b7586ed609b0b5bfe18d",
+    "semantic_hash": "ab137bf90d61b7586ed609b0b5bfe18d"
   },
   "node/camera_modes.py": {
     "mtime": 1783163447.1076148,
@@ -75,8 +75,8 @@
     "semantic_hash": "26640c11c71ae3d2419f03bb4fcda26c"
   },
   "node/kinect_node.py": {
-    "mtime": 1783789388.3815837,
-    "ast_hash": "624e28fb100176c1f091ec129f533472",
+    "mtime": 1783641437.9183767,
+    "ast_hash": "ae46dc3cc235ce64e459b8e201476791",
     "semantic_hash": ""
   },
   "node/pose.py": {
@@ -85,8 +85,8 @@
     "semantic_hash": "a05e59b1a464238738b5e31690ae864a"
   },
   "node/sim_node.py": {
-    "mtime": 1783714584.7707944,
-    "ast_hash": "4d0a0a900a1201759d386dfcbe657724",
+    "mtime": 1783639199.2116828,
+    "ast_hash": "319724e74b2d343ab6ac7eb1019ccf23",
     "semantic_hash": ""
   },
   "processing/mesh_take.py": {
@@ -110,8 +110,8 @@
     "semantic_hash": "2cb022329fd36a94d340eaf3eae35ba1"
   },
   "protocol/frame.py": {
-    "mtime": 1783777210.7139163,
-    "ast_hash": "d0d69d4b5a51ea0ad497785349fb6bf8",
+    "mtime": 1783616184.3905993,
+    "ast_hash": "4fbba9a35a322b69dcd1984e157f9f29",
     "semantic_hash": ""
   },
   "protocol/rvl.py": {
@@ -140,8 +140,8 @@
     "semantic_hash": "f64863bdff5d53ec25da77ed1d44289f"
   },
   "scripts/send_command.py": {
-    "mtime": 1783789429.0892127,
-    "ast_hash": "b6e1f54abdbbc701c39faf7d1a23edef",
+    "mtime": 1783639220.3468547,
+    "ast_hash": "5b37578098631059258089a2b3ca0f98",
     "semantic_hash": ""
   },
   "tests/__init__.py": {
@@ -150,14 +150,14 @@
     "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
   },
   "tests/test_background.py": {
-    "mtime": 1783789489.0842922,
-    "ast_hash": "26fecbb938452140af861df6fe46d6c6",
-    "semantic_hash": ""
+    "mtime": 1783163447.1184285,
+    "ast_hash": "a19ddd6484c642e91444b07dc8cc5de2",
+    "semantic_hash": "a19ddd6484c642e91444b07dc8cc5de2"
   },
   "tests/test_calibration.py": {
-    "mtime": 1783689705.0923052,
-    "ast_hash": "38f335d631f3057ff008d1e25ee56ed2",
-    "semantic_hash": ""
+    "mtime": 1783163447.1184285,
+    "ast_hash": "535c69af1d04e7fb901684797c5ce6a1",
+    "semantic_hash": "535c69af1d04e7fb901684797c5ce6a1"
   },
   "tests/test_camera.py": {
     "mtime": 1783470035.6436973,
@@ -250,8 +250,8 @@
     "semantic_hash": "f4d178319792e4f267d365d88d87d6f0"
   },
   "CLAUDE.md": {
-    "mtime": 1783789799.077366,
-    "ast_hash": "59370bd69128f8f7c582997fc74e0906",
+    "mtime": 1783641533.862144,
+    "ast_hash": "a06572e03ec4bf97e209b6ccf7289300",
     "semantic_hash": ""
   },
   "README.md": {
@@ -280,8 +280,8 @@
     "semantic_hash": "6f66adfd1d7d156cb95d20d19ea7be55"
   },
   "docs/jetson_orin_node_setup.md": {
-    "mtime": 1783780430.934516,
-    "ast_hash": "c325a844b8f8518314bc02136a15a786",
+    "mtime": 1783531235.0805483,
+    "ast_hash": "57600276bdb8817ac39d70957815fe70",
     "semantic_hash": ""
   },
   "docs/jetson_setup.md": {
@@ -295,14 +295,14 @@
     "semantic_hash": "b69297f317bec44e46c8995130de27d6"
   },
   "docs/preview_protocol.md": {
-    "mtime": 1783789462.45647,
-    "ast_hash": "b4f5df9851c6136dcf67515480996359",
+    "mtime": 1783641519.2244935,
+    "ast_hash": "3f71aefb0f57ecd6b0c4a77737fa4f03",
     "semantic_hash": ""
   },
   "docs/protocol.md": {
-    "mtime": 1783779086.2226715,
-    "ast_hash": "0e49291429d969340a6715d8a1268576",
-    "semantic_hash": ""
+    "mtime": 1783163447.1031473,
+    "ast_hash": "84f3faeb3b8f7a3ce8fc8ade9ffbcfbf",
+    "semantic_hash": "84f3faeb3b8f7a3ce8fc8ade9ffbcfbf"
   },
   "docs/realtime_architecture.md": {
     "mtime": 1783163447.1041462,
@@ -310,9 +310,9 @@
     "semantic_hash": "06eb93bd975ef07cc952f14245c74162"
   },
   "docs/rig_calibration.md": {
-    "mtime": 1783689957.8539617,
-    "ast_hash": "cd5e0aefe5a62267c6e3720152d64db7",
-    "semantic_hash": ""
+    "mtime": 1783163447.1041462,
+    "ast_hash": "342b8c2b9552938b4b21725242697b41",
+    "semantic_hash": "342b8c2b9552938b4b21725242697b41"
   },
   "docs/skeleton_pose.md": {
     "mtime": 1783163447.105623,
@@ -350,28 +350,13 @@
     "semantic_hash": ""
   },
   "tests/test_ir.py": {
-    "mtime": 1783778823.079742,
-    "ast_hash": "6bafa3ae74da7ce39f4d5130bb291aba",
+    "mtime": 1783641484.8121972,
+    "ast_hash": "1059542e238a8b244bf91aa35369bd62",
     "semantic_hash": ""
   },
   "tests/test_scene_sync.py": {
     "mtime": 1783622384.3010957,
     "ast_hash": "8530661fc45e57dd24ace76f9e10d249",
-    "semantic_hash": ""
-  },
-  "deploy/disable-wifi-powersave.sh": {
-    "mtime": 1783780430.932518,
-    "ast_hash": "971a6d3913fc55774331645f23114f9d",
-    "semantic_hash": ""
-  },
-  "scripts/diagnose_stalls.py": {
-    "mtime": 1783785394.1532116,
-    "ast_hash": "708ddaa9f1c31466e6bd96febb1d0a68",
-    "semantic_hash": ""
-  },
-  "tests/test_color_jpeg.py": {
-    "mtime": 1783784183.3646765,
-    "ast_hash": "cecf7e4b50779757fc05028a266e30a6",
     "semantic_hash": ""
   }
 }

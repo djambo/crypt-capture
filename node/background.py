@@ -109,6 +109,29 @@ def foreground_mask(plate, depth, margin):
     return (plate == 0) | (depth.astype(np.float32) < plate - margin)
 
 
+def erode_mask(mask, px=1):
+    """Erode a boolean foreground mask by `px` pixels: a kept pixel survives
+    only if all 8 neighbours are also kept (image-border pixels never survive).
+
+    This cuts the subject's silhouette RIM — at every depth edge the ToF sensor
+    returns 1-2 px of MIXED pixels whose depth lands between the subject and
+    the wall behind (so they pass plate subtraction) and whose colour comes
+    from the wall (the depth↔colour warp samples the background at occlusion
+    boundaries) — the "white wall fringe" outlining the subject. Runs only
+    while subtraction is active (see _process_frame); cost is a handful of
+    boolean AND views per iteration, cheaper than denoise_mask, and it SHRINKS
+    the point count/wire. `px <= 0` is a no-op."""
+    for _ in range(int(px)):
+        m = mask
+        out = np.zeros(m.shape, np.bool_)
+        out[1:-1, 1:-1] = (
+            m[1:-1, 1:-1]
+            & m[:-2, 1:-1] & m[2:, 1:-1] & m[1:-1, :-2] & m[1:-1, 2:]
+            & m[:-2, :-2] & m[:-2, 2:] & m[2:, :-2] & m[2:, 2:])
+        mask = out
+    return mask
+
+
 def denoise_mask(mask, min_neighbors=2):
     """Remove isolated speckles from a boolean foreground mask: drop any kept
     pixel with fewer than `min_neighbors` kept 8-neighbours. The subject is a

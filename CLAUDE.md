@@ -1131,6 +1131,22 @@ Two repos:
   size, fallbacks, decoder robustness, wire flag); `test_ir` updated for the
   widened `_process_frame` tuple. **Node-side — push→service-restart to
   deploy.**
+- ✅ **Silhouette-rim erosion — the "white wall fringe" fix (2026-07-11,
+  `set_erode`)** — with subtraction on, an aligned rig showed each subject
+  outlined in wall-coloured (white) points: at every depth edge the ToF
+  returns 1–2 px of MIXED pixels whose depth lands between subject and wall
+  (so they pass the plate test) and whose colour is sampled from the wall
+  behind (mixed pixel + depth↔colour warp at occlusion boundaries). Fix at the
+  source: `background.erode_mask` (8-neighbour boolean erosion, cheaper than
+  `denoise_mask`, shrinks the wire) runs in `_process_frame` AFTER
+  fg+denoise, **only while a plate is active** (the full-room setup view keeps
+  its edges) — node default **1 px** even with no viewer command. Live-tunable
+  via the new forwarded `{"cmd":"set_erode","px":N}` (0 = off; >2 starts
+  eating fingers), the viewer's **edge trim** slider (background section,
+  0–4), or `send_command set-erode --px N`. Interior-hole rims erode too
+  (mixed pixels there as well). Unit-tested
+  (`test_background.test_erode_mask`). **Node-side — push→service-restart to
+  deploy.**
 - ✅ **Relay TLS / wss:// (2026-07-07)**: `preview_server --tls-cert <pem>
   --tls-key <pem>` serves the browser port over **wss://** (+ https:// for the
   `/recordings` endpoint), so a standalone headset on an https:// page (the

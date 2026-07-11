@@ -15,7 +15,7 @@ except ImportError:
     print("background tests: skipped (no numpy)")
     sys.exit(0)
 
-from node.background import BackgroundSubtractor
+from node.background import BackgroundSubtractor, erode_mask
 
 
 def test_capture_and_subtract():
@@ -108,6 +108,44 @@ def test_plate_persistence():
     print("plate persistence: OK")
 
 
+def test_erode_mask():
+    """Silhouette-rim erosion: exactly the 1-px boundary band of a solid blob
+    is removed per iteration (the mixed-pixel contour that carries the wall's
+    colour); interior stays; px=0 is a no-op; thin structures vanish."""
+    m = np.zeros((10, 10), bool)
+    m[2:8, 2:8] = True                      # solid 6x6 blob
+
+    e1 = erode_mask(m, 1)
+    expect = np.zeros((10, 10), bool)
+    expect[3:7, 3:7] = True                 # one ring gone
+    assert np.array_equal(e1, expect), "1px erosion must strip one ring"
+
+    e2 = erode_mask(m, 2)
+    expect2 = np.zeros((10, 10), bool)
+    expect2[4:6, 4:6] = True
+    assert np.array_equal(e2, expect2), "2px erosion must strip two rings"
+
+    assert erode_mask(m, 0) is m, "px=0 must be a no-op"
+
+    # A hole inside the blob erodes outward too (its rim is mixed pixels).
+    holed = m.copy()
+    holed[5, 5] = False
+    eh = erode_mask(holed, 1)
+    assert not eh[4:7, 4:7].any(), "hole rim must erode"
+    assert eh[3, 3], "far interior survives"
+
+    # A 1-px-thin line disappears (nothing has 8 kept neighbours).
+    line = np.zeros((6, 6), bool)
+    line[3, 1:5] = True
+    assert not erode_mask(line, 1).any()
+
+    # Blob touching the image border: border pixels never survive.
+    edge = np.ones((4, 4), bool)
+    ee = erode_mask(edge, 1)
+    assert ee[1:3, 1:3].all() and not ee[0].any() and not ee[:, 0].any()
+    print("erode_mask: OK")
+
+
 def test_status_message_round_trip():
     """The plate-done ack (CSTA): encode -> socket -> read_message, and the
     drop-stale gate (message_buffered) must recognise the fixed-size magic so
@@ -142,5 +180,6 @@ if __name__ == "__main__":
     test_margin_and_unknown()
     test_clear_disables()
     test_plate_persistence()
+    test_erode_mask()
     test_status_message_round_trip()
     print("\nALL BACKGROUND TESTS PASSED")

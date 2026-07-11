@@ -124,7 +124,8 @@ def _ir_to_gray(vals, scale):
     s = max(float(scale), IR_SCALE_FLOOR)
     return (np.sqrt(np.minimum(vals.astype(np.float32) / s, 1.0))
             * 255.0).astype(np.uint8)
-from node.background import BackgroundSubtractor, denoise_mask, foreground_mask
+from node.background import (BackgroundSubtractor, denoise_mask, erode_mask,
+                             foreground_mask)
 
 # Map the string mode names (node/camera_modes.py) onto the pyk4a enums.
 _DEPTH_ENUM = {
@@ -423,7 +424,7 @@ def _encode_color_bbox_jpeg(csrc, keep, quality):
 
 
 def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
-                   ir_scale=None, color_jpeg_quality=0):
+                   ir_scale=None, color_jpeg_quality=0, erode=0):
     """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
     stage, run on a worker thread so consecutive frames overlap across cores.
     Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
@@ -443,6 +444,10 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
     if fg is not None:
         keep &= fg
     keep = denoise_mask(keep, denoise)              # drop isolated ToF specks
+    if fg is not None and erode > 0:
+        # Subject mode only: cut the mixed-pixel silhouette rim (wall-coloured
+        # edge points). The full-room setup view keeps its edges untouched.
+        keep = erode_mask(keep, erode)
     masked = np.where(keep, depth, 0).astype(np.uint16)
     if stride > 1:
         masked = masked[::stride, ::stride]
@@ -611,7 +616,9 @@ def run(host, port, sensor_id, frames,
     # We stream the full depth range — culling is background subtraction + the
     # speckle filter, not a near/far clip (the depth-mask UI/command was removed).
     # Plain dict + GIL = safe between the capture loop and the control reader.
-    rng = {"denoise": 2}
+    # erode: px of silhouette-rim trim while subtraction is active (set_erode) —
+    # kills the wall-coloured mixed-pixel contour on the subject. Default 1.
+    rng = {"denoise": 2, "erode": 1}
     bg = BackgroundSubtractor()
     # Plate-done ack, set where the plate completes (either capture path) and
     # enqueued from the normal (non-saturated) path only.
@@ -670,6 +677,9 @@ def run(host, port, sensor_id, frames,
         elif c == "set_bg_margin":
             bg.margin = int(cmd.get("mm", bg.margin))
             print("sensor %d: bg margin -> %d mm" % (sensor_id, bg.margin))
+        elif c == "set_erode":
+            rng["erode"] = max(0, int(cmd.get("px", 0)))
+            print("sensor %d: edge erode -> %d px" % (sensor_id, rng["erode"]))
         elif c == "set_imu":
             imu["stream"] = bool(cmd.get("enabled", False))
             print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
@@ -1059,7 +1069,8 @@ def run(host, port, sensor_id, frames,
             # block for long.
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s, irsrc,
-                              ir_mode["scale"], color_jpeg_quality)
+                              ir_mode["scale"], color_jpeg_quality,
+                              rng["erode"])
             outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 

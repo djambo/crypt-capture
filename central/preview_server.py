@@ -46,8 +46,8 @@ from protocol.frame import message_buffered, read_message
 
 # Browser→node commands the relay will forward (everything else is ignored).
 _FORWARDED_COMMANDS = ("capture_bg", "clear_bg", "set_bg_margin",
-                       "set_denoise", "set_camera", "set_imu", "set_texture",
-                       "set_ir")
+                       "set_denoise", "set_erode", "set_camera", "set_imu",
+                       "set_texture", "set_ir")
 # Browser→RELAY commands, handled here (rig calibration + scene recording;
 # nothing goes to nodes).
 _RELAY_COMMANDS = ("calibrate_fine", "calibrate_rough", "calibrate_floor",
