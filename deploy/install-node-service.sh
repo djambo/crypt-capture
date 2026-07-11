@@ -51,6 +51,12 @@ if [ -f /etc/udev/rules.d/99-azure-kinect-usb.rules ]; then
   echo "  removed obsolete 99-azure-kinect-usb.rules"
 fi
 
+# WiFi power saving off — a streaming node has nothing to power-save for and
+# WiFi powersave causes RTT spikes/stalls on the live stream. Persistent
+# (NetworkManager drop-in + dispatcher hook + driver modprobe options) and
+# applied to the running interfaces immediately; no-op on Ethernet-only nodes.
+"$SCRIPT_DIR/disable-wifi-powersave.sh" || echo "  (wifi powersave setup failed — non-fatal)"
+
 systemctl daemon-reload
 systemctl enable "$UNIT"
 

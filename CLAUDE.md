@@ -1430,6 +1430,23 @@ python3 -m processing.mesh_take --take takes/real1 --calib takes/real1/calib.jso
 - **Jetson USB**: `sudo sh -c 'echo 256 > /sys/module/usbcore/parameters/usbfs_memory_mb'`
   to stop `libusb errno=12` transfer errors; each Kinect needs its own 5V supply.
   (The `deploy/` systemd unit applies this automatically as a root `ExecStartPre`.)
+- **WiFi power saving (2026-07-11)**: OFF on every node —
+  `deploy/disable-wifi-powersave.sh` (run by `install-node-service.sh`; the
+  unit also re-asserts `--runtime-only` at each start). Editing
+  `NetworkManager.conf` + restarting NM does NOT work: Ubuntu ships
+  `/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (powersave=3),
+  read AFTER the main file — later wins, so the edit is silently overridden;
+  and the Orin devkit's Realtek RTL8822CE (rtw88) dozes on its own below
+  nl80211 (deep LPS + PCIe ASPM). The script layers a `zz-*` NM drop-in
+  (sorts last → wins), per-connection `powersave 2`, a dispatcher hook
+  (`iw set power_save off` on every interface-up) and rtw88/iwlwifi modprobe
+  options (need ONE reboot; generated only from parameters the loaded modules
+  actually expose — an unknown option would make the module fail to load and
+  kill WiFi outright). Existing nodes: pull +
+  `sudo deploy/disable-wifi-powersave.sh` + reboot; verify
+  `deploy/disable-wifi-powersave.sh --runtime-only` → "Power save: off"
+  (the interface is often NOT wlan0 — predictable naming gives e.g.
+  wlP1p1s0, hence `iw dev wlan0 …` → "No such device (-19)").
 - **Run on boot / headless**: `deploy/install-node-service.sh` installs the node
   as a systemd service (`Restart=always`, USB-buffer fix, per-device config in
   `/etc/default/kinect-node`) so it auto-starts and relaunches on failure — the

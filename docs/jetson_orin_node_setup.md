@@ -76,6 +76,24 @@ sudo nvpmodel -m 0
 sudo jetson_clocks
 ```
 
+**WiFi power saving** must be OFF on a node that streams over WiFi (the radio
+dozes between beacons → RTT spikes and multi-hundred-ms stalls). The service
+installer (§9) handles it via `deploy/disable-wifi-powersave.sh`; on an
+already-provisioned node run it once directly, then reboot once so the
+driver-level modprobe options load:
+```bash
+sudo deploy/disable-wifi-powersave.sh && sudo reboot
+# verify after (prints each WiFi interface's state — the name is often NOT
+# wlan0; predictable naming gives e.g. wlP1p1s0, `iw dev` lists it):
+deploy/disable-wifi-powersave.sh --runtime-only   # -> "Power save: off"
+```
+Do NOT just edit `NetworkManager.conf` — Ubuntu ships
+`/etc/NetworkManager/conf.d/default-wifi-powersave-on.conf` (powersave = 3),
+which is read after the main file and silently wins; and the Realtek rtw88
+driver (the devkit's RTL8822CE) dozes on its own below NetworkManager anyway.
+The script covers all the layers (NM `zz-*` drop-in, per-connection profiles,
+a dispatcher hook on every interface-up, rtw88/iwlwifi modprobe options).
+
 ## 5. Azure Kinect SDK (the verified all-local-`.deb` route)
 `libsoundio1` (a k4a dependency) was **removed from Ubuntu 22.04** — apt/`universe`
 can't find it, so pull it from the 20.04 archive. Then the k4a debs. Install all
@@ -251,6 +269,9 @@ Floor**. Clouds registered, floors flush on the grid — the rig is at parity.
 - [ ] `CAPTURE OK` smoke test (§7)
 - [ ] pyk4a (§8)
 - [ ] Service + `/etc/default/kinect-node` with a **unique `SENSOR_ID`** (§9)
+- [ ] WiFi powersave OFF (§4 — the installer runs the script; verify with
+      `deploy/disable-wifi-powersave.sh --runtime-only` → off, reboot once
+      for the driver options)
 - [ ] Skeleton pose: `onnxruntime-gpu "numpy<2"` + MoveNet Thunder (§10)
 - [ ] Confirm streaming + skeleton in the viewer (§12)
 
