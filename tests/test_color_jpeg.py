@@ -95,6 +95,44 @@ def test_round_trip_matches_raw():
           % (len(raw[1]), len(jpg[1]), err.mean()))
 
 
+def test_blackout_and_smaller_of_two():
+    """The bbox crop blacks out non-subject pixels (a busy room inside an
+    inflated bbox must not cost JPEG bytes) and raw wins on sparse frames."""
+    if _encode_jpeg(np.zeros((4, 4, 4), np.uint8)) is None:
+        print("blackout: skipped (no cv2/Pillow)")
+        return
+    h, w = 96, 128
+    rng = np.random.RandomState(0)
+    noisy = rng.randint(0, 255, (h, w, 4), np.uint8)   # busy "room" image
+
+    # Dense blob: blacked-out surroundings must beat encoding the noise.
+    depth = np.zeros((h, w), np.uint16)
+    depth[8:88, 8:120] = 1500          # bbox ~ whole view
+    depth[20:76, 20:108] = 0           # ...but mostly INVALID inside it
+    depth[40:56, 40:56] = 1500         # small real subject in the middle
+    out = _process_frame(depth, noisy, None, 50, 0, 1,
+                         color_jpeg_quality=80)
+    keep = depth != 0
+    full_jpeg = _encode_jpeg(noisy, 80)  # what no-blackout would cost
+    assert out[9] is True
+    assert len(out[1]) < len(full_jpeg) * 0.7, \
+        "blackout saved nothing (%d vs %d)" % (len(out[1]), len(full_jpeg))
+    grid = jpeg_color_grid(out[1], w, h)
+    assert grid is not None and grid[keep].size == int(keep.sum()) * 3
+
+    # Sparse frame: a few scattered points -> raw triples must win.
+    depth2 = np.zeros((h, w), np.uint16)
+    ys = rng.randint(0, h, 40)
+    xs = rng.randint(0, w, 40)
+    depth2[ys, xs] = 1500
+    out2 = _process_frame(depth2, noisy, None, 50, 0, 1,
+                          color_jpeg_quality=80)
+    assert out2[9] is False, "sparse frame should fall back to raw triples"
+    assert len(out2[1]) == out2[5] * 3
+    print("blackout + smaller-of-two: OK (%d < %d, sparse=raw)"
+          % (len(out[1]), len(full_jpeg)))
+
+
 def test_fallbacks():
     depth, csrc = _scene()
     # quality 0 = raw path, flag off.
@@ -146,6 +184,7 @@ def test_flag_survives_the_wire():
 
 if __name__ == "__main__":
     test_round_trip_matches_raw()
+    test_blackout_and_smaller_of_two()
     test_fallbacks()
     test_decoder_robustness()
     test_flag_survives_the_wire()

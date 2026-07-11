@@ -407,7 +407,16 @@ def _encode_color_bbox_jpeg(csrc, keep, quality):
     cols = np.flatnonzero(keep.any(axis=0))
     y0, y1 = int(rows[0]), int(rows[-1]) + 1
     x0, x1 = int(cols[0]), int(cols[-1]) + 1
-    jpeg = _encode_jpeg(csrc[y0:y1, x0:x1], quality)
+    # Black out the non-subject pixels inside the crop: a few scattered
+    # leftover points can stretch the bbox across the whole view, and the
+    # room's image detail inside it would be JPEG-encoded for nothing
+    # (measured ~45 KB/frame on a ~700-pt frame). Black compresses to almost
+    # nothing — and the relay only samples valid positions anyway, so the
+    # blacked pixels are never seen. Also stops leaking room imagery for
+    # points that were subtracted away.
+    crop = np.array(csrc[y0:y1, x0:x1], copy=True)
+    crop[~keep[y0:y1, x0:x1]] = 0
+    jpeg = _encode_jpeg(crop, quality)
     if jpeg is None:
         return None
     return struct.pack("<HHHH", x0, y0, x1 - x0, y1 - y0) + jpeg
@@ -462,11 +471,14 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
         # of a subject frame's bytes — the wire cost that starves a WiFi link.
         # Encode the bbox of the valid pixels instead (~5-8x smaller); any
         # failure (no codec, empty frame) falls back to the raw path so the
-        # stream never depends on the codec being present.
+        # stream never depends on the codec being present. Whichever encoding
+        # is SMALLER wins per frame — for a sparse frame (a handful of
+        # leftover points) the raw triples beat even a blacked-out JPEG.
         if color_jpeg_quality > 0:
             payload = _encode_color_bbox_jpeg(
                 csrc, masked != 0, color_jpeg_quality)
-            if payload is not None:
+            if payload is not None and \
+                    len(payload) < int((masked != 0).sum()) * 3:
                 color = payload
                 color_aligned = True
                 color_jpeg = True
