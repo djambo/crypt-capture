@@ -1,7 +1,7 @@
 # Graph Report - crypt-capture  (2026-07-13)
 
 ## Corpus Check
-- 74 files · ~112,817 words
+- 74 files · ~112,183 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -362,7 +362,7 @@ Nodes (12): Accuracy: sphere (depth) vs ChArUco (color) vs IR — the honest mat
 
 ### Community 39 - "Texture UV Tests"
 Cohesion: 0.18
-Nodes (14): denoise_mask(), Remove isolated speckles from a boolean foreground mask: drop any kept     pixe, _encode_color_bbox_jpeg(), _ir_to_gray(), _process_frame(), Masked IR values (uint16 1-D) -> uint8 grey: levels stretch     (black..white -, Encode the ALIGNED colour image, cropped to the valid-pixel bounding     box, a, Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy (+6 more)
+Nodes (14): denoise_mask(), Remove isolated speckles from a boolean foreground mask: drop any kept     pixe, _encode_color_bbox_jpeg(), _ir_to_gray(), _process_frame(), Masked IR values (uint16 1-D) -> uint8 grey, sqrt tone map with `scale`     as, Encode the ALIGNED colour image, cropped to the valid-pixel bounding     box, a, Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy (+6 more)
 
 ### Community 40 - "Floor Sampler"
 Cohesion: 0.29

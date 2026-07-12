@@ -113,10 +113,39 @@ def test_wire_uv_texture_blocks():
         assert np.allclose(back, uv, atol=1.0 / 65535 + 1e-6), (fmt, back, uv)
 
 
+def test_take_texture_staleness_window():
+    # When the node STOPS sending CTEX (set_texture off, IR colour mode) the
+    # last buffered JPEG must not be re-paired with live geometry forever —
+    # that froze an RGB photo over IR-grey / moving frames. Pairing is bounded
+    # to TEXTURE_BUFFER frames of fid skew; past it the frame goes textureless.
+    import collections
+    import types
+
+    srv = types.SimpleNamespace(_pending_texture={})
+    take = lambda sid, fid: ps.PreviewServer._take_texture(srv, sid, fid)
+
+    assert take(0, 100) is None                       # nothing buffered
+    buf = collections.deque(maxlen=ps.TEXTURE_BUFFER)
+    srv._pending_texture[0] = buf
+    buf.append((100, "tex100"))
+    assert take(0, 100) == "tex100"                   # exact pair
+    assert take(0, 100 + ps.TEXTURE_BUFFER) == "tex100"  # inside the window
+    assert take(0, 101 + ps.TEXTURE_BUFFER) is None   # stream stopped -> drop
+    assert not buf, "long-stale textures must be cleared"
+    # A far-FUTURE texture (fid skew in the other direction, e.g. buffered
+    # pre-restart textures vs a node whose counter reset) is KEPT — geometry
+    # fids may catch up to it; only the stale-past case clears the buffer.
+    buf.append((900, "texFuture"))
+    assert take(0, 5) is None
+    assert buf, "future-fid textures survive until geometry fids catch up"
+    assert take(0, 890) == "texFuture"
+
+
 def run():
     test_frame_messages_roundtrip()
     test_unproject_uv_recovers_pixels()
     test_wire_uv_texture_blocks()
+    test_take_texture_staleness_window()
     print("texture tests: OK")
 
 

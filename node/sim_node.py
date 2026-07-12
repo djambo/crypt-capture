@@ -398,7 +398,9 @@ def run(host, port, sensor_id, frames, fps, width=DEFAULT_W, height=DEFAULT_H,
             # BEFORE the frame like the real node's CCLR/CTEX. The colour calib
             # matches the grid pinhole with an identity DEPTH->COLOR extrinsic, so
             # the relay's projected UVs come back as the grid coords in [0,1].
-            if tex_state["stream"]:
+            # Suspended while IR is on, like the real node: the texture is
+            # colour-camera data and would mismatch the IR-grey points.
+            if tex_state["stream"] and not ir_state["on"]:
                 if tex_state["resend"] or resend:
                     fx = (width / 2.0) / math.tan(math.radians(75.0) / 2.0)
                     sock.sendall(encode_color_calib(

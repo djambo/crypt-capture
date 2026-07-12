@@ -1040,17 +1040,28 @@ Two repos:
   `cap.ir` in color_to_depth, `cap.transformed_ir` in depth_to_color — the
   latter needs a pyk4a exposing it, else the node logs once and stays on
   colour), so the swap is exact per point and the **wire format is unchanged**.
-  **The white point is AUTO-GAINED (2026-07-10, same day):** a fixed full-scale
-  (first cut `IR_CLIP=1000`, k4aviewer's range) rendered the whole subject
-  WHITE on hardware — active-IR spans orders of magnitude with distance/
-  reflectivity (skin at 1-2 m returns thousands). Now each frame's worker
-  measures the subject's 99th-percentile IR (`IR_WHITE_PERCENTILE`), returns it
-  in the result tuple, and the sender EMA-smooths it (`IR_SCALE_EMA=0.1`, no
-  gain flicker) into `ir_mode["scale"]`, which the capture thread hands to the
-  NEXT frame's worker — classic auto-exposure with one frame of lag (worker
-  processes can't share state). Sqrt curve on top for shadow detail;
-  `IR_SCALE_FLOOR=200` so an empty scene's noise isn't amplified; the scale
-  resets on every set_ir toggle (re-expose fresh)
+  **The levels are AUTO-GAINED (2026-07-10; upgraded to a two-point stretch +
+  tunable gamma 2026-07-13):** a fixed full-scale (first cut `IR_CLIP=1000`,
+  k4aviewer's range) rendered the whole subject WHITE on hardware — active-IR
+  spans orders of magnitude with distance/reflectivity (skin at 1-2 m returns
+  thousands). And a white-point-only map was still "mostly white, no tonal
+  depth": the subject's values cluster just under its own 99th percentile, so
+  they all landed in the top of the range (the old sqrt compressed highlights
+  further). Now each frame's worker measures the subject's 5th AND 99th
+  percentiles (`IR_BLACK_PERCENTILE`/`IR_WHITE_PERCENTILE`), returns the pair
+  in the result tuple (`ir_p`, None when not in IR), and the sender
+  EMA-smooths both (`IR_SCALE_EMA=0.1`, no gain flicker) into
+  `ir_mode["scale"]`, which the capture thread hands to the NEXT frame's
+  worker — classic auto-exposure with one frame of lag (worker processes
+  can't share state). `_ir_to_gray` stretches black→white over the full
+  8 bits BEFORE quantisation (a viewer-side LUT on the crushed uint8 can't
+  recover detail) then applies a **live-tunable gamma**
+  (`set_ir {"gamma"}`, default `IR_DEFAULT_GAMMA=0.7`; <1 lifts shadows,
+  1 linear, >1 darkens midtones — the crypt viewer's "IR gamma" slider /
+  `send_command set-ir --enabled on --gamma 1.2`; a gamma-only set_ir does
+  NOT reset the gain, which only re-exposes on OFF→ON).
+  `IR_SCALE_FLOOR=200` so an empty scene's noise isn't amplified;
+  `IR_MIN_SPAN=64` so a flat scene doesn't stretch its noise to full range
   (the rgb block just carries grey → cpv1/cpv2/cpv3, recordings, the env plate
   and every viewer render follow automatically). While IR is on the node skips
   the SDK colour warp unless the pose worker needs the colour image; node-side
@@ -1061,6 +1072,27 @@ Two repos:
   headless-verifiable. Unit-tested (`tests/test_ir.py`: tone map, the
   _process_frame IR branch incl. stride + mask pairing, sim grey) + E2E (relay
   + sim + WS client: rgb flips coloured → grey → coloured on toggle).
+  **IR now also works with the MESH render (2026-07-13, two gates):** it used
+  to break whenever `set_texture` was enabled while the node was in IR — a
+  page-reloaded / second viewer doesn't know the node's IR state (`set_ir` is
+  not replayed to new connections), requests the texture in mesh mode, and the
+  node happily shipped the **RGB colour-camera JPEG** → the mesh rendered the
+  colour photo while the points were IR grey ("IR works with points, not with
+  mesh"). (1) The NODE suspends the CTEX encode while IR is live (`kinect_node`
+  gates the texture branch on `irsrc is None`; `texture["stream"]` stays
+  latched so the JPEG resumes the instant IR turns off; `sim_node` mirrors it).
+  (2) The RELAY's `_take_texture` now bounds fid pairing to `TEXTURE_BUFFER`
+  (16) frames — the nearest-fid match had NO age limit, so once textures
+  stopped the last buffered JPEG was re-paired with every live geometry frame
+  FOREVER (also the relay-side root of "stale photo frozen over the moving
+  body"; past-stale buffers are cleared, far-future fids — a node fid-counter
+  reset — are kept). The mesh falls back to per-point IR grey, which in
+  color_to_depth is native IR resolution anyway. The crypt viewer additionally
+  drops incoming texture blocks while ITS IR toggle is on (belt-and-braces vs
+  un-updated nodes). Tests: `test_texture.test_take_texture_staleness_window`
+  + E2E (relay + sim + WS client: texture blocks appear → IR on: rgb grey AND
+  uv/texture blocks stop → IR off: both resume). **Node-side change —
+  push→service-restart to deploy; relay restart on the central box.**
 - ✅ **Background capture at CAMERA rate + plate-done ack (2026-07-10)** — two
   fixes for "Capture Background almost never works over WiFi". (1) The node's
   capture loop parks when the send queue is full, so on a WiFi-choked link

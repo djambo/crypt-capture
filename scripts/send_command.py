@@ -120,6 +120,9 @@ def main():
                         "tone-mapped active-IR grey as the point colours "
                         "instead of the camera colour (same wire format)")
     si.add_argument("--enabled", choices=["on", "off"], required=True)
+    si.add_argument("--gamma", type=float,
+                    help="tone curve on the auto-stretched levels: <1 lifts "
+                         "shadows, 1 linear, >1 darkens (default 0.7)")
 
     na = sub.add_parser("node-admin", help="restart one node's kinect service "
                         "(systemd relaunch — the auto-update pulls latest "
@@ -195,8 +198,10 @@ def main():
             command["align"] = args.align
         send(args.host, args.port, command)
     elif args.cmd == "set-ir":
-        send(args.host, args.port,
-             {"cmd": "set_ir", "enabled": args.enabled == "on"})
+        command = {"cmd": "set_ir", "enabled": args.enabled == "on"}
+        if args.gamma is not None:
+            command["gamma"] = args.gamma
+        send(args.host, args.port, command)
     elif args.cmd == "node-admin":
         send(args.host, args.port,
              {"cmd": "node_admin", "sensor": args.sensor,

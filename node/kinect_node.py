@@ -107,25 +107,40 @@ _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
 # downstream changes (relay pairing, CPV1/2/3 rgb blocks, viewer renders,
 # recordings all just carry grey).
 #
-# The white point is AUTO-GAINED, not fixed: active-IR brightness spans orders
+# The LEVELS are AUTO-GAINED, not fixed: active-IR brightness spans orders
 # of magnitude with distance/reflectivity (skin at 1-2 m returns thousands —
 # a fixed full-scale like k4aviewer's 0..1000 saturated the whole subject to
-# white on hardware). Each frame's worker measures the 99th percentile of the
-# subject's own IR values; the node EMA-smooths that (IR_SCALE_EMA, so the
-# gain doesn't flicker as the subject moves) and hands the smoothed scale to
-# the NEXT frame's worker — classic auto-exposure, one frame of lag. The sqrt
-# curve on top keeps shadow detail visible.
+# white on hardware). Each frame's worker measures the subject's own IR
+# percentiles; the node EMA-smooths them (IR_SCALE_EMA, so the gain doesn't
+# flicker as the subject moves) and hands the smoothed levels to the NEXT
+# frame's worker — classic auto-exposure, one frame of lag.
+#
+# It is a two-point STRETCH (black + white), not just a white point
+# (2026-07-13): a white-point-only map put the whole subject — whose values
+# cluster just under its own 99th percentile — in the top of the range, and
+# the old sqrt curve compressed the highlights further: the render read
+# "mostly white, no tonal depth". Stretching p5→black / p99→white spreads the
+# subject's actual dynamic range over the full 8 bits BEFORE quantisation
+# (a viewer-side remap of the already-crushed uint8 can't recover this), and
+# the curve is a TUNABLE gamma (set_ir {"gamma"}: <1 lifts shadows, 1 =
+# linear, >1 darkens/mid-contrast; the viewer's IR gamma slider drives it).
 IR_WHITE_PERCENTILE = 99.0    # this fraction of subject IR maps below white
-IR_SCALE_EMA = 0.1            # per-frame blend toward the measured percentile
+IR_BLACK_PERCENTILE = 5.0     # this fraction maps to black (the stretch low end)
+IR_SCALE_EMA = 0.1            # per-frame blend toward the measured percentiles
 IR_SCALE_FLOOR = 200.0        # never amplify an empty/dark scene's noise
+IR_MIN_SPAN = 64.0            # min white-black span (raw IR units): a flat
+                              # scene must not stretch its noise to full range
+IR_DEFAULT_GAMMA = 0.7        # mild shadow lift; 0.5 was the old sqrt
 
 
-def _ir_to_gray(vals, scale):
-    """Masked IR values (uint16 1-D) -> uint8 grey, sqrt tone map with `scale`
-    as the white point. Runs in the worker processes (pure NumPy)."""
-    s = max(float(scale), IR_SCALE_FLOOR)
-    return (np.sqrt(np.minimum(vals.astype(np.float32) / s, 1.0))
-            * 255.0).astype(np.uint8)
+def _ir_to_gray(vals, black, white, gamma=IR_DEFAULT_GAMMA):
+    """Masked IR values (uint16 1-D) -> uint8 grey: levels stretch
+    (black..white -> 0..1) then a gamma curve. Runs in the worker processes
+    (pure NumPy)."""
+    w = max(float(white), IR_SCALE_FLOOR)
+    b = min(max(float(black), 0.0), w - IR_MIN_SPAN)
+    t = np.clip((vals.astype(np.float32) - b) / (w - b), 0.0, 1.0)
+    return (np.power(t, float(gamma)) * 255.0).astype(np.uint8)
 from node.background import (BackgroundSubtractor, denoise_mask, erode_mask,
                              foreground_mask)
 
@@ -426,7 +441,8 @@ def _encode_color_bbox_jpeg(csrc, keep, quality):
 
 
 def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
-                   ir_scale=None, color_jpeg_quality=0, erode=0):
+                   ir_scale=None, color_jpeg_quality=0, erode=0,
+                   ir_gamma=IR_DEFAULT_GAMMA):
     """Per-frame mask -> denoise -> RVL (+ foreground colour pick), the CPU-heavy
     stage, run on a worker thread so consecutive frames overlap across cores.
     Pure NumPy — pyk4a is only ever touched by the capture thread; the big array
@@ -435,10 +451,11 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
     mutate the live objects mid-frame). With `ir_src` (IR colour mode, set_ir:
     the IR16 image in the SAME geometry as `depth`), tone-mapped IR grey
     replaces the camera colour in the payload; `ir_scale` is the EMA-smoothed
-    white point from previous frames (None on the first frame — this frame's
-    own percentile is used), and the frame's measured percentile rides back in
-    the result so the sender can update the EMA. Returns everything the sender
-    needs.
+    (black, white) levels pair from previous frames (None on the first frame —
+    this frame's own percentiles are used), `ir_gamma` the live-tunable curve,
+    and the frame's measured (black, white) percentiles ride back in the
+    result (`ir_p`, None when not in IR) so the sender can update the EMA.
+    Returns everything the sender needs.
     """
     t0 = time.time()
     keep = depth > 0
@@ -460,14 +477,17 @@ def _process_frame(depth, csrc, plate, margin, denoise, stride, ir_src=None,
     color = b""
     color_aligned = False
     color_jpeg = False
-    ir_p = 0.0
+    ir_p = None
     if ir_src is not None:
         if stride > 1:
             ir_src = ir_src[::stride, ::stride]
         vals = ir_src[masked != 0]                  # one IR value per point
         if vals.size:
-            ir_p = float(np.percentile(vals, IR_WHITE_PERCENTILE))
-        gray = _ir_to_gray(vals, ir_scale if ir_scale else ir_p)
+            lo, hi = np.percentile(
+                vals, (IR_BLACK_PERCENTILE, IR_WHITE_PERCENTILE))
+            ir_p = (float(lo), float(hi))
+        levels = ir_scale if ir_scale else (ir_p or (0.0, 0.0))
+        gray = _ir_to_gray(vals, levels[0], levels[1], ir_gamma)
         color = np.ascontiguousarray(
             np.repeat(gray[:, None], 3, axis=1)).tobytes()
         color_aligned = True
@@ -649,9 +669,12 @@ def run(host, port, sensor_id, frames,
     texture = {"stream": False, "resend_calib": False, "quality": 85}
     # IR colour mode (set_ir): ship tone-mapped active-IR grey as the point
     # colours instead of the camera colour (same payload/wire, see _ir_to_gray).
-    # `scale` = the EMA-smoothed auto-gain white point (None until the first
-    # IR frame lands; reset on toggle so a re-enable re-exposes fresh).
-    ir_mode = {"stream": False, "warned": False, "scale": None}
+    # `scale` = the EMA-smoothed auto-gain (black, white) levels (None until
+    # the first IR frame lands; reset on OFF->ON so a re-enable re-exposes
+    # fresh — NOT on every set_ir, a live gamma tweak must not flicker the
+    # gain). `gamma` = the live-tunable curve (viewer IR gamma slider).
+    ir_mode = {"stream": False, "warned": False, "scale": None,
+               "gamma": IR_DEFAULT_GAMMA}
 
     # Live camera reconfig (set_camera): the reader thread only *records* the
     # request under a lock; the capture loop performs the (re)start so pyk4a is
@@ -730,9 +753,17 @@ def run(host, port, sensor_id, frames,
             imu["stream"] = bool(cmd.get("enabled", False))
             print("sensor %d: imu streaming -> %s" % (sensor_id, imu["stream"]))
         elif c == "set_ir":
-            ir_mode["stream"] = bool(cmd.get("enabled", False))
-            ir_mode["scale"] = None            # re-expose fresh on (re)enable
-            print("sensor %d: IR colour -> %s" % (sensor_id, ir_mode["stream"]))
+            on = bool(cmd.get("enabled", False))
+            if on and not ir_mode["stream"]:
+                ir_mode["scale"] = None        # re-expose fresh on OFF->ON only
+            ir_mode["stream"] = on
+            if "gamma" in cmd:                 # live curve tweak (no gain reset)
+                try:
+                    ir_mode["gamma"] = max(0.1, min(4.0, float(cmd["gamma"])))
+                except (TypeError, ValueError):
+                    pass
+            print("sensor %d: IR colour -> %s (gamma %.2f)"
+                  % (sensor_id, ir_mode["stream"], ir_mode["gamma"]))
         elif c == "set_texture":
             texture["stream"] = bool(cmd.get("enabled", False))
             if "quality" in cmd:
@@ -810,12 +841,17 @@ def run(host, port, sensor_id, frames,
                 _, fut, fid, fstride, t_cap, tc = item
                 (comp, color, color_aligned, w, h, pts, ms_d, ms_c,
                  ir_p, color_jpeg) = fut.result()
-                # IR auto-gain: EMA the frame's measured white point (plain
-                # dict + GIL = safe; the capture thread reads it on submit).
-                if ir_p > 0:
+                # IR auto-gain: EMA the frame's measured (black, white) levels
+                # (plain dict + GIL = safe; the capture thread reads it on
+                # submit).
+                if ir_p is not None:
                     prev = ir_mode["scale"]
-                    ir_mode["scale"] = (ir_p if prev is None else
-                                        prev + IR_SCALE_EMA * (ir_p - prev))
+                    if prev is None:
+                        ir_mode["scale"] = ir_p
+                    else:
+                        ir_mode["scale"] = tuple(
+                            p + IR_SCALE_EMA * (m - p)
+                            for p, m in zip(prev, ir_p))
                 t_send = time.time()
                 # timestamp_ns = the CAPTURE instant (tc, taken right before
                 # get_capture returned), NOT send time: send time is biased by
@@ -1088,7 +1124,17 @@ def run(host, port, sensor_id, frames,
             # (color_to_depth only) so the encode never blocks capture. The CCLR
             # colour calib is still sent from here (it reads pyk4a, which is
             # capture-thread-only) but it's cheap and one-shot.
-            if texture["stream"] and align == "color_to_depth":
+            # SUSPENDED while IR colour is live (irsrc): the JPEG is the COLOUR
+            # camera by definition, so it is guaranteed to mismatch the IR-grey
+            # points — a viewer that requests set_texture without knowing the
+            # node is in IR (page reload, second viewer: set_ir state isn't
+            # replayed to new connections) used to get an RGB-textured mesh
+            # over IR points ("IR works with points but not with mesh"). The
+            # mesh falls back to the per-point IR grey, which in color_to_depth
+            # is native IR resolution anyway; texture["stream"] stays latched
+            # so the JPEG resumes the moment IR turns off.
+            if texture["stream"] and align == "color_to_depth" \
+                    and irsrc is None:
                 try:
                     full_color = cap.color            # (Hc, Wc, 4) BGRA full res
                 except Exception:
@@ -1116,7 +1162,7 @@ def run(host, port, sensor_id, frames,
             fut = pool.submit(_process_frame, depth, csrc,
                               bg.plate, bg.margin, rng["denoise"], s, irsrc,
                               ir_mode["scale"], color_jpeg_quality,
-                              rng["erode"])
+                              rng["erode"], ir_mode["gamma"])
             outq.put(("frame", fut, sent, s, td - tc, tc))
             sent += 1
 

@@ -1880,11 +1880,23 @@ class PreviewServer:
         frame's, so colour and depth shown together are the SAME capture instant
         (the encoder thread makes CTEX lag its Frame, so "latest" would smear).
         Prunes textures older than the chosen one — geometry only moves forward,
-        so they're dead. Returns the texture dict, or None if none buffered."""
+        so they're dead. Returns the texture dict, or None if none buffered
+        or the nearest is further than TEXTURE_BUFFER frames — when the node
+        STOPS sending textures (set_texture off, IR colour mode) the last JPEG
+        must not be re-paired with live geometry forever (an RGB photo frozen
+        over IR-grey/moving frames); past the window the frame goes out
+        textureless and the viewer's mesh falls back to per-point rgb."""
         buf = self._pending_texture.get(sensor_id)
         if not buf:
             return None
         best_fid, best_tex = min(buf, key=lambda ft: abs(ft[0] - frame_id))
+        if abs(best_fid - frame_id) > TEXTURE_BUFFER:
+            if best_fid < frame_id:
+                # Every buffered texture is long-stale — the stream stopped.
+                # (A far-FUTURE fid is kept: a node restart resets its counter,
+                # and those textures become pairable as geometry fids catch up.)
+                buf.clear()
+            return None
         # Drop everything captured before the paired texture; keep it and newer
         # (a slightly-later texture may still be the nearest for the next frame
         # if this frame ran ahead of its own texture).
