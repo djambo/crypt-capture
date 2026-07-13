@@ -66,4 +66,14 @@ XAUTHORITY=/run/user/1000/gdm/Xauthority
 #   --rig-id studioB            only needed if >1 rig shares the LAN (must match
 #                               the relay's --rig-id; default is "crypt")
 #   --pose-gate 0.5             stricter person gate on THIS node
+#   --sync master               3.5mm hardware sync: give THIS flag to the ONE
+#   --sync sub --sub-delay-us 160   camera whose Sync Out feeds the cable chain;
+#                               every downstream (Sync In) camera gets sub +
+#                               a UNIQUE delay (160, 320, ... = 160*index; all
+#                               measured from the master pulse, order arbitrary)
+#                               so the ToF lasers don't interfere. Sensor ids
+#                               need NOT match the cable order. Per-device by
+#                               nature (depends on the physical wiring), so it
+#                               can never be a profile default. Default is
+#                               standalone = cable ignored.
 EXTRA_ARGS=
