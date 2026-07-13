@@ -595,7 +595,18 @@ Two repos:
   `_handle_node_control`). A slow relay now renders fewer fps but **always
   live** — no more growing delay / "slow motion"/catch-up. Disabled while
   recording/calibrating (they must consume every frame). Stats line adds
-  `N stale skipped`.
+  `N stale skipped`. **1-frame backlog TOLERATED (2026-07-13):** dropping the
+  moment ONE newer complete frame was buffered turned every transient ~33 ms
+  reader stall (GIL/scheduler jitter — much worse once the 3.5 mm sync cables
+  made all sensors' frames + pool jobs land at the SAME instant) into a
+  discard: the first full hardware-synced ethernet session read ~20-25 fps in
+  + ~30% "stale skipped" per sensor from three PROVEN-healthy 30 fps nodes,
+  with the reader ~80% idle (`fps in + skips ≈ 30` was the tell). The reader
+  now keeps ONE read-ahead frame (`pending`, processed next iteration, ≤2
+  frames of bounded latency) and only supersedes to the freshest when a
+  SECOND newer frame is queued — a genuinely falling-behind reader — so the
+  growing-backlog/"slow motion" protection is unchanged
+  (`test_ingest_freshness.test_one_frame_backlog_is_tolerated`).
   **(2) `--workers`** (default **`auto`** = `cpu_count-2`, capped at 8; an
   integer forces it, `1` = single-threaded) — fans the heavy STATELESS stage
   (unproject + build_message) across ONE shared thread pool (relay-wide, not

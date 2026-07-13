@@ -1911,18 +1911,22 @@ class PreviewServer:
         win = dict(_WIN_ZERO, t=time.time())   # throughput + per-stage ms log
         pool = self._pool                # shared across all node connections
         inflight = collections.deque()   # (frame, future) in submission order
+        pending = None                   # 1-frame read-ahead (drop-stale below)
         try:
             while True:
-                msg = read_message(conn)
-                if msg is None:
-                    break
-                kind, payload = msg
-                if kind != "frame":
-                    self._handle_node_control(kind, payload)
-                    continue
-                frame = payload
-                if not frame.depth_rvl:
-                    continue
+                if pending is not None:
+                    frame, pending = pending, None
+                else:
+                    msg = read_message(conn)
+                    if msg is None:
+                        break
+                    kind, payload = msg
+                    if kind != "frame":
+                        self._handle_node_control(kind, payload)
+                        continue
+                    frame = payload
+                    if not frame.depth_rvl:
+                        continue
                 # Freshness on ingest — the fix for "slow motion" on a relay that
                 # can't keep up: when the relay processes frames slower than the
                 # node sends them, frames pile up in the socket buffer and
@@ -1947,6 +1951,17 @@ class PreviewServer:
                 # trickled in — ~15-20% of frames thrown away under ordinary
                 # arrival jitter with the reader mostly idle (3 subtracted
                 # sensors stuck at ~22-27 fps with ~6 ms/frame of actual work).
+                # TOLERATE A 1-FRAME BACKLOG (2026-07-13): dropping the moment
+                # ONE newer frame was buffered turned every transient ~33 ms
+                # reader stall (GIL/scheduler jitter — worse once the sync
+                # cables made all sensors' frames + pool jobs land at the same
+                # instant) into a discard: 3 healthy 30 fps nodes read as
+                # ~20-25 fps in with ~30% "stale skipped" while the reader was
+                # ~80% idle. One read-ahead frame (`pending`, processed next
+                # iteration) absorbs bounded jitter with ≤2 frames of latency;
+                # a SECOND newer frame means the reader is genuinely behind —
+                # then supersede to the freshest two as before, so the
+                # "slow-motion"/growing-backlog protection is unchanged.
                 if not self._recorder.recording:
                     while (select.select((conn,), (), (), 0)[0]
                            and message_buffered(conn)):
@@ -1956,9 +1971,13 @@ class PreviewServer:
                         nkind, npayload = nxt
                         if nkind != "frame":
                             self._handle_node_control(nkind, npayload)
-                        elif npayload.depth_rvl:
-                            win["drop"] += 1
-                            frame = npayload            # newer frame supersedes
+                        elif not npayload.depth_rvl:
+                            pass
+                        elif pending is None:
+                            pending = npayload          # tolerated read-ahead
+                        else:
+                            win["drop"] += 1            # >=2 behind: keep the
+                            frame, pending = pending, npayload  # newest two
                 t0 = time.perf_counter()
                 depth = rvl.decompress(frame.depth, frame.width * frame.height)
                 t1 = time.perf_counter()

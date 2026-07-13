@@ -59,9 +59,27 @@ def test_drops_stale_keeps_newest():
     relayed = _run_reader(server, frames)
 
     # All 10 frames were queued before the reader started; it must collapse the
-    # backlog to (nearly) one freshest frame, NOT process all 10 in order.
-    assert relayed < n, "expected stale frames to be dropped, relayed=%d" % relayed
+    # backlog to the freshest two (frame + the 1-frame read-ahead tolerance),
+    # NOT process all 10 in order.
+    assert relayed <= 2, "expected stale frames to be dropped, relayed=%d" % relayed
     assert relayed >= 1, "at least the freshest frame must be relayed"
+
+
+def test_one_frame_backlog_is_tolerated():
+    """A single newer frame in the buffer is a transient reader stall, not a
+    growing backlog — it must be PROCESSED (read-ahead), not discarded.
+    Dropping on a 1-frame lag turned scheduler jitter into a ~30% frame loss:
+    three healthy hardware-synced 30 fps nodes read as ~20-25 fps in with
+    "stale skipped" ~10/s while the relay reader sat ~80% idle (2026-07-13,
+    first full-rig ethernet session)."""
+    w, h = 48, 48
+    frames = [_depth_frame(0, i, w, h) for i in range(2)]
+
+    server = PreviewServer(rig_calib="")
+    relayed = _run_reader(server, frames)
+
+    assert relayed == 2, \
+        "a 1-frame backlog must be relayed, not dropped (relayed=%d)" % relayed
 
 
 def test_recording_keeps_every_frame():
@@ -127,6 +145,7 @@ def test_partial_message_does_not_trigger_skip():
 
 if __name__ == "__main__":
     test_drops_stale_keeps_newest()
+    test_one_frame_backlog_is_tolerated()
     test_recording_keeps_every_frame()
     test_partial_message_does_not_trigger_skip()
     print("ingest freshness OK")
