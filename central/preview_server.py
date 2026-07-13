@@ -27,6 +27,7 @@ And verify the stream with the headless client:
 import argparse
 import collections
 import json
+import gc
 import math
 import select
 from concurrent.futures import ThreadPoolExecutor
@@ -2414,6 +2415,25 @@ def main():
     print("[preview] rvl decode: %s%s" % (
         dec, "" if dec == "numba"
         else " — pip install numba here for the ~10x JIT decode"))
+    # GC pause observability (2026-07-13): a CPython gen-2 collection holds
+    # the GIL for its whole run, freezing EVERY reader/sender thread at once —
+    # at 90 frames/s of pool futures (which are reference-cycle-y) that reads
+    # as periodic multi-frame "stale skipped" clusters on ALL sensors and a
+    # scene rate stuck below the bundle ceiling, with no stage time showing
+    # it. Print any collection that stalls the process >= 20 ms so the pause
+    # is visible in the same log as the skips it causes.
+    _gc_t0 = [0.0]
+
+    def _gc_cb(phase, info):
+        if phase == "start":
+            _gc_t0[0] = time.perf_counter()
+        else:
+            _gc_ms = (time.perf_counter() - _gc_t0[0]) * 1000.0
+            if _gc_ms >= 20.0:
+                print("[preview] gc pause %.0f ms (gen %d, %d collected)" % (
+                    _gc_ms, info.get("generation", -1),
+                    info.get("collected", 0)))
+    gc.callbacks.append(_gc_cb)
     print("[preview] scene sync: %s" % (
         "ON — all sensors' frames released together (timeout %.0f ms; "
         "--no-scene-sync to disable)" % args.scene_sync_timeout
