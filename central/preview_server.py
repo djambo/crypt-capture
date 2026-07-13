@@ -525,7 +525,14 @@ NODE_POSE_QUIET_S = 2.0
 # These are what tells a relay-bound rig WHICH stage is eating the frame
 # budget instead of guessing (fps_in + stale skipped ≈ the node's send rate).
 _WIN_ZERO = {"t": 0.0, "n": 0, "pts": 0, "bytes": 0, "drop": 0,
-             "dec": 0.0, "den": 0.0, "col": 0.0, "fin": 0.0}
+             "dec": 0.0, "den": 0.0, "col": 0.0, "fin": 0.0,
+             # Reader-latency breakdown (2026-07-13): `wait` = blocked in
+             # read_message (healthy ≈ the inter-frame gap); `oth` = the
+             # iteration's unaccounted remainder (drain check, submit/retire,
+             # emit, and any GIL/scheduler stall — the invisible time that
+             # makes a 0.5 ms/frame reader fall a frame behind). `othmax` =
+             # the window's worst single iteration, the stall smoking gun.
+             "wait": 0.0, "oth": 0.0, "othmax": 0.0}
 
 
 class ClientSender:
@@ -1773,13 +1780,16 @@ class PreviewServer:
             n = win["n"]
             print("[preview] sensor %d: %.1f fps in | %d pts | "
                   "%.0f KB/f | %d stale skipped | dec %.1f den %.1f col %.1f "
-                  "fin %.1f ms/f | %d viewer(s)" % (
+                  "fin %.1f ms/f | wait %.1f oth %.1f max %.0f | "
+                  "%d viewer(s)" % (
                       frame.sensor_id, n / dt,
                       win["pts"] // n,
                       win["bytes"] / n / 1024.0,
                       win["drop"],
                       win["dec"] / n * 1000, win["den"] / n * 1000,
                       win["col"] / n * 1000, win["fin"] / n * 1000,
+                      win["wait"] / n * 1000, win["oth"] / n * 1000,
+                      win["othmax"] * 1000,
                       nclients))
             # Frames the per-VIEWER senders skipped because that viewer's link
             # (or browser tab) couldn't drain them — a loss stage that was
@@ -1913,12 +1923,16 @@ class PreviewServer:
         pool = self._pool                # shared across all node connections
         inflight = collections.deque()   # (frame, future) in submission order
         pending = None                   # 1-frame read-ahead (drop-stale below)
+        prev_end = None                  # reader-latency accounting (win["oth"])
         try:
             while True:
+                wait_s = 0.0
                 if pending is not None:
                     frame, pending = pending, None
                 else:
+                    _tr = time.perf_counter()
                     msg = read_message(conn)
+                    wait_s = time.perf_counter() - _tr
                     if msg is None:
                         break
                     kind, payload = msg
@@ -1928,6 +1942,7 @@ class PreviewServer:
                     frame = payload
                     if not frame.depth_rvl:
                         continue
+                win["wait"] += wait_s
                 # Freshness on ingest — the fix for "slow motion" on a relay that
                 # can't keep up: when the relay processes frames slower than the
                 # node sends them, frames pile up in the socket buffer and
@@ -2010,9 +2025,10 @@ class PreviewServer:
                     else:
                         cgrid = aligned_color_grid(frame.color, depth,
                                                    frame.width, frame.height)
+                t3 = time.perf_counter()
                 win["dec"] += t1 - t0
                 win["den"] += t2 - t1
-                win["col"] += time.perf_counter() - t2
+                win["col"] += t3 - t2
                 if self.pose_model and cgrid is not None:
                     self._central_pose_submit(frame.sensor_id, depth, cgrid,
                                               frame.width, frame.height, ns)
@@ -2074,6 +2090,18 @@ class PreviewServer:
                         o0, n0, _, dt0 = fut0.result()
                         win["fin"] += dt0
                         win = self._emit(f0, o0, n0, win)
+                # Iteration remainder: everything this loop pass spent that
+                # ISN'T the blocking read or the timed stages — drain check,
+                # submit/retire/emit, and any GIL/scheduler stall. This is
+                # where an "idle" reader's missing ~33 ms hides.
+                _tend = time.perf_counter()
+                if prev_end is not None:
+                    oth = (_tend - prev_end) - wait_s - (t3 - t0)
+                    if oth > 0.0:
+                        win["oth"] += oth
+                        if oth > win["othmax"]:
+                            win["othmax"] = oth
+                prev_end = _tend
         finally:
             if pool is not None:
                 for f0, fut0 in inflight:               # drain this conn's tail
