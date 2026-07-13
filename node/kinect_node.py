@@ -827,7 +827,15 @@ def run(host, port, sensor_id, frames,
     # screen is always ~now. Recording (M3) is a separate node-local full-rate
     # path, so preview frames skipped while parked cost nothing.
     outq = queue.Queue(maxsize=max(1, workers) + 1)
-    state = {"exc": None, "n": 0, "win_t0": t0, "park_s": 0.0}
+    state = {"exc": None, "n": 0, "win_t0": t0, "park_s": 0.0,
+             # Send-cadence diagnostics (2026-07-13): the relay saw this node's
+             # frames arrive in ~1 Hz gap-then-burst clumps (3-4 frames at
+             # once) — `gapmax`/`burst` (inter-sendall gap max / count <5 ms)
+             # say whether the clump is born HERE; `fwmax` (worst blocking
+             # fut.result() — the sender waits for workers in submission
+             # order, so ONE slow worker stalls the wire while later frames
+             # pile up complete behind it) says it's worker scheduling.
+             "last_send": None, "gapmax": 0.0, "burst": 0, "fwmax": 0.0}
 
     def sender():
         try:
@@ -839,8 +847,12 @@ def run(host, port, sensor_id, frames,
                     sock.sendall(item[1])
                     continue
                 _, fut, fid, fstride, t_cap, tc = item
+                _tw0 = time.time()
                 (comp, color, color_aligned, w, h, pts, ms_d, ms_c,
                  ir_p, color_jpeg) = fut.result()
+                _fw = time.time() - _tw0
+                if _fw > state["fwmax"]:
+                    state["fwmax"] = _fw
                 # IR auto-gain: EMA the frame's measured (black, white) levels
                 # (plain dict + GIL = safe; the capture thread reads it on
                 # submit).
@@ -867,6 +879,13 @@ def run(host, port, sensor_id, frames,
                 )
                 sock.sendall(frame.encode())
                 now = time.time()
+                if state["last_send"] is not None:
+                    _gap = now - state["last_send"]
+                    if _gap > state["gapmax"]:
+                        state["gapmax"] = _gap
+                    if _gap < 0.005:
+                        state["burst"] += 1
+                state["last_send"] = now
                 state["n"] += 1
                 with acc_lock:
                     acc["cap"] += t_cap; acc["depth"] += ms_d
@@ -887,6 +906,12 @@ def run(host, port, sensor_id, frames,
                             msg += " | sat %d%%" % min(
                                 100, int(100 * state["park_s"] / win))
                         state["park_s"] = 0.0
+                        msg += (" | gap max %.0f ms (%d burst) fwait %.0f"
+                                % (state["gapmax"] * 1000, state["burst"],
+                                   state["fwmax"] * 1000))
+                        state["gapmax"] = 0.0
+                        state["burst"] = 0
+                        state["fwmax"] = 0.0
                         if profile:
                             # NOTE: stages overlap now — their sum can exceed
                             # the frame period while fps still holds 30.
