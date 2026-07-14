@@ -347,6 +347,24 @@ def jpeg_color_grid(payload, w, h):
     return grid
 
 
+def _remap_uv_to_crop(uv, crop):
+    """Remap full-colour-image UVs [0,1] into a node crop rect (u0,v0,u1,v1):
+    uv' = clip((uv - [u0,v0]) / [u1-u0, v1-v0], 0, 1). The node crops the mesh
+    JPEG to the subject's colour-space bbox, so the UVs (projected against the
+    FULL image) must be re-based onto the cropped image. (0,0,1,1) = identity.
+    The GPU-mesh shader does the identical remap from the crop rect in the
+    texture block; this is the CPU-mesh path."""
+    if crop is None:
+        return uv
+    u0, v0, u1, v1 = crop
+    if (u0, v0, u1, v1) == (0.0, 0.0, 1.0, 1.0):
+        return uv
+    du = (u1 - u0) or 1e-6
+    dv = (v1 - v0) or 1e-6
+    return np.clip((uv - np.array([u0, v0], dtype=np.float32))
+                   / np.array([du, dv], dtype=np.float32), 0.0, 1.0)
+
+
 def _uv_block(uv):
     """Serialise the texture-UV block: count×2 uint16, normalised [0,1]×65535."""
     q = np.clip(np.asarray(uv, dtype=np.float32), 0.0, 1.0) * 65535.0
@@ -355,11 +373,18 @@ def _uv_block(uv):
 
 def _texture_block(texture):
     """Serialise the texture block (LAST): u8 format, u16 w, u16 h, u32 len,
-    then the encoded image bytes. `texture` = dict(format,width,height,data)."""
+    then a normalised CROP RECT (u0,v0,u1,v1 f32 in [0,1] of the full colour
+    image the JPEG was cropped from), then the encoded image bytes. `texture` =
+    dict(format,width,height,data[,crop]). The crop rect lets the browser's
+    GPU-mesh shader remap its full-image colour-UV into the cropped texture (the
+    CPU-mesh path is fed UVs the relay already remapped, so it ignores this);
+    (0,0,1,1) = the whole frame."""
     data = texture["data"]
-    return (struct.pack("<BHHI", int(texture.get("format", 0)) & 0xFF,
+    u0, v0, u1, v1 = texture.get("crop", (0.0, 0.0, 1.0, 1.0))
+    return (struct.pack("<BHHIffff", int(texture.get("format", 0)) & 0xFF,
                         int(texture["width"]) & 0xFFFF,
-                        int(texture["height"]) & 0xFFFF, len(data)) + data)
+                        int(texture["height"]) & 0xFFFF, len(data),
+                        float(u0), float(v0), float(u1), float(v1)) + data)
 
 
 def build_message(sensor_id, frame_id, xyz, rgb=None, gravity=None, grid=None,
@@ -1721,6 +1746,15 @@ class PreviewServer:
             xyz, rgb, grid = unproject(depth, frame.width, frame.height,
                                        ray_x, ray_y, self.stride, ns,
                                        cgrid, extrinsic, max_points=self.max_points)
+        # Node-cropped texture: the JPEG covers only the subject's colour-space
+        # bbox (crop rect), so the full-image UVs `_project_color_uv` produced
+        # must be remapped into the crop before they index the cropped image.
+        # uv' = (uv - [u0,v0]) / [u1-u0, v1-v0], clamped. (0,0,1,1) = whole
+        # frame = identity. The cpv3/GPU-mesh path does this in the shader from
+        # the crop rect in the texture block, so only the CPU-mesh UVs remap here.
+        if want_uv and uv is not None:
+            uv = _remap_uv_to_crop(
+                uv, texture.get("crop") if texture is not None else None)
         # The RAW (pre-rig) cloud is what a calibration session must consume:
         # solve_rig computes the FULL raw->world transform, and the LOCK marker
         # applies the rig ONCE for display (_feed_calibration). Returning the

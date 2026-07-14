@@ -1042,6 +1042,32 @@ Two repos:
   cpv2/cpv3/grid/recording tests green. ⏳ next: hardware tuning (encode cost,
   quality); optionally drop rgb in textured mode for bandwidth; NVENC/H.26x
   colour transport for many viewers.
+  **Subject crop + downscale — the mesh-perf fix (2026-07-14):** the mesh used
+  to ship the WHOLE colour image as JPEG every frame, so it was far heavier than
+  points/splats on every axis (node encode ~15-25 ms of a 2-4 MP image;
+  ~150-400 KB/frame ≈ 36-96 Mbps on the wire for ONE camera's texture; browser
+  `createImageBitmap` of a multi-MP JPEG per frame) — the "texture drifts as I
+  move / freezes for a few seconds, mesh unusable" symptom (the whole-frame
+  texture saturates the link, then the geometry frame it's embedded in blocks
+  mid-send). Now the node crops `cap.color` to the subject's **colour-space
+  bounding box** (`_subject_color_bbox` on the capture thread — subsample the
+  subtracted foreground, unproject, DEPTH->COLOR extrinsic + colour intrinsics +
+  Brown-Conrady, the same math as `_project_color_uv`; approximate + padded 8 %
+  so it only has to CONTAIN the subject) + downscales the crop to
+  **`--texture-max-dim`** (default 960; `_downscale_bgra`) -> ~8-12x fewer bytes,
+  subject-proportional like the point wire, mesh ~= points/splats speed. The crop
+  rect `(u0,v0,u1,v1)` rides in `CTEX` (now `<4sIQBHHIffff>`, `len` still at
+  offset 21 so `message_buffered` is unchanged) and the CPV `texture` block
+  (`<BHHIffff>` + data). The relay **remaps** the full-image UVs into the crop
+  (`_remap_uv_to_crop`) for the CPU-mesh path (no viewer change there); the
+  cpv3/GPU-mesh path ships the crop rect so `GpuMeshCloud`'s shader remaps its
+  in-shader colour-UV (`uColorCrop`). `(0,0,1,1)` = whole frame = old behaviour
+  (sim ships that, so its E2E is unchanged). Full detail: `docs/textured_mesh.md`
+  "Subject crop + downscale". Unit-tested (`tests/test_texture_crop.py` bbox
+  containment + downscale; `test_texture` CTEX/CPV crop round-trip +
+  `_remap_uv_to_crop`) + live E2E (relay + sim + client, texture on, no errors).
+  **Node-side change -> push->service-restart to deploy; relay restart on
+  central.**
 - ✅ **IR colour mode (2026-07-10, `set_ir`)** — render the Kinect's ACTIVE-IR
   image as the point colours. New forwarded control command
   `{"cmd":"set_ir","enabled":bool}` (viewer "IR colour" toggle /

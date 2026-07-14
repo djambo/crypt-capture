@@ -97,6 +97,92 @@ def _encode_jpeg(bgra, quality=85):
     mod.fromarray(rgb, "RGB").save(b, format="JPEG", quality=int(quality))
     return b.getvalue()
 
+def _downscale_bgra(img, max_dim):
+    """Downscale a BGRA/BGR image so its longest edge <= max_dim, for the
+    textured-mesh JPEG (mesh-perf: the texture no longer has to carry the colour
+    camera's full pixel budget). Uses cv2 (INTER_AREA) else Pillow; returns the
+    image unchanged if no downscale is needed or no codec is present. max_dim<=0
+    disables downscaling (crop only)."""
+    h, w = int(img.shape[0]), int(img.shape[1])
+    m = max(w, h)
+    if max_dim <= 0 or m <= max_dim:
+        return img
+    scale = max_dim / float(m)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    try:
+        import cv2
+        return cv2.resize(img, (nw, nh), interpolation=cv2.INTER_AREA)
+    except Exception:
+        pass
+    try:
+        from PIL import Image
+        rgb = np.ascontiguousarray(img[..., 2::-1])          # BGRA/BGR -> RGB
+        im = Image.fromarray(rgb, "RGB").resize((nw, nh))
+        return np.ascontiguousarray(np.asarray(im)[..., ::-1])  # RGB -> BGR
+    except Exception:
+        return img
+
+
+def _subject_color_bbox(depth, plate, margin, dintr, cintr, extr, cw, ch,
+                        sub=6, pad=0.08):
+    """Normalised (u0,v0,u1,v1) bbox of the subtracted subject in the FULL colour
+    image — used to CROP the textured-mesh JPEG to the subject (so the mesh
+    texture is subject-proportional like the point/splat wire, not the whole
+    colour frame). Projects a SUBSAMPLED foreground of the depth grid into the
+    colour camera: pinhole depth unproject -> DEPTH->COLOR extrinsic -> colour
+    intrinsics + Brown-Conrady forward distortion (the same math as the relay's
+    _project_color_uv). Deliberately APPROXIMATE (no depth undistort) and
+    generously padded — the relay computes the EXACT per-point UVs and clamps
+    them into this crop, so the crop only has to CONTAIN the subject, not be
+    pixel-exact. Returns None (=> whole frame) when there's no plate / no
+    subject / no calib."""
+    if plate is None or cintr is None or extr is None:
+        return None
+    dfx, dfy, dcx, dcy = dintr
+    if not (dfx and dfy):
+        return None
+    d = depth[::sub, ::sub]
+    p = plate[::sub, ::sub]
+    keep = d > 0
+    fg = foreground_mask(p, d, margin)
+    if fg is not None:
+        keep &= fg
+    if not keep.any():
+        return None
+    vs, us = np.nonzero(keep)
+    z = d[keep].astype(np.float32) / 1000.0
+    x = (us.astype(np.float32) * sub - dcx) / dfx * z        # depth optical
+    y = (vs.astype(np.float32) * sub - dcy) / dfy * z
+    R = np.asarray(extr[0], dtype=np.float32).reshape(3, 3)
+    t = np.asarray(extr[1], dtype=np.float32)
+    Pc = np.column_stack((x, y, z)) @ R.T + t                # -> colour optical
+    zc = np.where(Pc[:, 2] != 0.0, Pc[:, 2], 1e-9)
+    xn = Pc[:, 0] / zc
+    yn = Pc[:, 1] / zc
+    cfx, cfy, ccx, ccy, cdist = cintr
+    k1, k2, p1, p2, k3, k4, k5, k6 = cdist
+    r2 = xn * xn + yn * yn
+    radial = ((1 + k1 * r2 + k2 * r2 ** 2 + k3 * r2 ** 3)
+              / (1 + k4 * r2 + k5 * r2 ** 2 + k6 * r2 ** 3))
+    xd = xn * radial + 2 * p1 * xn * yn + p2 * (r2 + 2 * xn * xn)
+    yd = yn * radial + p1 * (r2 + 2 * yn * yn) + 2 * p2 * xn * yn
+    u = (cfx * xd + ccx) / float(cw or 1)
+    v = (cfy * yd + ccy) / float(ch or 1)
+    ok = np.isfinite(u) & np.isfinite(v)
+    if not ok.any():
+        return None
+    u = u[ok]
+    v = v[ok]
+    u0 = min(max(float(u.min()) - pad, 0.0), 1.0)
+    u1 = min(max(float(u.max()) + pad, 0.0), 1.0)
+    v0 = min(max(float(v.min()) - pad, 0.0), 1.0)
+    v1 = min(max(float(v.max()) + pad, 0.0), 1.0)
+    if u1 - u0 < 0.02 or v1 - v0 < 0.02:     # degenerate -> whole frame
+        return None
+    return (u0, v0, u1, v1)
+
+
 _IDENTITY_EXTRINSIC = ((1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
                        (0.0, 0.0, 0.0))
 
@@ -575,7 +661,7 @@ def run(host, port, sensor_id, frames,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
         pose_trt=False, exposure=None, powerline=None, setup_fps=0.0,
-        color_jpeg_quality=80):
+        color_jpeg_quality=80, texture_max_dim=960):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -798,6 +884,11 @@ def run(host, port, sensor_id, frames,
     align = cfg["align"]
     ifx, ify, icx, icy, idist = _read_intrinsics(k4a, align)
     calib_sent = False
+    # Colour calib cached for the textured-mesh subject-crop projection
+    # (_subject_color_bbox). Populated in the texture branch's resend_calib step
+    # (which already reads it for CCLR) and refreshed on reconfig; None until
+    # the first textured frame, so the crop falls back to the whole frame.
+    tex_color_calib = None
 
     sent = 0
     t0 = time.time()
@@ -918,7 +1009,8 @@ def run(host, port, sensor_id, frames,
     # (not a process — no 12 MB IPC) gives real parallelism. Latest-wins: a slow
     # encoder just drops stale colours (the texture is a photo; a frame of skew is
     # invisible, and the relay pairs the freshest CTEX with the next frame).
-    tex_slot = {"color": None, "fid": 0, "stop": False}
+    tex_slot = {"color": None, "fid": 0, "stop": False,
+                "crop": (0.0, 0.0, 1.0, 1.0)}
     tex_cv = threading.Condition()
 
     def jpeg_encoder():
@@ -930,13 +1022,15 @@ def run(host, port, sensor_id, frames,
                     return
                 color = tex_slot["color"]
                 fid = tex_slot["fid"]
+                crop = tex_slot.get("crop", (0.0, 0.0, 1.0, 1.0))
                 tex_slot["color"] = None
+            color = _downscale_bgra(color, texture_max_dim)
             jpeg = _encode_jpeg(color, texture["quality"])
             if jpeg is not None:
                 try:
                     outq.put(("raw", encode_texture(
                         sensor_id, fid, jpeg,
-                        int(color.shape[1]), int(color.shape[0]))))
+                        int(color.shape[1]), int(color.shape[0]), crop=crop)))
                 except Exception:
                     pass
 
@@ -1146,11 +1240,34 @@ def run(host, port, sensor_id, frames,
                         cR, ct = _depth_to_color_extrinsic(k4a)
                         outq.put(("raw", encode_color_calib(
                             sensor_id, cw, ch, cfx, cfy, ccx, ccy, cdist, cR, ct)))
+                        tex_color_calib = ((cfx, cfy, ccx, ccy, cdist),
+                                           (cR, ct), cw, ch)
                         texture["resend_calib"] = False
-                    # Copy (the SDK reuses the buffer next capture) + notify;
-                    # the encode runs off this thread. Latest-wins.
+                    # Crop the colour image to the subject's colour-space bbox so
+                    # the mesh texture is subject-proportional (like the point
+                    # wire) instead of the whole colour frame — the fix for the
+                    # mesh being far heavier than points/splats. The relay remaps
+                    # UVs into the crop. No plate/calib -> whole frame.
+                    Hc, Wc = int(full_color.shape[0]), int(full_color.shape[1])
+                    crop = (0.0, 0.0, 1.0, 1.0)
+                    if tex_color_calib is not None and bg.plate is not None:
+                        bb = _subject_color_bbox(
+                            depth, bg.plate, bg.margin, (ifx, ify, icx, icy),
+                            tex_color_calib[0], tex_color_calib[1],
+                            tex_color_calib[2], tex_color_calib[3])
+                        if bb is not None:
+                            crop = bb
+                    x0 = min(max(int(crop[0] * Wc), 0), Wc - 1)
+                    y0 = min(max(int(crop[1] * Hc), 0), Hc - 1)
+                    x1 = min(max(int(math.ceil(crop[2] * Wc)), x0 + 1), Wc)
+                    y1 = min(max(int(math.ceil(crop[3] * Hc)), y0 + 1), Hc)
+                    # Copy the crop (the SDK reuses the buffer next capture) +
+                    # notify; the encode/downscale runs off this thread. Ship the
+                    # ACTUAL clamped crop rect so the relay/viewer UVs line up.
                     with tex_cv:
-                        tex_slot["color"] = full_color.copy()
+                        tex_slot["color"] = full_color[y0:y1, x0:x1].copy()
+                        tex_slot["crop"] = (x0 / float(Wc), y0 / float(Hc),
+                                            x1 / float(Wc), y1 / float(Hc))
                         tex_slot["fid"] = sent
                         tex_cv.notify()
 
@@ -1315,6 +1432,13 @@ def main():
                          "Falls back to raw automatically without cv2/Pillow. "
                          "0 = raw triples (old wire). Relay needs cv2 or "
                          "Pillow to decode")
+    ap.add_argument("--texture-max-dim", type=int, default=960,
+                    help="cap the longest edge (px) of the textured-mesh JPEG "
+                         "(the node also crops it to the subject bbox). Lower = "
+                         "faster/lighter mesh texture at less facial detail; the "
+                         "colour is sampled per-fragment so it stays above the "
+                         "depth-grid resolution well below the colour-camera "
+                         "res. 0 = crop only, no downscale. Needs cv2 or Pillow")
     ap.add_argument("--setup-fps", type=float, default=0.0,
                     help="OPT-IN throttle for the stream WITHOUT a background "
                          "plate (the full-room 'setup view'): e.g. 2 streams "
@@ -1337,7 +1461,8 @@ def main():
         pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
         pose_trt=args.pose_trt, exposure=args.exposure,
         powerline=args.powerline, setup_fps=args.setup_fps,
-        color_jpeg_quality=args.color_jpeg_quality)
+        color_jpeg_quality=args.color_jpeg_quality,
+        texture_max_dim=args.texture_max_dim)
 
 
 if __name__ == "__main__":

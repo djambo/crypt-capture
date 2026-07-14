@@ -94,9 +94,46 @@ on node/relay/GPU. Textured mesh removes the reason to inflate geometry at all �
 full colour on depth-res geometry — so it is the actual fix, and it composes with
 CPV2 (smaller positions/grid) and background subtraction (fewer points) on top.
 
+## Subject crop + downscale (mesh-perf fix, 2026-07-14)
+
+The first cut shipped the **whole colour image** as JPEG every frame. That made
+the mesh far heavier than the point/splat renders on EVERY axis at once — node
+encode (~15-25 ms of a 2-4 MP image), the node→relay + relay→browser wire
+(~150-400 KB/frame ≈ 36-96 Mbps for ONE camera's texture, on top of geometry),
+and the browser `createImageBitmap` of a multi-MP JPEG per frame. Points/splats
+ship only the subject-proportional per-point rgb, so they stay light; the texture
+was whole-frame. On a choked link the texture stream (a separate fid-paired
+stream) fell seconds behind, then the geometry frame it's embedded in blocked
+mid-send → the "texture drifts as I move / freezes for a few seconds" symptom.
+
+Fix: make the texture **subject-proportional like the geometry** —
+- **Node crops** `cap.color` to the subject's **colour-space bounding box**
+  (`_subject_color_bbox`: subsample the subtracted foreground, pinhole-unproject,
+  DEPTH→COLOR extrinsic, colour intrinsics + Brown-Conrady forward — the same
+  math as the relay's `_project_color_uv`, on the CAPTURE thread reusing the
+  cached depth + colour calib; approximate + padded 8 %, so it only has to
+  CONTAIN the subject, not be pixel-exact), then **downscales** the crop's
+  longest edge to `--texture-max-dim` (default 960). ~8-12× fewer bytes; the
+  colour is still sampled per-fragment so it stays well above the depth-grid
+  resolution.
+- The crop rect `(u0,v0,u1,v1)` (normalised full-image coords) rides in `CTEX`
+  (node→relay) and the CPV `texture` block (relay→viewer).
+- **CPU-mesh path:** the relay **remaps** its full-image UVs into the crop
+  (`_remap_uv_to_crop`) before the `uv` block, so `MeshCloud` samples the cropped
+  image with no change.
+- **GPU-mesh path (cpv3):** no relay UV block, so `GpuMeshCloud` computes the
+  full-image colour-UV in its vertex shader and remaps it with a `uColorCrop`
+  uniform set from the texture block's crop rect.
+
+`(0,0,1,1)` (no plate / no subject / no calib) = the whole frame = the old
+behaviour. Node-side change → push→service-restart to deploy; relay + viewer
+restart on the central/browser side. Tests: `tests/test_texture_crop.py`
+(bbox containment + downscale), `test_texture.test_uv_crop_remap` (relay remap),
+CTEX/CPV crop round-trip in `test_texture`.
+
 ## Status / rollout
 
 Built in stages: (1) wire protocol + relay UV projection + `sim_node` synthetic
 texture + headless test; (2) `kinect_node` real JPEG path + `set_texture`; (3)
-viewer `MeshCloud` texturing. Off by default end-to-end — a viewer opts in when
-the subject render is `mesh`.
+viewer `MeshCloud` texturing; (4) subject crop + downscale (above). Off by
+default end-to-end — a viewer opts in when the subject render is `mesh`.

@@ -50,6 +50,13 @@ def test_frame_messages_roundtrip():
         fr.encode_texture(3, 999, jpeg, 2048, 1536)))
     assert kind == "texture"
     assert msg["frame_id"] == 999 and msg["format"] == 0 and msg["data"] == jpeg
+    assert msg["crop"] == (0.0, 0.0, 1.0, 1.0)     # default = whole frame
+    # CTEX carries the subject crop rect (node crops the JPEG to the subject).
+    kind, msg = fr.read_message(_fake_reader(
+        fr.encode_texture(3, 42, jpeg, 512, 640, crop=(0.2, 0.3, 0.7, 0.85))))
+    assert kind == "texture" and msg["data"] == jpeg
+    assert all(abs(a - b) < 1e-6 for a, b in
+               zip(msg["crop"], (0.2, 0.3, 0.7, 0.85)))
 
 
 def _pinhole_rays(w, h, fx, fy, cx, cy):
@@ -93,7 +100,9 @@ def test_wire_uv_texture_blocks():
     uv = np.array([[0.0, 0.0], [1.0, 1.0], [0.25, 0.5],
                    [0.5, 0.25], [0.999, 0.001]], dtype=np.float32)
     jpeg = b"\xff\xd8" + bytes(range(200)) + b"\xff\xd9"
-    texture = {"format": 0, "width": 2048, "height": 1536, "data": jpeg}
+    crop = (0.15, 0.25, 0.65, 0.9)
+    texture = {"format": 0, "width": 512, "height": 640, "data": jpeg,
+               "crop": crop}
     grid = (n, 1, np.arange(n, dtype=np.uint32))
     for fmt in ("cpv1", "cpv2"):
         out = ps.build_message(1, 7, xyz, None, None, grid, fmt=fmt,
@@ -101,16 +110,40 @@ def test_wire_uv_texture_blocks():
         flags = struct.unpack_from("<I", out, 4)[0]
         assert flags & ps.FLAG_UV and flags & ps.FLAG_TEXTURE
         # The texture is the LAST block: locate it by its trailing length.
-        # Header of the texture block = <BHHI> right before the JPEG.
+        # Header of the texture block = <BHHI> + crop <ffff> right before the JPEG.
         tpos = out.rfind(jpeg)
         assert tpos >= 0
-        fmt_b, tw, th, tlen = struct.unpack_from("<BHHI", out, tpos - 9)
-        assert fmt_b == 0 and tw == 2048 and th == 1536 and tlen == len(jpeg)
+        fmt_b, tw, th, tlen, u0, v0, u1, v1 = struct.unpack_from(
+            "<BHHIffff", out, tpos - 25)
+        assert fmt_b == 0 and tw == 512 and th == 640 and tlen == len(jpeg)
+        assert all(abs(a - b) < 1e-6 for a, b in zip((u0, v0, u1, v1), crop))
         # The UV block is the 2*n uint16 immediately before the texture header.
-        uv_bytes = out[tpos - 9 - n * 4:tpos - 9]
+        uv_bytes = out[tpos - 25 - n * 4:tpos - 25]
         q = np.frombuffer(uv_bytes, dtype="<u2").reshape(n, 2)
         back = q.astype(np.float32) / 65535.0
         assert np.allclose(back, uv, atol=1.0 / 65535 + 1e-6), (fmt, back, uv)
+
+
+def test_uv_crop_remap():
+    # The node crops the mesh JPEG to the subject bbox; the relay re-bases the
+    # full-image UVs onto the cropped image (_remap_uv_to_crop), and the GPU-mesh
+    # shader does the identical remap from the crop rect. Compose the relay remap
+    # with its inverse (what the viewer/shader effectively undoes when sampling)
+    # and check UVs inside the crop map linearly to [0,1], outside clamp.
+    crop = (0.2, 0.4, 0.6, 0.8)          # du=0.4, dv=0.4
+    uv = np.array([[0.2, 0.4],           # crop corner -> (0,0)
+                   [0.6, 0.8],           # far corner  -> (1,1)
+                   [0.4, 0.6],           # centre      -> (0.5,0.5)
+                   [0.1, 0.9]],          # outside     -> clamped
+                  dtype=np.float32)
+    out = ps._remap_uv_to_crop(uv, crop)
+    assert np.allclose(out[0], [0.0, 0.0], atol=1e-6)
+    assert np.allclose(out[1], [1.0, 1.0], atol=1e-6)
+    assert np.allclose(out[2], [0.5, 0.5], atol=1e-6)
+    assert out[3, 0] == 0.0 and out[3, 1] == 1.0    # clamped both axes
+    # Identity crop leaves UVs untouched (same object, no copy needed).
+    assert ps._remap_uv_to_crop(uv, (0.0, 0.0, 1.0, 1.0)) is uv
+    assert ps._remap_uv_to_crop(uv, None) is uv
 
 
 def test_take_texture_staleness_window():
@@ -145,6 +178,7 @@ def run():
     test_frame_messages_roundtrip()
     test_unproject_uv_recovers_pixels()
     test_wire_uv_texture_blocks()
+    test_uv_crop_remap()
     test_take_texture_staleness_window()
     print("texture tests: OK")
 

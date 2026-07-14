@@ -190,7 +190,15 @@ _COLOR_CALIB = struct.Struct("<4sIHH" + "ffff" + "ffffffff" + "ffffffffffff")
 # 0 = JPEG. Only sent when textured mode is enabled (set_texture) — off by
 # default, so nodes/relays that don't use it never see it.
 TEXTURE_MAGIC = b"CTEX"
-_TEXTURE_HEAD = struct.Struct("<4sIQBHHI")  # magic, sensor, frame_id, fmt, w, h, len
+# magic, sensor, frame_id, fmt, w, h, len, then a normalised CROP RECT (u0,v0,u1,v1
+# in [0,1] of the FULL colour image, top-left origin). The node now crops the JPEG
+# to the subject's colour-space bbox + downscales it (docs/textured_mesh.md "crop"),
+# so the texture is subject-proportional like the point/splat wire instead of the
+# whole colour frame — the fix for the mesh being far heavier than points. The
+# crop rect rides along so the relay/viewer remap the full-image UVs into the crop.
+# (0,0,1,1) = the whole frame = the old behaviour. `len` stays at byte offset 21
+# (crop appended AFTER it) so message_buffered's fixed offset is unchanged.
+_TEXTURE_HEAD = struct.Struct("<4sIQBHHIffff")
 TEXTURE_JPEG = 0
 
 # --- node status events --------------------------------------------------
@@ -235,10 +243,17 @@ def encode_color_calib(sensor_id, width, height, fx, fy, cx, cy, dist, R, t):
                              fx, fy, cx, cy, *(d[:8] + tuple(vals)))
 
 
-def encode_texture(sensor_id, frame_id, data, width, height, fmt=TEXTURE_JPEG):
-    """Encode one colour texture image (CTEX). data = encoded bytes (JPEG)."""
+def encode_texture(sensor_id, frame_id, data, width, height, fmt=TEXTURE_JPEG,
+                   crop=(0.0, 0.0, 1.0, 1.0)):
+    """Encode one colour texture image (CTEX). data = encoded bytes (JPEG).
+    `crop` = (u0,v0,u1,v1) normalised [0,1] of the FULL colour image the JPEG
+    was cropped from (default = whole frame). width/height are the ENCODED
+    (cropped+downscaled) pixel dims; they're informational only — every UV
+    consumer works in the normalised crop rect, so downscaling is transparent."""
+    u0, v0, u1, v1 = crop
     return _TEXTURE_HEAD.pack(TEXTURE_MAGIC, sensor_id, frame_id, fmt,
-                              width, height, len(data)) + data
+                              width, height, len(data),
+                              float(u0), float(v0), float(u1), float(v1)) + data
 
 
 def encode_status(sensor_id, event):
@@ -296,7 +311,11 @@ def message_buffered(sock):
         vals = _HEADER.unpack(head)
         need = _HEADER.size + vals[8] + vals[9]
     elif magic == TEXTURE_MAGIC:    # variable: head carries the JPEG length
-        if len(head) < _TEXTURE_HEAD.size:
+        # Only need through the u32 len at offset 21 (25 bytes) to size the
+        # message — the initial _HEADER.size peek covers it. (The full CTEX head
+        # is now 41 B with the trailing crop rect, larger than _HEADER.size, so
+        # gating on _TEXTURE_HEAD.size here would never be satisfied.)
+        if len(head) < 25:
             return False
         need = _TEXTURE_HEAD.size + struct.unpack_from("<I", head, 21)[0]
     elif magic == POSE_MAGIC:       # variable: head carries the keypoint count
@@ -359,12 +378,14 @@ def read_message(sock):
         rest = _recv_exactly(sock, _TEXTURE_HEAD.size - 4)
         if not rest:
             return None
-        sid, fid, fmt, w, h, tlen = struct.unpack("<IQBHHI", rest)
+        sid, fid, fmt, w, h, tlen, u0, v0, u1, v1 = struct.unpack(
+            "<IQBHHIffff", rest)
         data = _recv_exactly(sock, tlen) if tlen else b""
         if tlen and not data:
             return None
         return ("texture", {"sensor_id": sid, "frame_id": fid, "format": fmt,
-                            "width": w, "height": h, "data": data})
+                            "width": w, "height": h, "data": data,
+                            "crop": (u0, v0, u1, v1)})
     if magic == STATUS_MAGIC:
         rest = _recv_exactly(sock, _STATUS.size - 4)
         if not rest:
