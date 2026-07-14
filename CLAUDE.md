@@ -980,6 +980,22 @@ Two repos:
   timeout flush, freshest-wins overwrite, single-sensor immediacy, dead-
   sensor barrier decay); `test_relay_workers` pins the compute path with
   scene_sync=False (byte equivalence is orthogonal to delivery timing).
+- ✅ **Wired-sync single-camera fallback (2026-07-15, `--sync-timeout`)** — the
+  fix for "I turn on only one camera to test and NOTHING streams". A
+  subordinate Kinect's `get_capture()` BLOCKS forever on the master's hardware
+  sync pulse (and a lone master with `synchronized_images_only` can stall the
+  same way), so powering on one node of a `--sync master/sub` rig used to hang
+  the node with no stream. `kinect_node._start_camera` now PROBES the first
+  capture with a timeout (`--sync-timeout`, default **10 s** — generous so a
+  slow-booting master on the real rig isn't dropped): if no synced frame
+  arrives, it tears the sensor down and re-opens it **STANDALONE** so the lone
+  camera streams. The fallback is LATCHED into a mutable `sync_state` so a
+  later live reconfig/restart (`set_camera`, `node_admin restart`) stays
+  standalone instead of hanging on the missing master again. A master or a
+  fully-powered rig passes the probe instantly (one discarded capture) → zero
+  behaviour change for the normal synced case. Used at BOTH the initial start
+  and the reconfig-restart path. **Node-side change — push→⚙-restart to
+  deploy.** No wire/protocol/relay/viewer change.
 - ✅ **LAN auto-discovery** (`protocol/discovery.py`): the node finds the central
   relay by a **rig id** instead of a hardcoded IP, so the central laptop getting a
   new DHCP lease needs no reconfig. UDP broadcast (port 9001): node broadcasts

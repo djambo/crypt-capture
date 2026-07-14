@@ -186,6 +186,51 @@ def _build_config(cfg, sync, sub_delay_us):
     )
 
 
+def _start_camera(cfg, sync_state, sensor_id, sync_timeout):
+    """Open + start the Kinect, falling back to STANDALONE if a wired-sync mode
+    can't actually produce frames.
+
+    A subordinate camera's `get_capture()` BLOCKS until it receives the
+    master's hardware sync pulse, and a master with `synchronized_images_only`
+    needs its own captures to line up — so if you power on only ONE camera of a
+    synced rig (a common single-camera bench test), the node starts the sensor
+    but then hangs forever on the first capture and "nothing turns on". Here we
+    probe the first capture with a timeout; if no synced frame arrives (the rest
+    of the rig isn't up), we tear the sensor down and re-open it STANDALONE so
+    the lone camera still streams. The fallback is latched into `sync_state`
+    (mutated in place) so a later live reconfig/restart stays standalone too.
+
+    `sync_state` = {"mode": <standalone|master|sub>, "delay": sub_delay_us}.
+    Returns the started PyK4A. STANDALONE opens directly (the common path, no
+    probe cost).
+    """
+    mode = sync_state["mode"]
+    k4a = PyK4A(_build_config(cfg, mode, sync_state["delay"]))
+    k4a.start()
+    if mode == "standalone":
+        return k4a
+    # Probe: does a hardware-synced frame actually arrive? get_capture blocks
+    # on the master's trigger, so a timeout here means the rig isn't synced up.
+    try:
+        k4a.get_capture(timeout=int(sync_timeout * 1000))
+        print("sensor %d: wired sync '%s' streaming" % (sensor_id, mode))
+        return k4a
+    except Exception:
+        print("sensor %d: no synced frames in %.1fs (wired sync '%s') — the "
+              "rest of the sync rig isn't up; falling back to STANDALONE so "
+              "this camera streams alone" % (sensor_id, sync_timeout, mode))
+    try:
+        k4a.stop()
+        k4a.close()
+    except Exception:
+        pass
+    sync_state["mode"] = "standalone"       # latch: restarts stay standalone
+    sync_state["delay"] = 0
+    k4a = PyK4A(_build_config(cfg, "standalone", 0))
+    k4a.start()
+    return k4a
+
+
 _IMU_EXTRINSIC_WARNED = [False]
 
 
@@ -575,7 +620,7 @@ def run(host, port, sensor_id, frames,
         pose_model=None, pose_threads=2, pose_min_conf=0.2,
         pose_gate=0.35, pose_smooth=True, pose_joints="minimal",
         pose_trt=False, exposure=None, powerline=None, setup_fps=0.0,
-        color_jpeg_quality=80):
+        color_jpeg_quality=80, sync_timeout=10.0):
     # --host auto: find the central relay by broadcasting for its rig id, so a
     # changing DHCP IP on the central laptop doesn't need reconfiguring here. On
     # failure we exit (nonzero) and let systemd relaunch us to try again.
@@ -628,8 +673,11 @@ def run(host, port, sensor_id, frames,
                                 joints=jset,
                                 label="sensor %d pose" % sensor_id)
 
-    k4a = PyK4A(_build_config(cfg, sync, sub_delay_us))
-    k4a.start()
+    # Effective wired-sync mode, mutated in place by _start_camera when a lone
+    # synced camera has to fall back to STANDALONE (so live restarts below stay
+    # standalone instead of hanging on the missing master again).
+    sync_state = {"mode": sync, "delay": sub_delay_us}
+    k4a = _start_camera(cfg, sync_state, sensor_id, sync_timeout)
     _apply_color_controls(k4a, exposure, powerline, sensor_id)
     sock = socket.create_connection((host, port))
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
@@ -972,8 +1020,7 @@ def run(host, port, sensor_id, frames,
             if do_reconfig:
                 if do_restart:
                     k4a.stop()
-                    k4a = PyK4A(_build_config(cur, sync, sub_delay_us))
-                    k4a.start()
+                    k4a = _start_camera(cur, sync_state, sensor_id, sync_timeout)
                     # A restart resets the colour controls to SDK defaults.
                     _apply_color_controls(k4a, exposure, powerline, sensor_id)
                 align = cur["align"]
@@ -1227,6 +1274,14 @@ def main():
                     default="standalone")
     ap.add_argument("--sub-delay-us", type=int, default=0,
                     help="subordinate delay off master (stagger IR; e.g. 160*index)")
+    ap.add_argument("--sync-timeout", type=float, default=10.0,
+                    help="seconds to wait for the first HARDWARE-SYNCED frame "
+                         "before falling back to STANDALONE (master/sub only). "
+                         "A subordinate blocks on the master's trigger, so a "
+                         "lone camera of a synced rig would hang forever — this "
+                         "lets you power on just one camera for a bench test "
+                         "and still get a stream. Generous by default so a "
+                         "slow-booting master isn't dropped on a real rig")
     ap.add_argument("--preview-stride", type=int, default=1,
                     help="downsample the streamed cloud by this factor on the node "
                          "(2 = quarter the points; recommended for live preview)")
@@ -1337,7 +1392,8 @@ def main():
         pose_smooth=not args.pose_no_smooth, pose_joints=args.pose_joints,
         pose_trt=args.pose_trt, exposure=args.exposure,
         powerline=args.powerline, setup_fps=args.setup_fps,
-        color_jpeg_quality=args.color_jpeg_quality)
+        color_jpeg_quality=args.color_jpeg_quality,
+        sync_timeout=args.sync_timeout)
 
 
 if __name__ == "__main__":
