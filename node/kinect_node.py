@@ -1251,12 +1251,18 @@ def run(host, port, sensor_id, frames,
                     Hc, Wc = int(full_color.shape[0]), int(full_color.shape[1])
                     crop = (0.0, 0.0, 1.0, 1.0)
                     if tex_color_calib is not None and bg.plate is not None:
-                        bb = _subject_color_bbox(
-                            depth, bg.plate, bg.margin, (ifx, ify, icx, icy),
-                            tex_color_calib[0], tex_color_calib[1],
-                            tex_color_calib[2], tex_color_calib[3])
-                        if bb is not None:
-                            crop = bb
+                        # Defensive: this runs on the capture thread every frame
+                        # — any edge case in the projection must degrade to the
+                        # full frame (old behaviour), never crash the node.
+                        try:
+                            bb = _subject_color_bbox(
+                                depth, bg.plate, bg.margin, (ifx, ify, icx, icy),
+                                tex_color_calib[0], tex_color_calib[1],
+                                tex_color_calib[2], tex_color_calib[3])
+                            if bb is not None:
+                                crop = bb
+                        except Exception:
+                            crop = (0.0, 0.0, 1.0, 1.0)
                     x0 = min(max(int(crop[0] * Wc), 0), Wc - 1)
                     y0 = min(max(int(crop[1] * Hc), 0), Hc - 1)
                     x1 = min(max(int(math.ceil(crop[2] * Wc)), x0 + 1), Wc)
