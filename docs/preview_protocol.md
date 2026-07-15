@@ -65,13 +65,22 @@ Then the payload blocks, in order:
    order as positions). The **textured mesh** (docs/textured_mesh.md): the relay
    projects each depth point into the colour image, so the viewer can sample the
    full-resolution colour texture per fragment instead of using the depth-res
-   per-vertex `rgb`. After the grid block.
+   per-vertex `rgb`. The UVs are already **remapped into the texture's crop rect**
+   (see the texture block) — sample the cropped image directly. After the grid block.
 6. **texture** *(only if flag bit5 set, LAST block)* — `u8 format` (0 = JPEG),
-   `u16 tex_w`, `u16 tex_h`, `u32 len`, then `len` bytes of the encoded colour
-   image. **One image per frame**, shared by all the frame's UVs. Decode it
-   (`createImageBitmap`) into a texture and set it as the mesh albedo; drop
-   vertex colours while textured (the texture is the colour). These two blocks
-   are emitted only while a viewer has requested `set_texture` (mesh render).
+   `u16 tex_w`, `u16 tex_h`, `u32 len`, then a **crop rect** `4 × float32`
+   `(u0,v0,u1,v1)` normalised to `[0,1]` of the FULL colour image the JPEG was
+   cropped to, then `len` bytes of the encoded colour image. **One image per
+   frame**, shared by all the frame's UVs. The node crops the JPEG to the
+   subject's colour-space bounding box (+ downscales it, `--texture-max-dim`) so
+   the texture is subject-proportional like the point wire — the fix for the mesh
+   being far heavier than points/splats. The **uv** block is already remapped into
+   the crop, so the CPU mesh samples the cropped image directly; a GPU-mesh
+   shader that computes the full-image UV itself must remap it with the crop rect
+   (`uv' = (uv − [u0,v0]) / [u1−u0,v1−v0]`, clamp). `(0,0,1,1)` = the whole frame.
+   Decode the JPEG (`createImageBitmap`) into a texture and set it as the mesh
+   albedo; drop vertex colours while textured. These two blocks are emitted only
+   while a viewer has requested `set_texture` (mesh render).
 
 Only valid (non-zero-depth) points are sent, after a stride-based downsample —
 so `count` varies per frame. The `--max-points` cap (default **0 = uncapped**,
@@ -156,8 +165,10 @@ positions→rgb→gravity→grid→texture so the browser parser is uniform):
    valid-mask **bitmap** (`ceil(grid_w*grid_h/8)` bytes, LSB-first) — identical
    to CPV2's grid. Set bits in order are 1:1 with the depth/rgb values.
 5. **texture** *(flag bit5, last)* — the JPEG colour image, byte-identical to the
-   textured-mesh block (`u8 format`, `u16 w`, `u16 h`, `u32 len`, bytes). Used by
-   the MESH render; the POINT render uses the rgb block instead.
+   textured-mesh block (`u8 format`, `u16 w`, `u16 h`, `u32 len`, **crop rect
+   `4×float32`**, bytes). Used by the MESH render; the POINT render uses the rgb
+   block instead. cpv3 ships NO relay-side UVs (the GPU-mesh shader projects the
+   colour-UV itself), so it MUST remap that UV into the crop rect it carries here.
 
 The browser reconstructs each point: `u,v` from the bitmap → full-res pixel via
 `step` → undistorted ray (from `sensor_calib.depth`) → `pos = ray * depth` →
@@ -213,7 +224,7 @@ Commands are `{"cmd": ...}` objects. Current commands:
 | `{"cmd":"set_erode","px":<n>}` | **silhouette-rim trim** (node default **1**; 0 = off), applied only while background subtraction is active. Erodes the foreground mask by `px` pixels: at every depth edge the ToF sensor returns 1–2 px of mixed pixels whose depth lands between subject and wall (so they pass plate subtraction) and whose colour is sampled from the wall behind — the wall-coloured fringe outlining the subject. Raising it trims deeper but starts eating fine silhouette detail (fingers) above ~2. Near-zero cost (boolean AND passes on the mask) and it *shrinks* the point count/wire. |
 | `{"cmd":"set_camera", "depth_mode":<m>, "color_resolution":<r>, "fps":<f>, "align":<a>}` | **pick which Kinect data to send** (all fields optional; unknown/unchanged ignored). See below. |
 | `{"cmd":"set_imu","enabled":<bool>}` | **stream live IMU orientation.** When enabled, the node re-reads the accelerometer every ~10 frames and re-sends a fresh gravity (down) vector, so the cloud reorients live as the camera is physically turned. Off by default (one gravity vector is still sent at connect). The gravity rides in the `CPV1` gravity block (bit2). |
-| `{"cmd":"set_texture","enabled":<bool>,"quality":<1-100>}` | **textured mesh** (docs/textured_mesh.md). When enabled (the viewer sends it while the subject render is `mesh`, `color_to_depth` only), the node ships the full-resolution colour image as JPEG + colour calibration, and the relay adds the `uv` (bit4) + `texture` (bit5) blocks to each `CPV1` frame so the mesh is textured at the colour camera's full resolution on cheap depth-res geometry. Off by default (zero cost in point mode). |
+| `{"cmd":"set_texture","enabled":<bool>,"quality":<1-100>}` | **textured mesh** (docs/textured_mesh.md). When enabled (the viewer sends it while the subject render is `mesh`, `color_to_depth` only), the node ships the colour image as JPEG **cropped to the subject's colour-space bbox + downscaled** (`--texture-max-dim`, subject-proportional like the point wire — the mesh-perf fix) + colour calibration, and the relay adds the `uv` (bit4) + `texture` (bit5, carrying the crop rect) blocks to each `CPV1` frame so the mesh is textured at the colour camera's resolution on cheap depth-res geometry. Off by default (zero cost in point mode). |
 | `{"cmd":"set_ir","enabled":<bool>,"gamma":<0.1-4, optional>}` | **IR colour mode.** When enabled, the node substitutes tone-mapped **active-IR grey** for the camera colour in the per-point payload. The levels are **auto-gained as a two-point stretch** (2026-07-13): each frame's 5th- and 99th-percentile IR values become black and white, EMA-smoothed across frames (active-IR brightness spans orders of magnitude with distance/reflectivity, so any fixed full-scale either saturates the subject white or crushes it black — and a white-point-only map left the subject clustered near white with no tonal depth), a white floor so an empty scene's noise isn't amplified, and a minimum span so a flat scene doesn't stretch its noise to full range. On top sits a **live-tunable `gamma`** (default 0.7; <1 lifts shadows, 1 linear, >1 darkens midtones — the viewer's "IR gamma" slider; sending `gamma` alone with `enabled:true` retunes the curve without resetting the auto-gain, which only re-exposes on an OFF→ON transition). The IR image shares the depth camera's geometry (same grid, same valid mask), so the swap is exact per point and the wire format is UNCHANGED — the `rgb` block just carries grey (R==G==B), and cpv1/cpv2/cpv3, recordings and every viewer render follow automatically. Off by default. **IR also suspends the texture stream at the NODE** (2026-07-13): the JPEG is the RGB colour camera and is guaranteed to mismatch the IR-grey points, so while IR is live the node sends no `CTEX` even if `set_texture` is (or becomes) enabled — a viewer that requests the texture without knowing the node is in IR (page reload / second viewer; `set_ir` state is not replayed to new connections) no longer gets an RGB-textured mesh over IR points; the mesh falls back to the per-point IR grey (native IR resolution in `color_to_depth` anyway), and the JPEG resumes the moment IR turns off (`set_texture` stays latched). The relay likewise stops pairing textures more than `TEXTURE_BUFFER` (16) frames stale, so the uv/texture blocks drop off the wire instead of freezing the last photo. The viewer additionally stops requesting `set_texture` while it knows IR is on. `depth_to_color` needs a pyk4a with `transformed_ir` (else the node logs once and stays on camera colour). |
 | `{"cmd":"node_admin","sensor":<id>,"action":"restart"\|"reboot"}` | **per-node remote admin** (2026-07-11, the viewer's per-camera ⚙ button). Broadcast to every node like the other forwarded commands; each node ignores a non-matching `sensor` (omit `sensor` to hit all nodes). `restart` = the node acks (`node_status` `restarting`, below) and **exits** — systemd (`Restart=always`) relaunches it, and the service's ExecStartPre auto-update (`deploy/update-node.sh`) **pulls the latest code first**, so restart == update+restart (~10–20 s to streaming; the background plate persists). `reboot` = ack (`rebooting`) then `sudo -n reboot` — needs the passwordless-sudo rule `deploy/install-node-service.sh` writes to `/etc/sudoers.d/` (refused + logged without it); back in ~1–2 min, also auto-updated. |
 | `{"cmd":"calibrate_fine","seconds":30,"ball_radius":0.05}` | **rig calibration, Tier-2 wand pass — handled AT THE RELAY** (not forwarded). Collects per-sensor ball centers off the raw clouds for `seconds`, solves the rig (Kabsch), writes `rig_calib.json` and starts registering all sensors on the wire. Optional gate overrides: `min_points`, `max_points`, `max_fit_rms`, `min_pairs`; stationary mode also takes `min_still_sensors` (commit quorum, default 2), `late_join_window` (s a slower camera may still join the current capture after the commit, default 2.5) and `target_captures`. Progress/results stream back as `calib_status` (below). See `docs/rig_calibration.md`. |
