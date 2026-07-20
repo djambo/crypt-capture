@@ -41,7 +41,7 @@ import os
 
 import numpy as np
 
-from central import calibration, recording
+from central import calibration, recording, skeleton_fusion
 from protocol import control, discovery, rvl, websocket
 from protocol.frame import message_buffered, read_message
 
@@ -907,6 +907,13 @@ class PreviewServer:
         # recording never slows the live path.
         self.recordings_dir = recordings_dir
         self._recorder = recording.TakeRecorder(recordings_dir)
+        # Cross-sensor skeleton fusion (central/skeleton_fusion.py): merge the
+        # per-sensor world-frame skeletons into ONE robust skeleton, broadcast
+        # as {"type":"skeleton","sensor":"fused"} alongside the per-sensor
+        # messages. Multi-sensor fusion only engages once the rig calibration
+        # registers the sensors into a shared frame (single-camera passthrough
+        # always works).
+        self._skeleton_fuser = skeleton_fusion.SkeletonFuser()
         # Scene-coherent broadcast (SceneBundler): all sensors' frames are
         # released together so the multi-camera body refreshes as ONE unit in
         # the viewer. Default on; scene_sync=False restores per-frame
@@ -2240,6 +2247,7 @@ class PreviewServer:
             session["joints"].add(sid, now, joints)
         rig = self._rig.get(sid)
         out = {}
+        world_joints = []                   # post-rig, for cross-sensor fusion
         for jid, p, conf in joints:
             if rig is not None:
                 R, t = rig
@@ -2249,10 +2257,25 @@ class PreviewServer:
                            + t[1]),
                      float(R[2, 0] * p[0] + R[2, 1] * p[1] + R[2, 2] * p[2]
                            + t[2]))
+            world_joints.append((jid, p, conf))
             out[str(jid)] = [round(p[0], 4), round(p[1], 4), round(p[2], 4),
                              round(conf, 2)]
         self._broadcast_text({"type": "skeleton", "sensor": sid,
                               "joints": out})
+        # Cross-sensor fusion (central/skeleton_fusion.py): merge the fresh
+        # per-sensor world-frame skeletons into one robust skeleton. Emitted
+        # on every per-sensor update so the fused stream is always as fresh
+        # as the freshest camera. `registered` gates multi-sensor fusion on
+        # the rig calibration (unregistered frames must never be mixed).
+        fused = self._skeleton_fuser.add(sid, now, world_joints,
+                                         registered=rig is not None)
+        if fused:
+            fj = dict((str(jid), [round(p[0], 4), round(p[1], 4),
+                                  round(p[2], 4), round(conf, 2)])
+                      for jid, (p, conf) in fused.items())
+            self._broadcast_text({"type": "skeleton", "sensor": "fused",
+                                  "joints": fj,
+                                  "n": self._skeleton_fuser.last_sensors})
 
     def _node_accept_loop(self, host, port):
         srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

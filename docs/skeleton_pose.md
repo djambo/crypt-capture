@@ -265,13 +265,63 @@ the CPU handed back to the frame pipeline.
   hands), `full` (all 17), or a comma list of COCO ids. Emit-side only (the
   model always computes 17); calibration still gets plenty of joint pairs.
 
+## Cross-sensor skeleton fusion (BUILT 2026-07-19, `central/skeleton_fusion.py`)
+
+Each camera's skeleton is an independent noisy estimate, and before fusion 3
+cameras just drew 3 jittery skeletons on top of each other. The relay now
+merges the freshest per-sensor world-frame joints into ONE fused skeleton,
+broadcast as `{"type":"skeleton","sensor":"fused","joints":{…},"n":<sensors>}`
+alongside the unchanged per-sensor messages (emitted on every per-sensor pose
+update, so it's always as fresh as the freshest camera). Why multi-view beats
+any single-camera filter:
+
+- **Flying joints** (the dominant "messy" artifact): a 2D keypoint whose
+  depth pixel lands on the BACKGROUND unprojects metres off-body *with
+  healthy confidence* — undetectable from one view. With ≥3 estimates the
+  flier is metres from the per-joint component-wise median and is dropped
+  (`fuse_joint`, outlier radius 0.25 m — tolerant of rough-tier registration,
+  far below a depth-lift flier); with 2, the higher-confidence estimate wins
+  on disagreement.
+- **View-dependent confidence**: survivors are confidence-weighted-averaged,
+  so the camera with the frontal view dominates each joint; fused conf = the
+  best surviving confidence.
+- **Occlusion completion**: a joint seen by any one camera is in the fused
+  skeleton → near-zero dropouts.
+
+**Registration gate (correctness-critical):** per-sensor joints only share a
+frame once the rig calibration is applied — on an uncalibrated multi-camera
+rig each sensor's "world" is its own view frame, and merging across them
+would snap the skeleton between frames. So: exactly one fresh sensor →
+passthrough (single-camera rigs always get the fused stream); several fresh,
+some registered → fuse the registered ones only; several fresh, none
+registered → **no fused output** (the viewer falls back to per-sensor
+display). Freshness window 0.4 s (`SkeletonFuser(window_s=…)`).
+
+Viewer (`crypt`): the fused skeleton renders as WHITE markers in the
+captureGroup (world frame — it belongs to no sensor) through the same
+`SkeletonMarkers` dead-reckoning core; while fused messages flow the
+per-sensor skeletons auto-hide (they're the noisy inputs — `#debug` Scene →
+"per-camera skeletons" shows them for comparison), and they come back within
+1.5 s if the fused stream stops (old relay / calibration cleared). The panel
+"skeletons" toggle governs both. XR-align keeps pairing against the
+per-sensor `_rawJoints` (the fused copy would double-count).
+
+Tests: `tests/test_skeleton_fusion.py` (passthrough, measured noise
+reduction, flying-joint kill incl. a highest-confidence flier, 2-sensor
+disagreement, occlusion completion, freshness, registration gate, low-conf
+exclusion, and the real `_on_pose` wiring). Full-socket E2E verified: two
+posed `sim_node --skeleton` → phase A (uncalibrated) emits NO fused stream;
+after `calibrate-rough` (tier "skeleton") all fused messages carry `n=2` and
+agree with the registered per-sensor joints to <5 cm.
+
 ## Remaining
 
-1. Relay-side skeleton fusion across sensors (confidence-weighted per-joint
-   merge in the calibrated world frame). The Nano is settled: no pose on the
-   node (profile default); the relay's `--pose-model` fallback covers it.
-3. Creative hooks: hands (joints 9/10) → particle attractors in the viewer;
-   gesture triggers later.
+1. Creative hooks: hands (joints 9/10) → particle attractors in the viewer;
+   gesture triggers later. (The Nano is settled: no pose on the node —
+   profile default; the relay's `--pose-model` fallback covers it.)
+2. Fusion follow-ups if wanted: chirality (L/R flip) voting across views;
+   One-Euro smoothing on the FUSED stream (then relax per-sensor smoothing);
+   feeding the fused skeleton to `solve_skeleton` collection.
 
 Accuracy honesty, restated: skeleton align ≈ 2–5 cm — it *replaces rough*,
 not the wand. Fine (ball) stays the calibration for recording/VR/fusion.

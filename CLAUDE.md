@@ -527,8 +527,38 @@ Two repos:
   so it's per-device overrides only. Profiles being in-repo means new default
   flags roll out via the auto-update; the unit change itself needs ONE
   `sudo deploy/install-node-service.sh` re-run per device. ⏳ remaining:
-  hands→particle attractors in the viewer; relay-side skeleton fusion across
-  sensors.
+  hands→particle attractors in the viewer.
+- ✅ **Cross-sensor skeleton fusion (2026-07-19, `central/skeleton_fusion.py`;
+  detail in `docs/skeleton_pose.md` "Cross-sensor skeleton fusion")** — the
+  fix for "skeleton is messy with 1 camera and doesn't improve with 3": each
+  camera's skeleton was an independent noisy estimate broadcast side by side,
+  nothing combined them. The relay now merges the freshest per-sensor
+  world-frame joints into ONE fused skeleton, broadcast as
+  `{"type":"skeleton","sensor":"fused","joints":{…},"n":<sensors>}` alongside
+  the unchanged per-sensor messages (emitted from `_on_pose` on every
+  per-sensor update). Per-joint robust merge (`fuse_joint`): ≥3 estimates →
+  component-wise median consensus + drop outliers >0.25 m (kills the
+  *flying-joint* failure — a keypoint whose depth pixel hit the background
+  unprojects metres off-body WITH high confidence, undetectable from one
+  view) then confidence-weighted average (the frontal camera dominates each
+  joint); 2 estimates → agree: weighted mean, disagree: higher confidence
+  wins; a joint seen by any one camera survives (occlusion completion).
+  **Registration gate (correctness-critical):** multi-sensor fusion only
+  engages for sensors with a rig transform loaded — uncalibrated multi-camera
+  "world" frames don't align, and mixing them would snap the skeleton between
+  frames; several fresh sensors with NO rig → no fused output (viewer falls
+  back to per-sensor). Single fresh sensor → passthrough always. Freshness
+  window 0.4 s; `drop_sensor` unused for now (samples age out). Viewer side:
+  fused renders as WHITE `SkeletonMarkers` in the captureGroup; per-sensor
+  skeletons auto-hide while fused flows (back within 1.5 s if it stops;
+  `#debug` Scene → "per-camera skeletons" shows them for A/B); XR-align still
+  pairs against per-sensor `_rawJoints` only. Unit-tested
+  (`tests/test_skeleton_fusion.py`: measured noise reduction 48→28 mm @3
+  cams, highest-confidence flier rejected, registration gate, the real
+  `_on_pose` wiring) + full-socket E2E (2 posed sim skeletons: uncalibrated →
+  NO fused; after `calibrate-rough` → all fused `n=2`, joints within 5 cm of
+  the registered per-sensor stream). Relay-only — restart the relay to
+  deploy; no node/wire change (a TEXT message was added downstream).
 - ✅ **CPV1 grid block → viewer textured mesh (2026-07-03)**: the relay now
   attaches each point's **depth-grid position** to every `CPV1` frame as an
   additive trailing block (new `FLAG_GRID = 0x8`, after gravity: `u16 grid_w`,
